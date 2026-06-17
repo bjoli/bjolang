@@ -1,0 +1,11 @@
+(import (std list))
+(: foldl (-> (-> 'a 'b 'a) 'a (List 'b) 'a))
+(defun (foldl f init lst)
+  (if (is-empty lst)
+      init
+      (foldl f (f init (head lst)) (tail lst))))
+
+(defun (main argv)
+  (def lst (Cons 1 (Cons 2 (Cons 3 Nil))))
+  (print (foldl (fun (acc x) (+ acc x)) 0 lst))
+  0)

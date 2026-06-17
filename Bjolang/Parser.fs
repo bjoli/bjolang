@@ -1,0 +1,555 @@
+module Bjolang.Parser
+
+open Lexer
+
+// --- S-Expression Types ---
+type SExpr =
+    | SAtom of LexedToken
+    | SList of SExpr list * Range
+
+let getRange =
+    function
+    | SAtom t -> t.Range
+    | SList(_, r) -> r
+
+// --- AST Types ---
+// Every node carries a Range to enable #line emission.
+
+type FType =
+    | TName of string * Range
+    | TApp of string * FType list * Range
+
+type UnionCase =
+    | SimpleCase of string * Range
+    | DataCase of string * FType list * Range
+
+type RecordField =
+    { Name: string
+      Type: FType
+      Range: Range }
+
+type TypeDefKind =
+    | Alias of FType
+    | Union of UnionCase list
+    | Record of RecordField list
+
+type TypeDef =
+    { Name: string
+      TypeArgs: string list
+      Kind: TypeDefKind
+      Range: Range }
+
+
+type Pattern =
+    | PWildcard of Range
+    | PIdent of string * Range
+    | PInt of string * Range
+    | PString of string * Range
+    | PList of Pattern list * Pattern option * Range // (items, optional tail, range)
+    | PConstruct of string * Pattern list * Range
+
+type Expr =
+    | EInt of string * Range
+    | EString of string * Range
+    | EQuotedSymbol of string * Range
+    | EKeyword of string * Range
+    | EIdent of string * Range
+    | ETuple of Expr list * Range
+    | EApp of Expr * Expr list * Range
+    // ELet (name, isFun, args, body, restOfScope, range)
+    | ELet of string * bool * string list * Expr * Expr * Range
+    // ELetRec (bindings, restOfScope, range)
+    // binding tuple: (name, isFun, args, body)
+    | ELetRec of (string * bool * string list * Expr) list * Expr * Range
+    | ELetTuple of string list * Expr * Expr * Range
+    | ELetMutable of string * Expr * Expr * Range
+    | ESet of string * Expr * Range
+    | EIf of Expr * Expr * Expr * Range
+    | EFun of string list * Expr * Range
+    | ERecord of (string * Expr) list * Range
+    | ERecordUpdate of string * (string * Expr) list * Range
+    | EGetField of Expr * string * Range
+    | EList of Expr list * Range
+    | EMatch of Expr * (Pattern * Expr option * Expr) list * Range
+    | ETryFinally of Expr * Expr * Range
+
+type ImportSpec =
+    | RelativePath of string
+    | ModulePath of string list
+
+type Decl =
+    | DSignature of string * FType * Range
+    | DImport of ImportSpec list * Range
+    | DExport of string list * Range
+    | DModule of string * Decl list * Range
+    | DDef of string * Expr * Range
+    | DDefTuple of string list * Expr * Range
+    | DDefMutable of string * Expr * Range
+    | DDefun of string * (string * FType option) list * FType option * Expr * Range
+    | DType of TypeDef list * Range
+    | DTypeRec of TypeDef list * Range
+    // DTrait (Name, ImplementorVar, AssociatedTypes, Signatures, Range)
+    | DTrait of string * string * string list * (string * FType) list * Range
+    
+    // DImpl (TraitName, TargetType, AssociatedTypeBindings, Methods, Range)
+    | DImpl of string * FType * (string * FType) list * Decl list * Range
+
+// --- Parser ---
+
+let rec parsePattern (s: SExpr) : Pattern =
+    let r = getRange s
+
+    match s with
+    | SAtom { Token = Symbol "_" } -> PWildcard r
+    | SAtom { Token = Symbol sym } -> PIdent(sym, r)
+    | SAtom { Token = NumberLit n } -> PInt(n, r)
+    | SAtom { Token = StringLit str } -> PString(str, r)
+
+    // Special handling for List patterns and the spread operator
+    | SList(SAtom { Token = Symbol "List" } :: args, _) ->
+        let rec processListArgs acc items =
+            match items with
+            | [] -> (List.rev acc, None)
+            // Matches `c ...` at the end of the list
+            | [ tailItem; SAtom { Token = Spread } ] -> (List.rev acc, Some(parsePattern tailItem))
+            // Fails if spread is used incorrectly (e.g., in the middle of the list)
+            | SAtom { Token = Spread } :: _ -> failwithf $"Invalid use of spread operator at line %d{r.Start.Line}"
+            | head :: tail -> processListArgs (parsePattern head :: acc) tail
+
+        let elements, tail = processListArgs [] args
+        PList(elements, tail, r)
+
+    | SList(SAtom { Token = Symbol name } :: args, _) -> PConstruct(name, List.map parsePattern args, r)
+
+    | SList([], _) -> PList([], None, r) // Empty list pattern
+
+    | _ -> failwithf $"Invalid pattern at line %d{r.Start.Line}"
+
+let rec parseType (s: SExpr) : FType =
+    let r = getRange s
+
+    match s with
+    | SAtom { Token = QuotedSymbol sym } -> TName("'" + sym, r)
+    | SAtom { Token = Symbol sym }
+    | SAtom { Token = TypeVar sym } -> TName(sym, r)
+    | SList(SAtom { Token = Symbol name } :: typeArgs, _) -> TApp(name, List.map parseType typeArgs, r)
+    | _ -> failwithf $"Invalid type syntax at line %d{r.Start.Line}"
+
+let parseUnionCase (s: SExpr) : UnionCase =
+    let r = getRange s
+
+    match s with
+    | SAtom { Token = Symbol name } -> SimpleCase(name, r)
+    | SList(SAtom { Token = Colon } :: SAtom { Token = Symbol name } :: tTypes, _) -> DataCase(name, List.map parseType tTypes, r)
+    | _ ->
+        printfn $"%A{s}"
+        failwithf $"Invalid union case at line %d{r.Start.Line}"
+
+let parseRecordField (s: SExpr) : RecordField =
+    let r = getRange s
+
+    match s with
+    | SList([ SAtom { Token = Colon }; SAtom { Token = Symbol name }; tType ], _) ->
+        { Name = name
+          Type = parseType tType
+          Range = r }
+    | _ -> failwithf $"Invalid record field at line %d{r.Start.Line}"
+
+let parseTypeDefHead (head: SExpr) : string * string list =
+    match head with
+    | SAtom { Token = Symbol name } -> name, []
+    | SList(SAtom { Token = Symbol name } :: args, _) ->
+        let parseTypeArg = function
+            | SAtom { Token = QuotedSymbol ta } -> ta
+            | SAtom { Token = Symbol s } -> s // Just in case they are not quoted
+            | _ -> failwithf $"Invalid type argument at line %d{(getRange head).Start.Line}"
+        name, List.map parseTypeArg args
+    | _ -> failwithf $"Invalid type definition head at line %d{(getRange head).Start.Line}"
+
+let parseTypeDef (s: SExpr) : TypeDef =
+    let r = getRange s
+
+    match s with
+    | SList([ SAtom { Token = Colon }
+              head
+              SList(SAtom { Token = Symbol "Record" } :: fields, _) ],
+            _) ->
+        let name, typeArgs = parseTypeDefHead head
+        { Name = name
+          TypeArgs = typeArgs
+          Kind = Record(List.map parseRecordField fields)
+          Range = r }
+    | SList([ SAtom { Token = Colon }; head; aliasType ], _) ->
+        let name, typeArgs = parseTypeDefHead head
+        { Name = name
+          TypeArgs = typeArgs
+          Kind = Alias(parseType aliasType)
+          Range = r }
+    | SList(head :: cases, _) ->
+        let name, typeArgs = parseTypeDefHead head
+        { Name = name
+          TypeArgs = typeArgs
+          Kind = Union(List.map parseUnionCase cases)
+          Range = r }
+    | _ -> failwithf $"Invalid type definition at line %d{r.Start.Line}"
+
+let parseDefunArg (arg: SExpr) : (string * FType option) =
+    match arg with
+    | SAtom { Token = Symbol n } -> (n, None)
+    | SList([ SAtom { Token = Colon }; SAtom { Token = Symbol n }; t ], _) -> (n, Some(parseType t))
+    | _ -> failwith "Invalid defun argument"
+
+let parseDefunArgs (args: SExpr list) : (string * FType option) list = args |> List.map parseDefunArg
+
+let parseDefunRest (rest: SExpr list) : (FType option * SExpr list) =
+    match rest with
+    | SAtom { Token = Colon } :: t :: body -> (Some(parseType t), body)
+    | body -> (None, body)
+
+let rec parseExpr (s: SExpr) : Expr =
+    let r = getRange s
+
+    let rec processArgs items =
+        match items with
+        | [] -> []
+        | SAtom { Token = Comma } :: rest -> processArgs rest
+        | SAtom { Token = TypeVar "" } :: SList(inner, rInner) :: rest ->
+            EList(processArgs inner, rInner) :: processArgs rest
+        | item :: rest -> parseExpr item :: processArgs rest
+
+    // Treat specific operator tokens as valid identifiers in expressions
+    let (|Ident|_|) =
+        function
+        | SAtom { Token = Symbol "#t" } -> Some "true"
+        | SAtom { Token = Symbol "#f" } -> Some "false"
+        | SAtom { Token = Symbol sym } -> Some sym
+        | SAtom { Token = Equals } -> Some "="
+        | SAtom { Token = LAngle } -> Some "<"
+        | SAtom { Token = RAngle } -> Some ">"
+        | _ -> None
+
+    match s with
+    | SAtom { Token = NumberLit n } -> EInt(n, r)
+    | SAtom { Token = StringLit str } -> EString(str, r)
+    | SAtom { Token = QuotedSymbol sym } -> EQuotedSymbol(sym, r)
+    | SAtom { Token = Keyword sym } -> EKeyword(sym, r)
+    | Ident sym -> EIdent(sym, r)
+
+    | SList(head :: args, listRange) ->
+        match head with
+        | Ident sym ->
+            match sym with
+            | "let" ->
+                match args with
+                | SList(bindings, _) :: bodyExprs ->
+                    let body = parseBody bodyExprs listRange
+
+                    List.foldBack
+                        (fun bind acc ->
+                            match bind with
+                            | SList([ Ident k; v ], _) -> ELet(k, false, [], parseExpr v, acc, getRange bind)
+                            | _ -> failwith "Invalid let binding")
+                        bindings
+                        body
+                | Ident name :: SList(bindings, _) :: bodyExprs ->
+                    // Named let
+                    let parsedBindings =
+                        bindings
+                        |> List.map (function
+                            | SList([ Ident k; v ], _) -> (k, parseExpr v)
+                            | _ -> failwith "Invalid named let binding")
+                    
+                    let argNames = parsedBindings |> List.map fst
+                    let argVals = parsedBindings |> List.map snd
+                    let body = parseBody bodyExprs listRange
+                    let funcBinding = (name, true, argNames, body)
+                    ELetRec([funcBinding], EApp(EIdent(name, r), argVals, r), r)
+                | _ -> failwith "Invalid let syntax"
+
+            | "letrec" ->
+                match args with
+                | SList(bindings, _) :: bodyExprs ->
+                    let parsedBindings =
+                        bindings
+                        |> List.map (function
+                            // Standard explicit letrec assumes value bindings or manually desugared lambdas
+                            | SList([ Ident k; v ], _) -> (k, false, [], parseExpr v)
+                            | _ -> failwith "Invalid letrec binding")
+
+                    ELetRec(parsedBindings, parseBody bodyExprs listRange, r)
+                | _ -> failwith "Invalid letrec syntax"
+            | "set!" ->
+                match args with
+                | [ Ident target; valExpr ] -> ESet(target, parseExpr valExpr, r)
+                | _ -> failwithf $"Invalid set! syntax at line %d{r.Start.Line}. Expected: (set! name value)"
+            | "if" ->
+                match args with
+                | [ cond; t; f ] -> EIf(parseExpr cond, parseExpr t, parseExpr f, r)
+                | _ -> failwith "Invalid if syntax"
+
+            | "and" ->
+                let rec buildAnd items =
+                    match items with
+                    | [] -> EIdent("true", listRange)
+                    | [last] -> parseExpr last
+                    | current :: rest -> 
+                        EIf(parseExpr current, buildAnd rest, EIdent("false", listRange), listRange)
+                buildAnd args
+
+            | "or" ->
+                let rec buildOr items =
+                    match items with
+                    | [] -> EIdent("false", listRange)
+                    | [last] -> parseExpr last
+                    | current :: rest ->
+                        EIf(parseExpr current, EIdent("true", listRange), buildOr rest, listRange)
+                buildOr args
+
+            | "not" ->
+                match args with
+                | [arg] -> EIf(parseExpr arg, EIdent("false", listRange), EIdent("true", listRange), listRange)
+                | _ -> failwithf $"Invalid not syntax at line %d{r.Start.Line}"
+
+            | "fun" ->
+                match args with
+                | SList(fargs, _) :: bodyExprs ->
+                    let argNames =
+                        fargs
+                        |> List.choose (function
+                            | Ident n -> Some n
+                            | SAtom { Token = Comma } -> None
+                            | _ -> failwith "Expected arg name")
+
+                    EFun(argNames, parseBody bodyExprs listRange, r)
+                | _ -> failwith "Invalid fun syntax"
+
+            | "match" ->
+                match args with
+                | targetExpr :: clauses ->
+                    let target = parseExpr targetExpr
+
+                    let parsedClauses =
+                        clauses
+                        |> List.map (fun clause ->
+                            let rClause = getRange clause
+
+                            match clause with
+                            // Clause with a guard: (pattern #:when guard body...)
+                            | SList(pattern :: SAtom { Token = Keyword "when" } :: guard :: bodyExprs, _) ->
+                                (parsePattern pattern, Some(parseExpr guard), parseBody bodyExprs rClause)
+                            // Standard clause: (pattern body...)
+                            | SList(pattern :: bodyExprs, _) ->
+                                (parsePattern pattern, None, parseBody bodyExprs rClause)
+                            | _ -> failwithf $"Invalid match clause at line %d{rClause.Start.Line}")
+
+                    EMatch(target, parsedClauses, r)
+                | _ -> failwithf $"Invalid match syntax at line %d{r.Start.Line}"
+
+            | "record" ->
+                let fields =
+                    args
+                    |> List.choose (function
+                        | SList([ Ident k; v ], _) -> Some(k, parseExpr v)
+                        | _ -> None)
+
+                ERecord(fields, r)
+
+            | "record-set" ->
+                match args with
+                | Ident baseRec :: fields ->
+                    let parsedFields =
+                        fields
+                        |> List.map (function
+                            | SList([ Ident k; v ], _) -> (k, parseExpr v)
+                            | _ -> failwith "Invalid record-set field")
+
+                    ERecordUpdate(baseRec, parsedFields, r)
+                | _ -> failwith "Invalid record-set syntax"
+            
+            | "record-get" ->
+                match args with
+                | [ target; Ident field ] ->
+                    EGetField(parseExpr target, field, r)
+                | _ -> failwith "Invalid record-get syntax"
+
+            | "Tuple" -> ETuple(processArgs args, listRange)
+
+
+
+            // Standard function application
+            | _ -> EApp(EIdent(sym, getRange head), processArgs args, listRange)
+
+
+        | _ ->
+            // Fallback for tuples or unquoted lists
+            EApp(parseExpr head, processArgs args, listRange)
+
+    | SList([], listRange) -> ETuple([], listRange)
+
+    // Explicit token catches for better debugging
+    | SAtom { Token = Comma } -> failwithf $"Unexpected comma at line %d{r.Start.Line}"
+    | SAtom { Token = TypeVar "" } -> failwithf $"Unexpected quote at line %d{r.Start.Line}"
+    | _ -> failwithf $"Unexpected expression at line %d{r.Start.Line}"
+
+and parseBody (exprs: SExpr list) (fallbackRange: Range) : Expr =
+    let rec collectDefs acc remaining =
+        match remaining with
+        // 1. Standard value definition (def name expr)
+        | SList(SAtom { Token = Symbol "def" } :: SAtom { Token = Symbol name } :: [ expr ], _) :: rest ->
+            // isFun = false, args = []
+            collectDefs ((name, false, [], parseExpr expr) :: acc) rest
+
+        // 1b. Annotated value definition (def (: name type) expr)
+        | SList(SAtom { Token = Symbol "def" } :: SList([ SAtom { Token = Colon }; SAtom { Token = Symbol name }; tType ], _) :: [ expr ], _) :: rest ->
+            // We ignore the type annotation for now, as ELet has no type annotation parameter
+            collectDefs ((name, false, [], parseExpr expr) :: acc) rest
+
+        // 2. Local function definition (defun (name args...) body)
+        | SList(SAtom { Token = Symbol "defun" } :: SList(SAtom { Token = Symbol name } :: args, _) :: rest, r) :: rest' ->
+            let argNames = parseDefunArgs args |> List.map fst
+            let _, bodyExprs = parseDefunRest rest
+            let fBody = parseBody bodyExprs r
+            // isFun = true, args = argNames
+            collectDefs ((name, true, argNames, fBody) :: acc) rest'
+
+        | _ -> (List.rev acc, remaining)
+
+    and parseItems remaining =
+        match remaining with
+        | [] -> ETuple([], fallbackRange)
+
+        // 1. Intercept local mutable definitions FIRST
+        | SList(SAtom { Token = Symbol "def/mutable" } :: SAtom { Token = Symbol name } :: [ expr ], r) :: rest ->
+            ELetMutable(name, parseExpr expr, parseItems rest, fallbackRange)
+
+        | SList(SAtom { Token = Symbol "def/mutable" } :: SList([ SAtom { Token = Colon }; SAtom { Token = Symbol name }; tType ], _) :: [ expr ], r) :: rest ->
+            ELetMutable(name, parseExpr expr, parseItems rest, fallbackRange)
+
+        // 2. Starts with def or defun: collect consecutive defs into a letrec block
+        | (SList(SAtom { Token = Symbol "def" } :: _, _)) :: _
+        | (SList(SAtom { Token = Symbol "defun" } :: _, _)) :: _ ->
+            let defs, rest = collectDefs [] remaining
+            ELetRec(defs, parseItems rest, fallbackRange)
+
+        // 3. Single expression left — no sequencing wrapper needed
+        | [ expr ] -> parseExpr expr
+
+        // 4. Multiple expressions — sequence them with ELet (isFun = false, empty args)
+        | expr :: rest -> ELet("_", false, [], parseExpr expr, parseItems rest, fallbackRange)
+
+    parseItems exprs
+
+let rec parseDecl (s: SExpr) : Decl =
+    let r = getRange s
+
+    match s with
+    | SList([ SAtom { Token = Colon }; SAtom { Token = Symbol name }; tType ], _) ->
+        DSignature(name, parseType tType, r)
+
+    | SList(SAtom { Token = Symbol "import" } :: imports, _) ->
+        // Parse paths like (io readline) into ["io"; "readline"]
+        let parseImportPath =
+            function
+            | SAtom { Token = StringLit s } -> RelativePath s
+            | SList(pathNodes, _) ->
+                pathNodes
+                |> List.map (function
+                    | SAtom { Token = Symbol p } -> p
+                    | _ -> failwithf $"Invalid import path element at line %d{r.Start.Line}")
+                |> ModulePath
+            | _ -> failwithf $"Invalid import syntax at line %d{r.Start.Line}"
+
+        DImport(List.map parseImportPath imports, r)
+
+    | SList(SAtom { Token = Symbol "export" } :: exports, _) ->
+        // Parse items like poop-on-you
+        let exportNames =
+            exports
+            |> List.map (function
+                | SAtom { Token = Symbol e } -> e
+                | _ -> failwithf $"Invalid export item at line %d{r.Start.Line}")
+
+        DExport(exportNames, r)
+
+    | SList(SAtom { Token = Symbol "module" } :: SAtom { Token = Symbol name } :: body, _) ->
+        DModule(name, List.map parseDecl body, r)
+
+    | SList(SAtom { Token = Symbol "def" } :: SAtom { Token = Symbol name } :: [ expr ], _) ->
+        DDef(name, parseExpr expr, r)
+
+    | SList(SAtom { Token = Symbol "def" } :: SList([ SAtom { Token = Colon }; SAtom { Token = Symbol name }; tType ], _) :: [ expr ], _) ->
+        DDef(name, parseExpr expr, r)
+
+    | SList(SAtom { Token = Symbol "def" } :: SList(names, _) :: [ expr ], _) ->
+        let tupleNames =
+            names
+            |> List.map (function
+                | SAtom { Token = Symbol n } -> n
+                | SAtom { Token = Comma } -> ""
+                | _ -> failwith "Invalid tuple def")
+            |> List.filter ((<>) "")
+
+        DDefTuple(tupleNames, parseExpr expr, r)
+
+    | SList(SAtom { Token = Symbol "def/mutable" } :: SAtom { Token = Symbol name } :: [ expr ], _) ->
+        DDefMutable(name, parseExpr expr, r)
+
+    | SList(SAtom { Token = Symbol "def/mutable" } :: SList([ SAtom { Token = Colon }; SAtom { Token = Symbol name }; tType ], _) :: [ expr ], _) ->
+        DDefMutable(name, parseExpr expr, r)
+
+    | SList(SAtom { Token = Symbol "defun" } :: SList(SAtom { Token = Symbol name } :: args, _) :: rest, _) ->
+        let parsedArgs = parseDefunArgs args
+        let retType, bodyExprs = parseDefunRest rest
+        DDefun(name, parsedArgs, retType, parseBody bodyExprs r, r)
+    | SList(SAtom { Token = Symbol "type" } :: typeDefs, _) -> DType(List.map parseTypeDef typeDefs, r)
+
+    | SList(SAtom { Token = Symbol "type-rec" } :: typeDefs, _) -> DTypeRec(List.map parseTypeDef typeDefs, r)
+
+    | SList (SAtom { Token = Symbol "def/trait" } :: 
+             SList (SAtom { Token = Symbol traitName } :: [ SAtom { Token = QuotedSymbol implementorVar } ], _) :: 
+             body, r) ->
+        
+        let mutable assocTypes = []
+        let mutable signatures = []
+
+        for item in body do
+            match item with
+            // Match: (type 'item)
+            | SList (SAtom { Token = Symbol "type" } :: SAtom { Token = QuotedSymbol assocName } :: [], _) ->
+                assocTypes <- assocName :: assocTypes
+            
+            // Match: (: methodName signatureExpr)
+            | SList (SAtom { Token = Colon } :: SAtom { Token = Symbol methodName } :: typeExpr :: [], _) ->
+                signatures <- (methodName, parseType typeExpr) :: signatures
+            
+            | _ -> failwithf $"Syntax error in def/trait '%s{traitName}': Expected (type ...) or (: ...)."
+
+        DTrait (traitName, implementorVar, List.rev assocTypes, List.rev signatures, r)
+
+    // Parse: (def/impl (TraitName (Vec 'a)) (type 'item 'a) (defun (get v i) ...))
+    | SList (SAtom { Token = Symbol "def/impl" } :: 
+             SList (SAtom { Token = Symbol traitName } :: targetTypeExpr :: [], _) :: 
+             body, r) ->
+        
+        let targetType = parseType targetTypeExpr
+        
+        let mutable assocBindings = []
+        let mutable methods = []
+
+        for item in body do
+            match item with
+            // Match: (type 'item targetType)
+            | SList (SAtom { Token = Symbol "type" } :: SAtom { Token = QuotedSymbol assocName } :: boundTypeExpr :: [], _) ->
+                assocBindings <- (assocName, parseType boundTypeExpr) :: assocBindings
+            
+            // Match: (defun ...)
+            | SList (SAtom { Token = Symbol "defun" } :: _, _) as defunExpr ->
+                methods <- parseDecl defunExpr :: methods
+            
+            | _ -> failwithf $"Syntax error in def/impl for '%s{traitName}': Expected (type ...) or (defun ...)."
+
+        DImpl (traitName, targetType, List.rev assocBindings, List.rev methods, r)
+    
+    | _ -> failwithf $"Unknown declaration at line %d{r.Start.Line}"
+
+let parseModule (exprs: SExpr list) : Decl list = List.map parseDecl exprs
