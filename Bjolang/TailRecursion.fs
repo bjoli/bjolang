@@ -1,97 +1,87 @@
 module Bjolang.TailRecursion
 
 open Bjolang.TypeChecker
-open Bjolang.Lexer
 
-let rec analyzeExpr (inTailPosition: bool) (currentFuncName: string option) (expr: FExpr) : FExpr =
+let rec analyzeExpr (inTailPosition: bool) (currentFuncName: string option) (expr: TypedExpr) : TypedExpr =
     let mapNode node =
         match node with
-        | FInt _ | FString _ | FKeyword _ | FSymbol _ | FNull | FNewObject _ | FIdent _ -> node
-        
-        | FApply (t, args, _) ->
+        | TInt _ | TString _ | TKeyword _ | TSymbol _ | TIdent _ -> node
+
+        | TApply (t, args, _) ->
             let isSelfRecursive =
                 match currentFuncName, t.Node with
-                | Some cName, FIdent(tName, _) when cName = tName -> true
+                | Some cName, TIdent(tName, _) when cName = tName -> true
                 | _ -> false
-                
+
             let newArgs = args |> List.map (analyzeExpr false currentFuncName)
-            
+
             if isSelfRecursive && inTailPosition then
-                FTailCall newArgs
+                TApply (analyzeExpr false currentFuncName t, newArgs, true)
             else
-                FApply (analyzeExpr false currentFuncName t, newArgs, inTailPosition)
-                
-        | FTailCall args ->
-            // Already a tail call? Shouldn't happen before this pass, but just in case.
-            FTailCall (args |> List.map (analyzeExpr false currentFuncName))
-            
-        | FInterfaceCall (i, m, d, args, _) ->
-            FInterfaceCall (i, m, analyzeExpr false currentFuncName d, args |> List.map (analyzeExpr false currentFuncName), inTailPosition)
-            
-        | FIf (c, t, f) ->
-            FIf (analyzeExpr false currentFuncName c, analyzeExpr inTailPosition currentFuncName t, analyzeExpr inTailPosition currentFuncName f)
-            
-        | FLet (n, isFun, args, v, b) ->
+                TApply (analyzeExpr false currentFuncName t, newArgs, false)
+
+        | TInterfaceCall (i, m, d, args) ->
+            TInterfaceCall (i, m, analyzeExpr false currentFuncName d, args |> List.map (analyzeExpr false currentFuncName))
+
+        | TIf (c, t, f) ->
+            TIf (analyzeExpr false currentFuncName c, analyzeExpr inTailPosition currentFuncName t, analyzeExpr inTailPosition currentFuncName f)
+
+        | TLet (n, isFun, args, v, b) ->
             let newFuncName = if isFun then Some n else currentFuncName
             let vTail = if isFun then true else false
-            FLet (n, isFun, args, analyzeExpr vTail newFuncName v, analyzeExpr inTailPosition currentFuncName b)
-            
-        | FLetRec (bindings, b) ->
-            let newBindings = 
+            TLet (n, isFun, args, analyzeExpr vTail newFuncName v, analyzeExpr inTailPosition currentFuncName b)
+
+        | TLetRec (bindings, b) ->
+            let newBindings =
                 bindings |> List.map (fun (n, isFun, args, v) ->
                     n, isFun, args, analyzeExpr true (Some n) v
                 )
-            FLetRec (newBindings, analyzeExpr inTailPosition currentFuncName b)
-            
-        | FLetMutable (n, v, b) ->
-            FLetMutable (n, analyzeExpr false currentFuncName v, analyzeExpr inTailPosition currentFuncName b)
-            
-        | FLetTuple (names, v, b) ->
-            FLetTuple (names, analyzeExpr false currentFuncName v, analyzeExpr inTailPosition currentFuncName b)
-            
-        | FMatch (e, clauses) ->
-            let newClauses = 
+            TLetRec (newBindings, analyzeExpr inTailPosition currentFuncName b)
+
+        | TLetMutable (n, v, b) ->
+            TLetMutable (n, analyzeExpr false currentFuncName v, analyzeExpr inTailPosition currentFuncName b)
+
+        | TLetTuple (names, v, b) ->
+            TLetTuple (names, analyzeExpr false currentFuncName v, analyzeExpr inTailPosition currentFuncName b)
+
+        | TMatch (e, clauses) ->
+            let newClauses =
                 clauses |> List.map (fun c ->
                     { c with Guard = Option.map (analyzeExpr false currentFuncName) c.Guard
                              Body = analyzeExpr inTailPosition currentFuncName c.Body }
                 )
-            FMatch (analyzeExpr false currentFuncName e, newClauses)
-            
-        | FTryFinally (b, c) ->
-            // The CLR forbids .tail inside try blocks
-            FTryFinally (analyzeExpr false currentFuncName b, analyzeExpr false currentFuncName c)
-            
-        | FTupleMake exprs -> FTupleMake (List.map (analyzeExpr false currentFuncName) exprs)
-        | FListMake exprs -> FListMake (List.map (analyzeExpr false currentFuncName) exprs)
-        | FRecordMake fields -> FRecordMake (fields |> List.map (fun (k, v) -> k, analyzeExpr false currentFuncName v))
-        | FRecordUpdate (bRec, fields) -> FRecordUpdate (bRec, fields |> List.map (fun (k, v) -> k, analyzeExpr false currentFuncName v))
-        
-        | FLambda (args, b) ->
-            // Enter new closure, reset currentFuncName to avoid accidental tail-call of outer function
-            FLambda (args, analyzeExpr true None b)
-            
-        | FSet (n, v) -> FSet (n, analyzeExpr false currentFuncName v)
-        | FSetField (o, f, v) -> FSetField (analyzeExpr false currentFuncName o, f, analyzeExpr false currentFuncName v)
-        | FIsInst (e, t) -> FIsInst (analyzeExpr false currentFuncName e, t)
-        | FGetField (e, f) -> FGetField (analyzeExpr false currentFuncName e, f)
-        | FTypeEq (e1, e2) -> FTypeEq (analyzeExpr false currentFuncName e1, analyzeExpr false currentFuncName e2)
-        | FCreateDelegate (name, tgtOpt) -> FCreateDelegate (name, Option.map (analyzeExpr false currentFuncName) tgtOpt)
-        
+            TMatch (analyzeExpr false currentFuncName e, newClauses)
+
+        | TTryFinally (b, c) ->
+            TTryFinally (analyzeExpr false currentFuncName b, analyzeExpr false currentFuncName c)
+
+        | TTupleMake exprs -> TTupleMake (List.map (analyzeExpr false currentFuncName) exprs)
+        | TListMake exprs -> TListMake (List.map (analyzeExpr false currentFuncName) exprs)
+        | TRecordMake fields -> TRecordMake (fields |> List.map (fun (k, v) -> k, analyzeExpr false currentFuncName v))
+        | TRecordUpdate (n, fields) -> TRecordUpdate (n, fields |> List.map (fun (k, v) -> k, analyzeExpr false currentFuncName v))
+
+        | TLambda (args, b) ->
+            TLambda (args, analyzeExpr true None b)
+
+        | TSet (n, v) -> TSet (n, analyzeExpr false currentFuncName v)
+        | TGetField (e, f) -> TGetField (analyzeExpr false currentFuncName e, f)
+        | TIsInst (e, t) -> TIsInst (analyzeExpr false currentFuncName e, t)
+        | TCast (e, t) -> TCast (analyzeExpr false currentFuncName e, t)
+        | TTypeEq (e1, e2) -> TTypeEq (analyzeExpr false currentFuncName e1, analyzeExpr false currentFuncName e2)
+
     { expr with Node = mapNode expr.Node }
 
-let rec analyzeDecl (decl: FDecl) : FDecl =
+let rec analyzeDecl (decl: TDecl) : TDecl =
     match decl with
-    | FModule (n, decls, r) -> FModule (n, List.map analyzeDecl decls, r)
-    | FDef (n, e, t, r) -> FDef (n, analyzeExpr false None e, t, r)
-    | FDefTuple (names, e, t, r) -> FDefTuple (names, analyzeExpr false None e, t, r)
-    | FDefMutable (n, e, t, r) -> FDefMutable (n, analyzeExpr false None e, t, r)
-    | FDefun (n, tyArgs, args, retType, body, r) ->
-        FDefun (n, tyArgs, args, retType, analyzeExpr true (Some n) body, r)
-    | FImpl (traitName, targetType, assocBindings, methods, r) ->
-        FImpl (traitName, targetType, assocBindings, List.map analyzeDecl methods, r)
-    | FDisplayClass (n, fields, methods, r) ->
-        FDisplayClass (n, fields, List.map analyzeDecl methods, r)
+    | TModule (n, decls, r) -> TModule (n, List.map analyzeDecl decls, r)
+    | TDef (n, e, t, r) -> TDef (n, analyzeExpr false None e, t, r)
+    | TDefTuple (names, e, t, r) -> TDefTuple (names, analyzeExpr false None e, t, r)
+    | TDefMutable (n, e, t, r) -> TDefMutable (n, analyzeExpr false None e, t, r)
+    | TDefun (n, tyArgs, args, retType, body, r) ->
+        TDefun (n, tyArgs, args, retType, analyzeExpr true (Some n) body, r)
+    | TImpl (traitName, targetType, assocBindings, methods, r) ->
+        TImpl (traitName, targetType, assocBindings, List.map analyzeDecl methods, r)
     | _ -> decl
 
-let analyzeProgram (decls: FDecl list) : FDecl list =
+let analyzeProgram (decls: TDecl list) : TDecl list =
     List.map analyzeDecl decls

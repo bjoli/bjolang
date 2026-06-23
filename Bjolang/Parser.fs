@@ -56,6 +56,7 @@ type Expr =
     | EIdent of string * Range
     | ETuple of Expr list * Range
     | EApp of Expr * Expr list * Range
+    | ECast of FType * Expr * Range
     // ELet (name, isFun, args, body, restOfScope, range)
     | ELet of string * bool * string list * Expr * Expr * Range
     // ELetRec (bindings, restOfScope, range)
@@ -90,6 +91,7 @@ type Decl =
     | DTypeRec of TypeDef list * Range
     // DTrait (Name, ImplementorVar, AssociatedTypes, Signatures, Range)
     | DTrait of string * string * string list * (string * FType) list * Range
+    | DExtern of string * FType * Range
     
     // DImpl (TraitName, TargetType, AssociatedTypeBindings, Methods, Range)
     | DImpl of string * FType * (string * FType) list * Decl list * Range
@@ -101,7 +103,9 @@ let rec parsePattern (s: SExpr) : Pattern =
 
     match s with
     | SAtom { Token = Symbol "_" } -> PWildcard r
-    | SAtom { Token = Symbol sym } -> PIdent(sym, r)
+    | SAtom { Token = Symbol sym } -> 
+        if System.Char.IsUpper(sym.[0]) then PConstruct(sym, [], r)
+        else PIdent(sym, r)
     | SAtom { Token = NumberLit n } -> PInt(n, r)
     | SAtom { Token = StringLit str } -> PString(str, r)
 
@@ -213,6 +217,7 @@ let rec parseExpr (s: SExpr) : Expr =
         match items with
         | [] -> []
         | SAtom { Token = Comma } :: rest -> processArgs rest
+        // Handles quoted list syntax: '(items...) -> desugars to EList
         | SAtom { Token = TypeVar "" } :: SList(inner, rInner) :: rest ->
             EList(processArgs inner, rInner) :: processArgs rest
         | item :: rest -> parseExpr item :: processArgs rest
@@ -223,9 +228,6 @@ let rec parseExpr (s: SExpr) : Expr =
         | SAtom { Token = Symbol "#t" } -> Some "true"
         | SAtom { Token = Symbol "#f" } -> Some "false"
         | SAtom { Token = Symbol sym } -> Some sym
-        | SAtom { Token = Equals } -> Some "="
-        | SAtom { Token = LAngle } -> Some "<"
-        | SAtom { Token = RAngle } -> Some ">"
         | _ -> None
 
     match s with
@@ -239,6 +241,11 @@ let rec parseExpr (s: SExpr) : Expr =
         match head with
         | Ident sym ->
             match sym with
+            | "cast" ->
+                match args with
+                | [ typeSExpr; valSExpr ] ->
+                    ECast(parseType typeSExpr, parseExpr valSExpr, r)
+                | _ -> failwithf $"Invalid cast syntax at line %d{r.Start.Line}. Expected: (cast <type> <expr>)"
             | "let" ->
                 match args with
                 | SList(bindings, _) :: bodyExprs ->
@@ -422,6 +429,8 @@ and parseBody (exprs: SExpr list) (fallbackRange: Range) : Expr =
         | SList(SAtom { Token = Symbol "def/mutable" } :: SAtom { Token = Symbol name } :: [ expr ], r) :: rest ->
             ELetMutable(name, parseExpr expr, parseItems rest, fallbackRange)
 
+        // Annotated form: (def/mutable (: name type) expr) — type annotation is intentionally
+        // ignored here; the type checker will infer and verify the type from the initializer.
         | SList(SAtom { Token = Symbol "def/mutable" } :: SList([ SAtom { Token = Colon }; SAtom { Token = Symbol name }; tType ], _) :: [ expr ], r) :: rest ->
             ELetMutable(name, parseExpr expr, parseItems rest, fallbackRange)
 

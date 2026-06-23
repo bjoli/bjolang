@@ -13,11 +13,8 @@ module Lexer =
         | RParen
         | LBracket
         | RBracket
-        | LAngle
-        | RAngle
         | Comma
         | Colon
-        | Equals
         | Dot
         | Spread
         | StringLit of string
@@ -35,7 +32,7 @@ module Lexer =
 
         let isSymbolChar c =
             not (Char.IsWhiteSpace c)
-            && not (List.contains c [ '('; ')'; '['; ']'; '<'; '>'; ','; ':'; '='; '"'; ';'; '\'' ])
+            && not (List.contains c [ '('; ')'; '['; ']'; ','; ':'; '"'; ';'; '\'' ])
 
         let rec following charList pos =
             if List.isEmpty charList then
@@ -116,10 +113,7 @@ module Lexer =
                 | ')' -> emit RParen 1
                 | '[' -> emit LBracket 1
                 | ']' -> emit RBracket 1
-                | '<' -> emit LAngle 1
-                | '>' -> emit RAngle 1
                 | ',' -> emit Comma 1
-                | '=' -> emit Equals 1
                 // There are two types of keywords right now...
                 | ':' when pos + 1 < length && isSymbolChar input[pos + 1] ->
                     let nextPos = readSymbol (pos + 1)

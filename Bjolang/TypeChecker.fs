@@ -104,7 +104,7 @@ and TExprNode =
     | TLetRec of (string * bool * string list * TypedExpr) list * TypedExpr
     | TLetTuple of string list * TypedExpr * TypedExpr
     | TLambda of string list * TypedExpr
-    | TApply of TypedExpr * TypedExpr list
+    | TApply of TypedExpr * TypedExpr list * bool
     | TTupleMake of TypedExpr list
     | TListMake of TypedExpr list
     | TRecordMake of (string * TypedExpr) list
@@ -117,6 +117,7 @@ and TExprNode =
     | TInterfaceCall of HMType * string * TypedExpr * TypedExpr list
     // Lowered
     | TIsInst of TypedExpr * HMType
+    | TCast of TypedExpr * HMType
     | TGetField of TypedExpr * string
     | TTypeEq of TypedExpr * TypedExpr
 
@@ -137,6 +138,7 @@ type TDecl =
     | TTypeRec of TypeDef list * Range
     | TTrait of string * string * string list * Map<string, HMType> * Range
     | TImpl of string * HMType * Map<string, HMType> * TDecl list * Range
+    | TExtern of string * FType * Range
 
 type TraitConstraint =
     { TraitName: string
@@ -199,128 +201,6 @@ let addImplementation (traitName: string) (typeKey: string) (assocBindings: Map<
 
     { env with Registry = newRegistry }
 
-// --- IMMUTABLE FINAL AST (For Emission) ---
-
-/// Represents the completely resolved, strictly immutable type of an expression.
-/// Used by the IL Emitter to determine exact .NET primitive types, box/unbox operations,
-/// and method signature generation.
-type FinalType =
-    /// A concrete type constructor (e.g., "System.Int32", "List").
-    /// Emitted as TypeBuilder/Type references.
-    | FCon of string * FinalType list
-    /// A function type signature. Emitted as a .NET Delegate type (Func/Action)
-    /// or a direct MethodInfo signature depending on call context.
-    | FFun of FinalType list * FinalType
-    /// A tuple type. Emitted as System.Tuple<...> or a custom struct.
-    | FTuple of FinalType list
-    /// A rigid generic parameter (e.g., "'a"). The emitter maps this directly to
-    /// GenericTypeParameterBuilder instances on the enclosing class or method.
-    | FGeneric of string
-    | FInterface of string * FinalType list // e.g., FInterface("IGettable", [FGeneric "a"; FGeneric "b"])
-    | FClass of string // Represents the synthetic Display Class type
-
-/// The core AST node carrying both syntax and immutable type/location metadata.
-type FExpr =
-    { Type: FinalType
-      Range: Range
-      Node: FExprNode }
-
-and FPattern =
-    { Type: FinalType
-      Range: Range
-      Node: FPatternNode }
-
-/// Represents pattern matching constructs. Many of these are lowered
-/// into FExprNode equivalents before reaching the Emitter.
-and FPatternNode =
-    | FPWildcard
-    | FPInt of string
-    | FPString of string
-    | FPIdent of string
-    | FPList of FPattern list * FPattern option
-    | FPConstruct of string * FPattern list
-    | FPApp of FExpr * FPattern
-    | FPAs of FPattern * string
-
-/// The executable nodes of the AST. The Closure Conversion pass will consume this
-/// and produce a new AST where FLambda is eliminated.
-and FExprNode =
-    | FInt of string
-    | FString of string
-    /// A variable usage. The FinalType list contains the generic arguments
-    /// instantiated at this specific call site (essential for emitting MethodInfo.MakeGenericMethod).
-    | FIdent of string * FinalType list
-    | FKeyword of string
-    | FSymbol of string
-    /// Standard let binding. If isFun is true, `FExpr` is the function body and `string list` are its arguments.
-    /// The Closure pass must lift isFun=true bindings into methods or display classes.
-    | FLet of string * bool * string list * FExpr * FExpr
-    /// Mutually recursive bindings. Contains closures that must reference themselves.
-    /// Emitted by allocating display classes first, then assigning method pointers to break the cycle.
-    | FLetRec of (string * bool * string list * FExpr) list * FExpr
-    | FLetTuple of string list * FExpr * FExpr
-    /// An anonymous inline function. Must be explicitly lifted by Closure Conversion
-    /// into a synthetic method or class before IL generation.
-    | FLambda of string list * FExpr
-    /// Function invocation. The Emitter checks if the target is a Delegate (emits Invoke)
-    /// or a direct method reference (emits Call/Callvirt).
-    | FApply of FExpr * FExpr list * bool
-    /// Explicit jump for self-recursive calls
-    | FTailCall of FExpr list
-    | FTupleMake of FExpr list
-    | FListMake of FExpr list
-    | FRecordMake of (string * FExpr) list
-    | FRecordUpdate of string * (string * FExpr) list
-    | FLetMutable of string * FExpr * FExpr
-    | FSet of string * FExpr
-    | FIf of FExpr * FExpr * FExpr
-    | FTryFinally of FExpr * FExpr
-    /// High-level match. The Emitter never sees this; the MatchCompiler lowers it first.
-    | FMatch of FExpr * FMatchClause list
-    // FInterfaceCall(InterfaceType, MethodName, DictionaryInstance, Arguments, IsTail)
-    | FInterfaceCall of FinalType * string * FExpr * FExpr list * bool
-
-    // --- LOWERED PRIMITIVES ---
-    /// Emits the `isinst` IL instruction for type testing.
-    | FIsInst of FExpr * FinalType
-    /// Emits `ldfld` or a property getter call.
-    | FGetField of FExpr * string
-    /// Emits the `ceq` IL instruction or calls Object.Equals for reference types.
-    | FTypeEq of FExpr * FExpr
-
-    // --- CLOSURE CONVERSION NODES ---
-    /// Represents a dummy value (e.g., null or uninitialized reference) used during letrec desugaring
-    | FNull
-    /// Allocates a new object of the given type.
-    | FNewObject of FinalType
-    /// Mutates a field on an object. Maps to `stfld`.
-    | FSetField of FExpr * string * FExpr
-    /// Instantiates a delegate wrapping the given method name on the given optional instance.
-    | FCreateDelegate of string * FExpr option
-
-and FMatchClause =
-    { Pattern: FPattern
-      Guard: FExpr option
-      Body: FExpr }
-
-/// Top-level module declarations. The Emitter maps these to static fields,
-/// static methods, and top-level CLR Types.
-type FDecl =
-    | FImport of ImportSpec list * Range
-    | FExport of string list * Range
-    | FModule of string * FDecl list * Range
-    | FDef of string * FExpr * FinalType * Range
-    | FDefTuple of string list * FExpr * FinalType * Range
-    | FDefMutable of string * FExpr * FinalType * Range
-    /// Top-level function. Contains its own generic type parameters and explicitly typed arguments.
-    /// Emitted as a generic static method on the Module's static class.
-    | FDefun of string * string list * (string * FinalType) list * FinalType * FExpr * Range
-    | FType of TypeDef list * Range
-    | FTypeRec of TypeDef list * Range
-    | FTrait of string * string * string list * Map<string, FinalType> * Range
-    | FImpl of string * FinalType * Map<string, FinalType> * FDecl list * Range
-    /// Represents a synthetic display class generated during closure conversion
-    | FDisplayClass of string * (string * FinalType) list * FDecl list * Range
 
 // --- UNIFICATION ENGINE ---
 let mutable nextMetaId = 0
@@ -381,14 +261,7 @@ let instantiate
         | TVar name ->
             match Map.tryFind name boundSubst with
             | Some fresh -> fresh
-            | None ->
-                match Map.tryFind name unboundSubst with
-                | Some fresh -> fresh
-                | None ->
-                    let fresh = freshMeta ()
-                    unboundSubst <- Map.add name fresh unboundSubst
-                    unboundFreshTypes <- unboundFreshTypes @ [ fresh ]
-                    fresh
+            | None -> node
         | TFun(args, ret) -> TFun(List.map walk args, walk ret)
         | TCon(name, args) -> TCon(name, List.map walk args)
         | TTuple args -> TTuple(List.map walk args)
@@ -456,18 +329,45 @@ let envFreeVars (env: Env) : Set<MetaVar> =
         | Scheme(_, _, t) -> freeVars env.Registry t)
     |> Set.ofList
 
+let rec freeTVars (registry: TraitRegistry) (t: HMType) : string list =
+    match prune registry t with
+    | TVar name -> [ name ]
+    | TMeta _ -> []
+    | TCon(_, args) -> List.collect (freeTVars registry) args
+    | TFun(args, ret) -> (List.collect (freeTVars registry) args) @ (freeTVars registry ret)
+    | TTuple args -> List.collect (freeTVars registry) args
+    | TAssoc(_, _, impl) -> freeTVars registry impl
+
 let generalize (env: Env) (t: HMType) : Scheme =
     let envFv = envFreeVars env
     let tFv = freeVars env.Registry t |> List.distinct
     let generalizable = tFv |> List.filter (fun m -> not (Set.contains m envFv))
-    let typeNames = generalizable |> List.mapi (fun i _ -> string (char (97 + i)))
+    
+    // Find all explicitly named TVars that are already in the type
+    let explicitTVars = freeTVars env.Registry t |> List.distinct
+    
+    // Generate new names for the generalizable MetaVars, avoiding existing ones
+    // We'll just append them.
+    let generatedNames = generalizable |> List.mapi (fun i _ -> "'" + string (char (97 + i)))
+    
+    List.iter2 (fun (m: MetaVar) name -> m.Value <- Some(TVar name)) generalizable generatedNames
 
-    List.iter2 (fun (m: MetaVar) name -> m.Value <- Some(TVar name)) generalizable typeNames
+    let allVars = (explicitTVars @ generatedNames) |> List.distinct
 
     // Default to empty constraints for now; gathering happens during inference
-    Scheme(typeNames, [], t)
+    Scheme(allVars, [], t)
 
 // --- INFERENCE ENGINE ---
+let inferNumericType (value: string) : HMType =
+    if value.EndsWith("uy") then TypeConstants.byteType
+    elif value.EndsWith("s") then TypeConstants.shortType
+    elif value.EndsWith("us") then TypeConstants.ushortType
+    elif value.EndsWith("u") then TypeConstants.uintType
+    elif value.EndsWith("UL") || value.EndsWith("ul") || value.EndsWith("uL") then TypeConstants.ulongType
+    elif value.EndsWith("L") || value.EndsWith("l") then TypeConstants.longType
+    elif value.EndsWith("d") || value.EndsWith("D") || value.Contains(".") then TypeConstants.doubleType
+    else TypeConstants.intType
+
 let rec applyTypeSubst (subst: Map<string, HMType>) (t: HMType) =
     match t with
     | TVar n -> match Map.tryFind n subst with Some t' -> t' | None -> t
@@ -490,15 +390,7 @@ let rec checkPattern (env: Env) (expectedType: HMType) (pat: Pattern) : TypedPat
           Node = TPIdent name },
         Map.add name expectedType Map.empty
     | PInt(value, r) ->
-        let inferredType =
-            if value.EndsWith("uy") then TypeConstants.byteType
-            elif value.EndsWith("s") then TypeConstants.shortType
-            elif value.EndsWith("us") then TypeConstants.ushortType
-            elif value.EndsWith("u") then TypeConstants.uintType
-            elif value.EndsWith("UL") || value.EndsWith("ul") || value.EndsWith("uL") then TypeConstants.ulongType
-            elif value.EndsWith("L") || value.EndsWith("l") then TypeConstants.longType
-            elif value.EndsWith("d") || value.EndsWith("D") || value.Contains(".") then TypeConstants.doubleType
-            else TypeConstants.intType
+        let inferredType = inferNumericType value
 
         unify env.Registry expectedType inferredType
         { Type = inferredType
@@ -567,19 +459,52 @@ let rec checkPattern (env: Env) (expectedType: HMType) (pat: Pattern) : TypedPat
           Node = TPList(typedItems, typedTail) },
         currentEnv
 
+let private typeNameMap =
+    Map.ofList [
+        "int", TypeConstants.intType
+        "byte", TypeConstants.byteType
+        "short", TypeConstants.shortType
+        "ushort", TypeConstants.ushortType
+        "uint", TypeConstants.uintType
+        "long", TypeConstants.longType
+        "ulong", TypeConstants.ulongType
+        "double", TypeConstants.doubleType
+        "string", TypeConstants.stringType
+        "bool", TypeConstants.boolType
+    ]
+
+let rec resolveTypeAnnotation (registry: TraitRegistry) (ptype: FType) : HMType =
+    match ptype with
+    | TName(name, _) ->
+        if name.StartsWith("'") then
+            TVar name
+        else
+            match Map.tryFind name registry.Aliases with
+            | Some (args, t) when args.Length = 0 -> t
+            | Some (args, _) -> failwithf $"Type alias {name} expects {args.Length} arguments, but got 0"
+            | None ->
+                match Map.tryFind name typeNameMap with
+                | Some t -> t
+                | None -> TCon(name, [])
+    | TApp("->", args, _) ->
+        let resolvedArgs = args |> List.map (resolveTypeAnnotation registry)
+        TFun(List.take (resolvedArgs.Length - 1) resolvedArgs, List.last resolvedArgs)
+    | TApp(name, args, _) ->
+        let resolvedArgs = args |> List.map (resolveTypeAnnotation registry)
+        match Map.tryFind name registry.Aliases with
+        | Some (typeParams, t) ->
+            if typeParams.Length <> resolvedArgs.Length then
+                failwithf $"Type alias {name} expects {typeParams.Length} arguments, but got {resolvedArgs.Length}"
+            let normalizeParam (p: string) = if p.StartsWith("'") then p else "'" + p
+            let subst = List.zip (typeParams |> List.map normalizeParam) resolvedArgs |> Map.ofList
+            applyTypeSubst subst t
+        | None -> TCon(name, resolvedArgs)
+
 
 let rec infer (env: Env) (expr: Expr) : HMType * TypedExpr =
     match expr with
     | EInt(value, r) ->
-        let inferredType =
-            if value.EndsWith("uy") then TypeConstants.byteType
-            elif value.EndsWith("s") then TypeConstants.shortType
-            elif value.EndsWith("us") then TypeConstants.ushortType
-            elif value.EndsWith("u") then TypeConstants.uintType
-            elif value.EndsWith("UL") || value.EndsWith("ul") || value.EndsWith("uL") then TypeConstants.ulongType
-            elif value.EndsWith("L") || value.EndsWith("l") then TypeConstants.longType
-            elif value.EndsWith("d") || value.EndsWith("D") || value.Contains(".") then TypeConstants.doubleType
-            else TypeConstants.intType
+        let inferredType = inferNumericType value
 
         inferredType,
         { Type = inferredType
@@ -594,6 +519,8 @@ let rec infer (env: Env) (expr: Expr) : HMType * TypedExpr =
     | EIdent(name, r) ->
         let binding = lookup env name
         let t, tArgs, constraints = instantiate env.Registry binding.Scheme
+        if name = "f" || name = "map" then
+            printfn "EIdent %s tArgs length: %d" name tArgs.Length
 
         t,
         { Type = t
@@ -631,7 +558,7 @@ let rec infer (env: Env) (expr: Expr) : HMType * TypedExpr =
         retType,
         { Type = retType
           Range = r
-          Node = TApply(typedTarget, typedArgs |> List.map snd) }
+          Node = TApply(typedTarget, typedArgs |> List.map snd, false) }
 
     | ELet(name, isFun, args, value, body, r) ->
         let valType, typedVal =
@@ -886,6 +813,7 @@ let rec infer (env: Env) (expr: Expr) : HMType * TypedExpr =
 
                 let bodyType, typedBody = infer boundEnv body
 
+                printfn "EMatch Clause: unifying bodyType=%A with returnType=%A" bodyType returnType
                 unify env.Registry bodyType returnType
 
                 { Pattern = typedPat
@@ -998,6 +926,14 @@ let rec infer (env: Env) (expr: Expr) : HMType * TypedExpr =
           Range = r
           Node = TRecordUpdate(targetName, typedFields) }
 
+    | ECast(targetTypeAnnotation, expr, r) ->
+        let targetType = resolveTypeAnnotation env.Registry targetTypeAnnotation
+        let exprType, typedExpr = infer env expr
+        targetType,
+        { Type = targetType
+          Range = r
+          Node = TCast(typedExpr, targetType) }
+
 
 module MatchCompiler =
     let private freshVarCounter = ref 0
@@ -1019,17 +955,7 @@ module MatchCompiler =
         | TPIdent name ->
             let body = cont failExpr
 
-            let checkedTarget =
-                if prune traits target.Type <> prune traits body.Type then
-                    match prune traits target.Type with
-                    | TVar _ ->
-                        ({ Type = body.Type
-                           Range = pat.Range
-                           Node = TIsInst(target, body.Type) }
-                        : TypedExpr)
-                    | _ -> target
-                else
-                    target
+            let checkedTarget = target
 
             // Variable bindings in matches are never functions, so isFun = false, args = []
             ({ Type = body.Type
@@ -1085,7 +1011,7 @@ module MatchCompiler =
                 let cond =
                     ({ Type = TypeConstants.boolType
                        Range = pat.Range
-                       Node = TApply(isEmptyFn, [ target ]) }
+                       Node = TApply(isEmptyFn, [ target ], false) }
                     : TypedExpr)
 
                 ({ Type = failExpr.Type
@@ -1103,7 +1029,7 @@ module MatchCompiler =
                 let isEmptyCall =
                     ({ Type = TypeConstants.boolType
                        Range = pat.Range
-                       Node = TApply(isEmptyFn, [ target ]) }
+                       Node = TApply(isEmptyFn, [ target ], false) }
                     : TypedExpr)
 
                 let falseIdent =
@@ -1242,6 +1168,11 @@ module MatchCompiler =
                        Range = expr.Range
                        Node = TIdent("false", []) }
                     : TypedExpr)
+                | TCon(name, _) when name = TypeConstants.StringName ->
+                    ({ Type = TypeConstants.stringType
+                       Range = expr.Range
+                       Node = TString "" }
+                    : TypedExpr)
                 | _ ->
                     ({ Type = expr.Type
                        Range = expr.Range
@@ -1258,7 +1189,7 @@ module MatchCompiler =
                          [],
                          ({ Type = TypeConstants.voidType
                             Range = expr.Range
-                            Node = TApply(logFn, [ msgStr ]) }
+                            Node = TApply(logFn, [ msgStr ], false) }
                          : TypedExpr),
                          defaultNode
                      ) }
@@ -1295,9 +1226,9 @@ module MatchCompiler =
         | TLambda(args, body) ->
             { expr with
                 Node = TLambda(args, lowerMatchExpressions env body) }
-        | TApply(target, args) ->
+        | TApply(target, args, isTail) ->
             { expr with
-                Node = TApply(lowerMatchExpressions env target, args |> List.map (lowerMatchExpressions env)) }
+                Node = TApply(lowerMatchExpressions env target, args |> List.map (lowerMatchExpressions env), isTail) }
         | TIf(c, t, f) ->
             { expr with
                 Node = TIf(lowerMatchExpressions env c, lowerMatchExpressions env t, lowerMatchExpressions env f) }
@@ -1340,7 +1271,8 @@ module DictionaryLowering =
             // Target trait method invocations
             | TApply({ Node = TIdent(methodName, _)
                        Type = TFun(argTypes, _) } as target,
-                     args) ->
+                     args,
+                     isTail) ->
                 let traitMethodOpt =
                     env.Registry.Traits
                     |> Map.tryPick (fun traitName info ->
@@ -1351,19 +1283,20 @@ module DictionaryLowering =
 
                 match traitMethodOpt with
                 | Some(traitName, _) ->
+                    let targetObj = args.Head
                     let loweredArgs = args |> List.map recurse
                     let receiverType = argTypes[0]
 
-                    match prune env.Registry receiverType with
-                    | TCon(typeName, _) ->
-                        // DEVIRTUALIZATION
-                        let implClassName = $"%s{traitName}_%s{typeName}"
+                    match targetObj.Type with
+                    | TCon(targetTypeName, _) ->
+                        // STATIC DISPATCH: Direct devirtualization
+                        let implClassName = $"%s{traitName}_%s{targetTypeName}"
 
                         let staticDirectTarget =
                             { target with
                                 Node = TIdent( $"%s{implClassName}::%s{methodName}", []) }
 
-                        TApply(staticDirectTarget, loweredArgs)
+                        TApply(staticDirectTarget, loweredArgs, isTail)
 
                     | TVar varName ->
                         // GENERIC DISPATCH
@@ -1385,7 +1318,7 @@ module DictionaryLowering =
 
                 | None ->
                     // Standard function call
-                    TApply(recurse target, args |> List.map recurse)
+                    TApply(recurse target, args |> List.map recurse, false)
 
             // Explicit TInterfaceCall (if re-running the pass or generated elsewhere)
             | TInterfaceCall(iType, mName, dict, args) ->
@@ -1402,8 +1335,8 @@ module DictionaryLowering =
 
             | TLambda(args, body) -> TLambda(args, recurse body)
 
-            | TApply(target, args) -> // Fallback for non-identifier targets
-                TApply(recurse target, args |> List.map recurse)
+            | TApply(target, args, isTail) -> // Fallback for non-identifier targets
+                TApply(recurse target, args |> List.map recurse, isTail)
 
             | TTupleMake items -> TTupleMake(items |> List.map recurse)
 
@@ -1432,6 +1365,8 @@ module DictionaryLowering =
                 TMatch(recurse target, lowClauses)
 
             | TIsInst(tgt, t) -> TIsInst(recurse tgt, t)
+
+            | TCast(tgt, t) -> TCast(recurse tgt, t)
 
             | TGetField(tgt, n) -> TGetField(recurse tgt, n)
 
@@ -1478,149 +1413,7 @@ module DictionaryLowering =
 
         | _ -> decl // TTrait, TImport, TExport, TType, TTypeRec
 
-// --- ZONKER (Freezing Pass) ---
-type Zonker() =
-    let mutable nextGenericId = 0
-    let genericMap = System.Collections.Generic.Dictionary<obj, string>()
-
-    let getGenericName (m: obj) =
-        match genericMap.TryGetValue(m) with
-        | true, name -> name
-        | false, _ ->
-            let name =
-                "'"
-                + string (char (97 + (nextGenericId % 26)))
-                + (if nextGenericId >= 26 then
-                       string (nextGenericId / 26)
-                   else
-                       "")
-
-            nextGenericId <- nextGenericId + 1
-            genericMap[m] <- name
-            name
-
-    member this.FreezeType (env: Env) (t: HMType) : FinalType =
-        let pruned = prune env.Registry t
-        match pruned with
-        | TVar(name) -> FGeneric name
-        | TMeta m -> 
-            printfn "FreezeType TMeta: ID=%d, Value=%A" m.Id m.Value
-            FGeneric(getGenericName m)
-        | TCon(name, args) ->
-            if Map.containsKey name env.Registry.Traits then
-                FInterface(name, args |> List.map (this.FreezeType env))
-            else
-                FCon(name, args |> List.map (this.FreezeType env))
-        | TFun(args, ret) -> FFun(args |> List.map (this.FreezeType env), this.FreezeType env ret)
-        | TTuple args -> FTuple(args |> List.map (this.FreezeType env))
-        | TAssoc(_, assocName, _) -> FGeneric assocName
-
-    member this.FreezePattern (env: Env) (p: TypedPattern) : FPattern =
-        let node =
-            match p.Node with
-            | TPWildcard -> FPWildcard
-            | TPInt v -> FPInt v
-            | TPString v -> FPString v
-            | TPIdent n -> FPIdent n
-            | TPList(items, tail) ->
-                FPList(List.map (this.FreezePattern env) items, Option.map (this.FreezePattern env) tail)
-            | TPConstruct(n, args) -> FPConstruct(n, List.map (this.FreezePattern env) args)
-            | TPApp(e, pat) -> FPApp(this.FreezeExpr env e, this.FreezePattern env pat)
-            | TPAs(pat, n) -> FPAs(this.FreezePattern env pat, n)
-
-        { Type = this.FreezeType env p.Type
-          Range = p.Range
-          Node = node }
-        : FPattern
-
-    member this.FreezeExpr (env: Env) (e: TypedExpr) : FExpr =
-        let node =
-            match e.Node with
-            | TInt v -> FInt v
-            | TString v -> FString v
-            | TIdent(n, tArgs) -> FIdent(n, List.map (this.FreezeType env) tArgs)
-            | TKeyword kw -> FKeyword kw
-            | TSymbol sym -> FSymbol sym
-            | TLet(n, isF, args, v, b) -> FLet(n, isF, args, this.FreezeExpr env v, this.FreezeExpr env b)
-            | TLetRec(bindings, b) ->
-                FLetRec(
-                    bindings
-                    |> List.map (fun (n, isF, args, expr) -> n, isF, args, this.FreezeExpr env expr),
-                    this.FreezeExpr env b
-                )
-            | TLetTuple(names, v, b) -> FLetTuple(names, this.FreezeExpr env v, this.FreezeExpr env b)
-            | TLambda(args, b) -> FLambda(args, this.FreezeExpr env b)
-            | TApply(target, args) -> FApply(this.FreezeExpr env target, List.map (this.FreezeExpr env) args, false)
-            | TTupleMake exprs -> FTupleMake(List.map (this.FreezeExpr env) exprs)
-            | TListMake exprs -> FListMake(List.map (this.FreezeExpr env) exprs)
-            | TRecordMake fields -> FRecordMake(fields |> List.map (fun (n, expr) -> n, this.FreezeExpr env expr))
-            | TRecordUpdate(name, fields) ->
-                FRecordUpdate(name, fields |> List.map (fun (n, expr) -> n, this.FreezeExpr env expr))
-            | TLetMutable(n, v, b) -> FLetMutable(n, this.FreezeExpr env v, this.FreezeExpr env b)
-            | TSet(n, v) -> FSet(n, this.FreezeExpr env v)
-            | TIf(cond, t, f) -> FIf(this.FreezeExpr env cond, this.FreezeExpr env t, this.FreezeExpr env f)
-            | TTryFinally(b, c) -> FTryFinally(this.FreezeExpr env b, this.FreezeExpr env c)
-            | TMatch(target, clauses) ->
-                FMatch(
-                    this.FreezeExpr env target,
-                    clauses
-                    |> List.map (fun c ->
-                        { Pattern = this.FreezePattern env c.Pattern
-                          Guard = Option.map (this.FreezeExpr env) c.Guard
-                          Body = this.FreezeExpr env c.Body })
-                )
-            | TIsInst(tgt, t) -> FIsInst(this.FreezeExpr env tgt, this.FreezeType env t)
-            | TGetField(tgt, n) -> FGetField(this.FreezeExpr env tgt, n)
-            | TTypeEq(t1, t2) -> FTypeEq(this.FreezeExpr env t1, this.FreezeExpr env t2)
-            | TInterfaceCall(iType, mName, dict, args) -> 
-                FInterfaceCall(
-                    this.FreezeType env iType, 
-                    mName, 
-                    this.FreezeExpr env dict, 
-                    args |> List.map (this.FreezeExpr env),
-                    false
-                )
-
-        { Type = this.FreezeType env e.Type
-          Range = e.Range
-          Node = node }
-
 // --- DECLARATION CHECKING ---
-let rec resolveTypeAnnotation (registry: TraitRegistry) (ptype: FType) : HMType =
-    match ptype with
-    | TName(name, _) ->
-        if name.StartsWith("'") then
-            TVar name
-        else
-            match Map.tryFind name registry.Aliases with
-            | Some (args, t) when args.Length = 0 -> t
-            | Some (args, _) -> failwithf $"Type alias {name} expects {args.Length} arguments, but got 0"
-            | None ->
-                match name with
-                | "int" -> TypeConstants.intType
-                | "byte" -> TypeConstants.byteType
-                | "short" -> TypeConstants.shortType
-                | "ushort" -> TypeConstants.ushortType
-                | "uint" -> TypeConstants.uintType
-                | "long" -> TypeConstants.longType
-                | "ulong" -> TypeConstants.ulongType
-                | "double" -> TypeConstants.doubleType
-                | "string" -> TypeConstants.stringType
-                | "bool" -> TypeConstants.boolType
-                | _ -> TCon(name, [])
-    | TApp("->", args, _) ->
-        let resolvedArgs = args |> List.map (resolveTypeAnnotation registry)
-        TFun(List.take (resolvedArgs.Length - 1) resolvedArgs, List.last resolvedArgs)
-    | TApp(name, args, _) ->
-        let resolvedArgs = args |> List.map (resolveTypeAnnotation registry)
-        match Map.tryFind name registry.Aliases with
-        | Some (typeParams, t) ->
-            if typeParams.Length <> resolvedArgs.Length then
-                failwithf $"Type alias {name} expects {typeParams.Length} arguments, but got {resolvedArgs.Length}"
-            let normalizeParam (p: string) = if p.StartsWith("'") then p else "'" + p
-            let subst = List.zip (typeParams |> List.map normalizeParam) resolvedArgs |> Map.ofList
-            applyTypeSubst subst t
-        | None -> TCon(name, resolvedArgs)
 
 let registerTypeDefs (isRec: bool) (typeDefs: TypeDef list) (env: Env) : Env =
     // 1. Pre-register local types for recursion
@@ -1720,19 +1513,16 @@ let rec checkDecl (env: Env) (sigs: Map<string, HMType>) (decl: Decl) : Env * Ma
         let bodyType, typedBody = infer bodyEnv body
         unify env.Registry bodyType expectedRetType
 
+        let scheme = generalize env funType
+        let (Scheme(vars, _, _)) = scheme
         let finalEnv =
             addBinding
                 name
-                { Scheme = generalize env funType
+                { Scheme = scheme
                   IsMutable = false }
                 env
 
-        let decl = TDefun(name, [], argTypes, expectedRetType, typedBody, r)
-        if name = "foo" then
-            printfn "foo TDefun: %A" decl
-        if name = "main" then
-            printfn "main TDefun: %A" decl
-
+        let decl = TDefun(name, vars, argTypes, expectedRetType, typedBody, r)
         finalEnv, Map.remove name sigs, [ decl ]
 
     | DDefTuple(names, expr, r) ->
@@ -1803,6 +1593,13 @@ let rec checkDecl (env: Env) (sigs: Map<string, HMType>) (decl: Decl) : Env * Ma
     | DImport(paths, r) -> env, sigs, [ TImport(paths, r) ]
     | DExport(names, r) -> env, sigs, [ TExport(names, r) ]
     | DType(typeDefs, r) -> registerTypeDefs false typeDefs env, sigs, [ TType(typeDefs, r) ]
+    | DExtern(name, ftype, r) ->
+        printfn $"[DEBUG] Added Extern: %s{name}"
+        let t = resolveTypeAnnotation env.Registry ftype
+        let scheme = generalize env t
+        let newEnv = { env with Bindings = Map.add name { Scheme = scheme; IsMutable = false } env.Bindings }
+        newEnv, sigs, [ TExtern(name, ftype, r) ]
+
     | DTrait(traitName, implementorVar, assocTypes, signatures, r) ->
         let hmSignatures =
             signatures
@@ -1908,35 +1705,8 @@ let rec checkDecl (env: Env) (sigs: Map<string, HMType>) (decl: Decl) : Env * Ma
 
         regEnv, sigs, [ TImpl(traitName, targetType, hmAssocBindings, typedMethods, r) ]
 
-let rec freezeDecl (env: Env) (decl: TDecl) : FDecl =
-    let z = Zonker()
-
-    match decl with
-    | TImport(p, r) -> FImport(p, r)
-    | TExport(n, r) -> FExport(n, r)
-    | TModule(n, decls, r) -> FModule(n, List.map (freezeDecl env) decls, r)
-    | TDef(n, e, t, r) -> FDef(n, z.FreezeExpr env e, z.FreezeType env t, r)
-    | TDefTuple(names, e, t, r) -> FDefTuple(names, z.FreezeExpr env e, z.FreezeType env t, r)
-    | TDefMutable(n, e, t, r) -> FDefMutable(n, z.FreezeExpr env e, z.FreezeType env t, r)
-    | TDefun(n, tyArgs, args, retType, body, r) ->
-        let fArgs =
-            args |> List.map (fun (argName, argType) -> argName, z.FreezeType env argType)
-
-        FDefun(n, tyArgs, fArgs, z.FreezeType env retType, z.FreezeExpr env body, r)
-    | TType(td, r) -> FType(td, r)
-    | TTypeRec(td, r) -> FTypeRec(td, r)
-    | TTrait(traitName, implVar, assocTypes, sigs, r) ->
-        let fSigs = sigs |> Map.map (fun _ t -> z.FreezeType env t)
-        FTrait(traitName, implVar, assocTypes, fSigs, r)
-    | TImpl(traitName, targetType, assocBindings, methods, r) ->
-        let fTargetType = z.FreezeType env targetType
-        let fAssoc = assocBindings |> Map.map (fun _ t -> z.FreezeType env t)
-        let fMethods = methods |> List.map (freezeDecl env)
-        FImpl(traitName, fTargetType, fAssoc, fMethods, r)
-
 // --- PIPELINE COORDINATION ---
-// --- PIPELINE COORDINATION ---
-let checkProgram (initialEnv: Env) (program: Decl list) : Env * FDecl list =
+let checkProgram (initialEnv: Env) (program: Decl list) : Env * TDecl list =
     let explicitSigs =
         program
         |> List.choose (function
@@ -1963,11 +1733,12 @@ let checkProgram (initialEnv: Env) (program: Decl list) : Env * FDecl list =
 
     let finalMutableAST = List.rev revDecls
 
-    // 2. Lower matches using clean, mutable types before zonking eliminates them (TDecl list -> TDecl list)
+    // 2. Lower match expressions into decision trees
     let loweredAST =
         finalMutableAST |> List.map (MatchCompiler.lowerDeclMatches finalEnv)
 
-    // 3. Zonk the lowered AST into an entirely deep-cloned, immutable representation (TDecl list -> FDecl list)
-    let frozenAST = loweredAST |> List.map (freezeDecl finalEnv)
+    // 3. Lower trait dispatch (devirtualize concrete types, dictionary-pass generics)
+    let dispatchedAST =
+        loweredAST |> List.map (DictionaryLowering.lowerDecl finalEnv)
 
-    finalEnv, frozenAST
+    finalEnv, dispatchedAST

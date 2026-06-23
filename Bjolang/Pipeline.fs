@@ -2,7 +2,6 @@ module Bjolang.Pipeline
 
 open System
 open System.IO
-open Bjolang.ASTPrinter
 open Bjolang.Lexer
 open Bjolang.Parser
 open Bjolang.LetRecify
@@ -34,13 +33,20 @@ let rec read (tokens: LexedToken list) : SExpr list * LexedToken list =
 
     loop [] tokens
 
-let resolveImportPath (basePath: string) (importSpec: ImportSpec) : string =
+let resolveImportPath (basePath: string) (importSpec: ImportSpec) : string option =
     match importSpec with
-    | RelativePath p -> Path.GetFullPath(Path.Combine(Path.GetDirectoryName(basePath), p))
+    | RelativePath p -> 
+        let rawPath = Path.GetFullPath(Path.Combine(Path.GetDirectoryName(basePath), p))
+        let dllPath = if rawPath.EndsWith(".bjo") then rawPath.Substring(0, rawPath.Length - 4) + ".dll" else rawPath + ".dll"
+        if System.IO.File.Exists(dllPath) then Some dllPath
+        else Some rawPath
     | ModulePath p -> 
         let libPath = Path.GetFullPath(Path.Combine(Environment.CurrentDirectory, "lib"))
-        let relPath = Path.Combine(Array.ofList p) + ".bjo"
-        Path.GetFullPath(Path.Combine(libPath, relPath))
+        let relPath = Path.Combine(Array.ofList p)
+        let dllPath = Path.GetFullPath(Path.Combine(libPath, relPath + ".dll"))
+        let bjoPath = Path.GetFullPath(Path.Combine(libPath, relPath + ".bjo"))
+        if System.IO.File.Exists(dllPath) then Some dllPath
+        else Some bjoPath
 
 type LoadedModule = {
     FilePath: string
@@ -49,105 +55,26 @@ type LoadedModule = {
     ParsedDecls: Decl list
 }
 
-// Simple mangler that prepends moduleName to top-level definitions that are not exported.
-let mangleDecls (moduleName: string) (decls: Decl list) : Decl list =
-    let exports = 
-        decls 
-        |> List.choose (function DExport(names, _) -> Some names | _ -> None)
-        |> List.concat 
-        |> Set.ofList
+let wrapInModule (moduleName: string) (decls: Decl list) : Decl list =
+    // Find the first and last range to represent the module range
+    let r = 
+        match decls with
+        | [] -> { Start = { Line = 1; Column = 1 }; End = { Line = 1; Column = 1 } }
+        | first :: _ ->
+            let last = List.last decls
+            let getRange d = 
+                match d with
+                | DDef(_, _, r) | DDefun(_, _, _, _, r) | DDefTuple(_, _, r) | DDefMutable(_, _, r)
+                | DSignature(_, _, r) | DType(_, r) | DTypeRec(_, r) | DTrait(_, _, _, _, r) | DImpl(_, _, _, _, r)
+                | DModule(_, _, r) | DImport(_, r) | DExport(_, r) | DExtern(_, _, r) -> r
+            unionLexerRanges (getRange first) (getRange last)
+    
+    [ DModule(moduleName, decls, r) ]
 
-    let toMangle = 
-        decls |> List.choose (function
-            | DDef(name, _, _) | DDefun(name, _, _, _, _) | DDefMutable(name, _, _) ->
-                if exports.Contains name then None else Some name
-            | DSignature(name, _, _) ->
-                if exports.Contains name then None else Some name
-            | _ -> None
-        ) |> Set.ofList
-
-    let mangleName n = if toMangle.Contains n then moduleName + "_" + n else n
-
-    let rec renameExpr (locals: Set<string>) (expr: Expr) : Expr =
-        let rename e = renameExpr locals e
-        match expr with
-        | EIdent(name, r) -> 
-            if not (locals.Contains name) && toMangle.Contains name then EIdent(mangleName name, r)
-            else expr
-        | EApp(t, args, r) -> EApp(rename t, List.map rename args, r)
-        | ETuple(es, r) -> ETuple(List.map rename es, r)
-        | EList(es, r) -> EList(List.map rename es, r)
-        | EIf(c, t, f, r) -> EIf(rename c, rename t, rename f, r)
-        | ELet(n, isFun, args, v, b, r) ->
-            let locals' = locals.Add(n)
-            // If it's a function, args are also local to value. But value is evaluated in `locals` for standard let.
-            // Wait, ELet value is evaluated in `locals`, body in `locals'`.
-            let v' = renameExpr (if isFun then Seq.fold (fun (acc:Set<string>) a -> acc.Add a) locals args else locals) v
-            ELet(n, isFun, args, v', renameExpr locals' b, r)
-        | ELetRec(binds, b, r) ->
-            let locals' = Seq.fold (fun (acc:Set<string>) (n,_,_,_) -> acc.Add n) locals binds
-            let binds' = binds |> List.map (fun (n, isFun, args, v) ->
-                let valLocals = Seq.fold (fun (acc:Set<string>) a -> acc.Add a) locals' args
-                (n, isFun, args, renameExpr valLocals v))
-            ELetRec(binds', renameExpr locals' b, r)
-        | ELetTuple(ns, v, b, r) ->
-            let locals' = Seq.fold (fun (acc:Set<string>) n -> acc.Add n) locals ns
-            ELetTuple(ns, rename v, renameExpr locals' b, r)
-        | ELetMutable(n, v, b, r) ->
-            let locals' = locals.Add(n)
-            ELetMutable(n, rename v, renameExpr locals' b, r)
-        | ESet(n, v, r) ->
-            if not (locals.Contains n) && toMangle.Contains n then ESet(mangleName n, rename v, r)
-            else ESet(n, rename v, r)
-        | EFun(args, b, r) ->
-            let locals' = Seq.fold (fun (acc:Set<string>) a -> acc.Add a) locals args
-            EFun(args, renameExpr locals' b, r)
-        | ERecord(fs, r) -> ERecord(fs |> List.map (fun (k,v) -> k, rename v), r)
-        | ERecordUpdate(n, fs, r) -> ERecordUpdate(n, fs |> List.map (fun (k,v) -> k, rename v), r)
-        | EGetField(e, n, r) -> EGetField(rename e, n, r)
-        | EMatch(target, clauses, r) ->
-            let clauses' = clauses |> List.map (fun (pat, guard, body) ->
-                // Collect locals from pattern
-                let rec getPatLocals p acc =
-                    match p with
-                    | PIdent(n, _) -> Set.add n acc
-                    | PList(ps, tailOpt, _) -> 
-                        let acc' = List.fold (fun a p' -> getPatLocals p' a) acc ps
-                        match tailOpt with Some t -> getPatLocals t acc' | None -> acc'
-                    | PConstruct(_, ps, _) -> List.fold (fun a p' -> getPatLocals p' a) acc ps
-                    | _ -> acc
-                let locals' = getPatLocals pat locals
-                let guard' = Option.map (renameExpr locals') guard
-                let body' = renameExpr locals' body
-                (pat, guard', body')
-            )
-            EMatch(rename target, clauses', r)
-        | ETryFinally(b, c, r) -> ETryFinally(rename b, rename c, r)
-        | EInt _ | EString _ | EQuotedSymbol _ | EKeyword _ -> expr
-
-    decls |> List.map (function
-        | DDef(n, v, r) -> DDef(mangleName n, renameExpr Set.empty v, r)
-        | DDefun(n, args, typ, b, r) -> 
-            let locals = Seq.fold (fun (acc:Set<string>) (a,_) -> acc.Add a) Set.empty args
-            DDefun(mangleName n, args, typ, renameExpr locals b, r)
-        | DDefTuple(ns, v, r) -> DDefTuple(ns, renameExpr Set.empty v, r)
-        | DDefMutable(n, v, r) -> DDefMutable(mangleName n, renameExpr Set.empty v, r)
-        | DSignature(n, t, r) -> DSignature(mangleName n, t, r)
-        | DImpl(traitN, t, asst, methods, r) ->
-            let methods' = methods |> List.map (function
-                | DDefun(n, args, typ, b, mr) -> 
-                    let locals = Seq.fold (fun (acc:Set<string>) (a,_) -> acc.Add a) Set.empty args
-                    DDefun(n, args, typ, renameExpr locals b, mr)
-                | _ -> failwith "Impl can only contain defun"
-            )
-            DImpl(traitN, t, asst, methods', r)
-        | DModule _ -> failwith "Nested modules not supported for mangling yet"
-        | other -> other
-    )
-
-let loadModuleGraph (mainFilePath: string) : Decl list =
+let loadModuleGraph (mainFilePath: string) : Decl list * string list =
     let resolvedModules = System.Collections.Generic.Dictionary<string, LoadedModule>()
     let currentPath = System.Collections.Generic.HashSet<string>()
+    let dllDeps = System.Collections.Generic.HashSet<string>()
 
     let rec load (filePath: string) : unit =
         let absPath = Path.GetFullPath(filePath)
@@ -155,15 +82,40 @@ let loadModuleGraph (mainFilePath: string) : Decl list =
             failwithf "Cyclic dependency detected: %s" absPath
         if not (resolvedModules.ContainsKey(absPath)) then
             currentPath.Add(absPath) |> ignore
-            let sourceCode = File.ReadAllText(absPath)
-            let tokens, _ = Lexer.tokenize sourceCode |> read
-            let parsedDecls = Parser.parseModule tokens
             
-            let deps = 
-                parsedDecls 
-                |> List.choose (function DImport(specs, _) -> Some specs | _ -> None)
-                |> List.concat
-                |> List.map (resolveImportPath absPath)
+            let parsedDecls, deps =
+                if absPath.EndsWith(".dll") then
+                    dllDeps.Add(absPath) |> ignore
+                    let asm = System.Reflection.Assembly.LoadFile(absPath)
+                    let attr = asm.GetCustomAttributes(typeof<System.Reflection.AssemblyMetadataAttribute>, false)
+                    let exports =
+                        attr
+                        |> Array.choose (fun a -> 
+                            let meta = a :?> System.Reflection.AssemblyMetadataAttribute
+                            if meta.Key = "BjolangExports" then Some meta.Value else None)
+                        |> Array.tryHead
+                    match exports with
+                    | Some metaStr ->
+                        let tokens, _ = Lexer.tokenize metaStr |> read
+                        let parsedDecls = 
+                            Parser.parseModule tokens
+                            |> List.map (function
+                                | DSignature(name, t, r) -> DExtern(name, t, r)
+                                | d -> d)
+                        parsedDecls, []
+                    | None ->
+                        [], []
+                else
+                    let sourceCode = File.ReadAllText(absPath)
+                    let tokens, _ = Lexer.tokenize sourceCode |> read
+                    let parsedDecls = Parser.parseModule tokens
+                    
+                    let deps = 
+                        parsedDecls 
+                        |> List.choose (function DImport(specs, _) -> Some specs | _ -> None)
+                        |> List.concat
+                        |> List.choose (resolveImportPath absPath)
+                    parsedDecls, deps
 
             for dep in deps do
                 load dep
@@ -178,26 +130,28 @@ let loadModuleGraph (mainFilePath: string) : Decl list =
             currentPath.Remove(absPath) |> ignore
 
     load mainFilePath
-
+    
+    // Sort topologically
     let sorted = System.Collections.Generic.List<LoadedModule>()
     let visited = System.Collections.Generic.HashSet<string>()
-
-    let rec visit path =
+    let rec visit (path: string) =
         if not (visited.Contains(path)) then
             visited.Add(path) |> ignore
             let m = resolvedModules.[path]
-            for dep in m.Dependencies do visit dep
+            for dep in m.Dependencies do
+                visit dep
             sorted.Add(m)
 
     visit (Path.GetFullPath(mainFilePath))
     
-    // Concatenate all mangled ASTs
-    sorted |> Seq.map (fun m -> mangleDecls m.ModuleName m.ParsedDecls) |> List.concat
+    // Concatenate all module ASTs
+    let allDecls = sorted |> Seq.map (fun m -> wrapInModule m.ModuleName m.ParsedDecls) |> List.concat
+    allDecls, dllDeps |> Seq.toList
 
 let runFullFrontendPipeline (mainFilePath: string) =
     try
         printfn "=== Step 1: Parsing & Module Resolution ==="
-        let parsedModuleDecls = loadModuleGraph mainFilePath
+        let parsedModuleDecls, dllDeps = loadModuleGraph mainFilePath
         let letrecifiedDecls = letrecifyModule parsedModuleDecls
 
         printfn "=== Step 2: Type Checking ==="
@@ -205,15 +159,14 @@ let runFullFrontendPipeline (mainFilePath: string) =
         
         printfn "=== Step 3: Tail Recursion Analysis ==="
         let tailAnalyzedAst = TailRecursion.analyzeProgram typedAst
-    
         
-        printfn "tail recursive ast: %A" tailAnalyzedAst
-        tailAnalyzedAst
+        printfn "=== Frontend pipeline complete ==="
+        Some (env, tailAnalyzedAst, dllDeps)
     with ex ->
         printfn $"Compilation Panicked: %s{ex.Message}"
         printfn $"Stack Trace: %s{ex.StackTrace}"
-        []
+        None
 
 let compile (sourceFilePath: string) (outputFileName: string) (isLibrary: bool) =
-    let ast = runFullFrontendPipeline sourceFilePath
-    ast
+    runFullFrontendPipeline sourceFilePath
+

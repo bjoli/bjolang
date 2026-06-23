@@ -1,0 +1,310 @@
+module Bjolang.LetRecify
+
+open Bjolang.Parser
+
+/// Combine two free-var maps; if a var appears in both, Unguarded (false) wins.
+let mergeVarUseMaps (a: Map<string, bool>) (b: Map<string, bool>) =
+    let folder (acc: Map<string, bool>) (key: string) (useType: bool) =
+        match Map.tryFind key acc with
+        | Some false -> acc // Unguarded already exists; keep it.
+        | _ -> Map.add key useType acc // Overwrites True with False, or inserts new.
+
+    Map.fold folder a b
+
+/// Extract all variable names bound by a pattern.
+let rec patternBoundNames (pat: Pattern) : string list =
+    match pat with
+    | PWildcard _ -> []
+    | PIdent(name, _) -> [ name ]
+    | PInt _
+    | PString _ -> []
+    | PList(items, tail, _) ->
+        let itemNames = List.collect patternBoundNames items
+        let tailNames = tail |> Option.map patternBoundNames |> Option.defaultValue []
+        itemNames @ tailNames
+    | PConstruct(_, args, _) -> List.collect patternBoundNames args
+
+/// Walk an untyped Expr, returning free variables with their use classification.
+/// `isGuarded`: true when inside at least one lambda body.
+/// `bound`: variables bound in the current scope (to exclude from free vars).
+let rec exprFreeVars (isGuarded: bool) (bound: Set<string>) (expr: Expr) : Map<string, bool> =
+    let classify = isGuarded
+
+    match expr with
+    | EInt _
+    | EString _
+    | EQuotedSymbol _
+    | EKeyword _ -> Map.empty
+    | EIdent(name, _) ->
+        if Set.contains name bound then
+            Map.empty
+        else
+            Map.add name classify Map.empty
+    | ETuple(exprs, _)
+    | EList(exprs, _) ->
+        exprs
+        |> List.map (exprFreeVars isGuarded bound)
+        |> List.fold mergeVarUseMaps Map.empty
+    | EApp(target, args, _) ->
+        let tfv = exprFreeVars isGuarded bound target
+
+        let afvs =
+            args
+            |> List.map (exprFreeVars isGuarded bound)
+            |> List.fold mergeVarUseMaps Map.empty
+
+        mergeVarUseMaps tfv afvs
+    | ECast(_, expr, _) -> exprFreeVars isGuarded bound expr
+    | ELet(name, isFun, args, value, body, _) ->
+        let boundInValue = if isFun then Set.union bound (Set.ofList args) else bound
+        let vfv = exprFreeVars (isGuarded || isFun) boundInValue value
+        let bfv = exprFreeVars isGuarded (Set.add name bound) body
+        mergeVarUseMaps vfv bfv
+
+    | ELetRec(bindings, body, _) ->
+        let boundNames = bindings |> List.map (fun (n, _, _, _) -> n) |> Set.ofList
+        let allBound = Set.union bound boundNames
+
+        let bfvs =
+            bindings
+            |> List.map (fun (_, isFun, args, expr) ->
+                let boundInExpr =
+                    if isFun then
+                        Set.union allBound (Set.ofList args)
+                    else
+                        allBound
+
+                exprFreeVars (isGuarded || isFun) boundInExpr expr)
+            |> List.fold mergeVarUseMaps Map.empty
+
+        let bodyFv = exprFreeVars isGuarded allBound body
+        mergeVarUseMaps bfvs bodyFv
+    | ELetTuple(names, value, body, _) ->
+        let vfv = exprFreeVars isGuarded bound value
+        let bfv = exprFreeVars isGuarded (Set.union bound (Set.ofList names)) body
+        mergeVarUseMaps vfv bfv
+    | EIf(cond, trueB, falseB, _) ->
+        let cfv = exprFreeVars isGuarded bound cond
+        let tfv = exprFreeVars isGuarded bound trueB
+        let ffv = exprFreeVars isGuarded bound falseB
+        mergeVarUseMaps (mergeVarUseMaps cfv tfv) ffv
+    | EFun(args, body, _) -> exprFreeVars true (Set.union bound (Set.ofList args)) body
+    | ERecord(fields, _) ->
+        fields
+        |> List.map (snd >> exprFreeVars isGuarded bound)
+        |> List.fold mergeVarUseMaps Map.empty
+    | ERecordUpdate(_, fields, _) ->
+        fields
+        |> List.map (snd >> exprFreeVars isGuarded bound)
+        |> List.fold mergeVarUseMaps Map.empty
+    | EGetField(target, _, _) -> exprFreeVars isGuarded bound target
+    | EMatch(target, clauses, _) ->
+        let tfv = exprFreeVars isGuarded bound target
+
+        let cfvs =
+            clauses
+            |> List.map (fun (pat, guard, body) ->
+                let patBounds = patternBoundNames pat |> Set.ofList
+                let innerBound = Set.union bound patBounds
+
+                let gfv =
+                    match guard with
+                    | Some g -> exprFreeVars isGuarded innerBound g
+                    | None -> Map.empty
+
+                let bfv = exprFreeVars isGuarded innerBound body
+                mergeVarUseMaps gfv bfv)
+            |> List.fold mergeVarUseMaps Map.empty
+
+        mergeVarUseMaps tfv cfvs
+    | ELetMutable(name, value, body, _) ->
+        let vfv = exprFreeVars isGuarded bound value
+        let bfv = exprFreeVars isGuarded (Set.add name bound) body
+        mergeVarUseMaps vfv bfv
+    | ESet(name, value, _) ->
+        let vfv = exprFreeVars isGuarded bound value
+
+        let tfv =
+            if Set.contains name bound then
+                Map.empty
+            else
+                Map.add name classify Map.empty
+
+        mergeVarUseMaps tfv vfv
+    | ETryFinally(body, cleanup, _) ->
+        mergeVarUseMaps (exprFreeVars isGuarded bound body) (exprFreeVars isGuarded bound cleanup)
+
+/// Kosaraju's algorithm: compute SCCs of a graph, returned in reverse topological order.
+let computeSCCs (nodes: Set<string>) (edges: Map<string, Map<string, bool>>) : Set<string> list =
+    let mutable visited = Set.empty
+    let mutable order: string list = []
+
+    let rec dfsForward (node: string) =
+        // Prevent traversal from escaping into external/global symbols
+        if Set.contains node nodes && not (Set.contains node visited) then
+            visited <- Set.add node visited
+
+            match Map.tryFind node edges with
+            | Some neighbors ->
+                for nbr in Map.keys neighbors do
+                    dfsForward nbr
+            | None -> ()
+
+            order <- node :: order
+
+    for node in nodes do
+        dfsForward node
+
+    let revEdges =
+        nodes
+        |> Seq.fold
+            (fun acc node ->
+                let mutable acc' = acc
+
+                match Map.tryFind node edges with
+                | Some neighbors ->
+                    for nbr in Map.keys neighbors do
+                        // Only map reverse dependencies within the local block
+                        if Set.contains nbr nodes then
+                            acc' <-
+                                match Map.tryFind nbr acc' with
+                                | Some existing -> Map.add nbr (Set.add node existing) acc'
+                                | None -> Map.add nbr (Set.singleton node) acc'
+                | None -> ()
+
+                if not (Map.containsKey node acc') then
+                    acc' <- Map.add node Set.empty acc'
+
+                acc')
+            Map.empty
+
+    visited <- Set.empty
+    let mutable sccs: Set<string> list = []
+
+    let rec dfsReverse (node: string) (acc: Set<string>) =
+        if Set.contains node nodes && not (Set.contains node visited) then
+            visited <- Set.add node visited
+            let mutable acc' = Set.add node acc
+
+            match Map.tryFind node revEdges with
+            | Some neighbors ->
+                for nbr in neighbors do
+                    acc' <- dfsReverse nbr acc'
+            | None -> ()
+
+            acc'
+        else
+            acc
+
+    for node in order do
+        if Set.contains node nodes && not (Set.contains node visited) then
+            let scc = dfsReverse node Set.empty
+            sccs <- scc :: sccs
+
+    sccs
+
+
+/// Recursively optimizes ELetRec blocks into minimal ELet/ELetRec chains
+let rec letrecifyExpr (expr: Expr) : Expr =
+    match expr with
+    | EInt _
+    | EString _
+    | EQuotedSymbol _
+    | EKeyword _
+    | EIdent _ -> expr
+
+    | ETuple(exprs, r) -> ETuple(List.map letrecifyExpr exprs, r)
+    | EList(exprs, r) -> EList(List.map letrecifyExpr exprs, r)
+    | EApp(target, args, r) -> EApp(letrecifyExpr target, List.map letrecifyExpr args, r)
+    | ECast(t, e, r) -> ECast(t, letrecifyExpr e, r)
+
+    | ELet(name, isFun, args, value, body, r) -> ELet(name, isFun, args, letrecifyExpr value, letrecifyExpr body, r)
+
+    | ELetTuple(names, value, body, r) -> ELetTuple(names, letrecifyExpr value, letrecifyExpr body, r)
+
+    | EIf(cond, t, f, r) -> EIf(letrecifyExpr cond, letrecifyExpr t, letrecifyExpr f, r)
+
+    | EFun(args, body, r) -> EFun(args, letrecifyExpr body, r)
+
+    | ERecord(fields, r) -> ERecord(fields |> List.map (fun (k, v) -> k, letrecifyExpr v), r)
+
+    | ERecordUpdate(baseRec, fields, r) ->
+        ERecordUpdate(baseRec, fields |> List.map (fun (k, v) -> k, letrecifyExpr v), r)
+
+    | EGetField(target, field, r) -> EGetField(letrecifyExpr target, field, r)
+
+    | EMatch(target, clauses, r) ->
+        let optimizedClauses =
+            clauses
+            |> List.map (fun (p, g, b) -> (p, Option.map letrecifyExpr g, letrecifyExpr b))
+
+        EMatch(letrecifyExpr target, optimizedClauses, r)
+
+    | ELetMutable(name, value, body, r) -> ELetMutable(name, letrecifyExpr value, letrecifyExpr body, r)
+
+    | ESet(name, value, r) -> ESet(name, letrecifyExpr value, r)
+
+    | ETryFinally(body, cleanup, r) -> ETryFinally(letrecifyExpr body, letrecifyExpr cleanup, r)
+
+    | ELetRec(bindings, body, r) ->
+        // 1. Optimize nested expressions within the bindings and the body first
+        let optBindings =
+            bindings |> List.map (fun (n, isF, args, e) -> (n, isF, args, letrecifyExpr e))
+
+        let optBody = letrecifyExpr body
+
+        // 2. Map nodes to expressions and build edges based on localized free variables
+        let nodes = optBindings |> List.map (fun (n, _, _, _) -> n) |> Set.ofList
+
+        let edges =
+            optBindings
+            |> List.map (fun (n, isFun, args, e) ->
+                let boundInExpr = if isFun then Set.ofList args else Set.empty
+                let fvs = exprFreeVars isFun boundInExpr e
+                let localDeps = fvs |> Map.filter (fun k _ -> Set.contains k nodes)
+                (n, localDeps))
+            |> Map.ofList
+
+        // 3. Compute SCCs
+        let sccs = computeSCCs nodes edges
+
+        // 4. Reconstruct the syntax tree
+        let bindingMap =
+            optBindings |> List.map (fun ((n, _, _, _) as b) -> n, b) |> Map.ofList
+
+        List.foldBack
+            (fun scc accBody ->
+                let componentNodes = Set.toList scc
+                let componentBindings = componentNodes |> List.map (fun n -> Map.find n bindingMap)
+
+                if componentNodes.Length = 1 then
+                    let n = componentNodes[0]
+                    let (_, isF, args, e) = componentBindings[0]
+
+                    let isSelfRecursive =
+                        match Map.tryFind n edges with
+                        | Some deps -> Map.containsKey n deps
+                        | None -> false
+
+                    if isSelfRecursive then
+                        ELetRec(componentBindings, accBody, r)
+                    else
+                        ELet(n, isF, args, e, accBody, r)
+                else
+                    ELetRec(componentBindings, accBody, r)
+
+            )
+            sccs
+            optBody
+
+/// Walks declarations, applying the LetRecify pass to all inner bodies.
+let rec letrecifyDecl (decl: Decl) : Decl =
+    match decl with
+    | DDef(name, expr, r) -> DDef(name, letrecifyExpr expr, r)
+    | DDefTuple(names, expr, r) -> DDefTuple(names, letrecifyExpr expr, r)
+    | DDefMutable(name, expr, r) -> DDefMutable(name, letrecifyExpr expr, r)
+    | DDefun(name, args, retType, body, r) -> DDefun(name, args, retType, letrecifyExpr body, r)
+    | DModule(name, decls, r) -> DModule(name, letrecifyModule decls, r)
+    | _ -> decl // Types, imports, exports, and signatures carry no executable body [cite: 29, 30, 31, 37, 38]
+
+and letrecifyModule (decls: Decl list) : Decl list = List.map letrecifyDecl decls

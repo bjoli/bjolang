@@ -9,14 +9,11 @@
         <Compile Include="Lexer.fs"/>
         <Compile Include="Parser.fs"/>
         <Compile Include="LetRecify.fs"/>
-        <Compile Include="ASTPrinter.fs"/>
         <Compile Include="TypeChecker.fs" />
         <Compile Include="TailRecursion.fs" />
-        <Compile Include="ClosureDesugar.fs" />
-        <Compile Include="ClosureConversion.fs" />
-        <Compile Include="Emitter.fs" />
         <Compile Include="Prelude.fs" />
         <Compile Include="Pipeline.fs"/>
+        <Compile Include="Codegen.fs"/>
         <Compile Include="Program.fs" />
     </ItemGroup>
 

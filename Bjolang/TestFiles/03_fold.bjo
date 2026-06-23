@@ -1,5 +1,3 @@
-(import (std list))
-(: foldl (-> (-> 'a 'b 'a) 'a (List 'b) 'a))
 (defun (foldl f init lst)
   (if (is-empty lst)
       init
