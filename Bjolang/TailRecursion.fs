@@ -68,6 +68,7 @@ let rec analyzeExpr (inTailPosition: bool) (currentFuncName: string option) (exp
         | TIsInst (e, t) -> TIsInst (analyzeExpr false currentFuncName e, t)
         | TCast (e, t) -> TCast (analyzeExpr false currentFuncName e, t)
         | TTypeEq (e1, e2) -> TTypeEq (analyzeExpr false currentFuncName e1, analyzeExpr false currentFuncName e2)
+        | TThrow e -> TThrow (analyzeExpr false currentFuncName e)
 
     { expr with Node = mapNode expr.Node }
 

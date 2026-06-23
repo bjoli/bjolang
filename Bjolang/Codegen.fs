@@ -105,9 +105,18 @@ let rec generateExpr (ctx: CodegenContext) (expr: TypedExpr) : unit =
         append ctx $"\"%s{escaped}\""
     | TKeyword k -> append ctx $"\"%s{k}\""
     | TSymbol s -> append ctx $"\"%s{s}\""
-    | TIdent (name, _) -> append ctx (sanitizeIdent name)
+    | TIdent (name, _) ->
+        match expr.Type with
+        | TFun _ ->
+            append ctx $"(({typeToString expr.Type})({sanitizeIdent name}))"
+        | _ ->
+            append ctx (sanitizeIdent name)
     | TApply (target, args, _) ->
-        generateExpr ctx target
+        match target.Node with
+        | TIdent (name, _) ->
+            append ctx (sanitizeIdent name)
+        | _ ->
+            generateExpr ctx target
         append ctx "("
         for i, arg in List.indexed args do
             if i > 0 then append ctx ", "
@@ -230,6 +239,10 @@ let rec generateExpr (ctx: CodegenContext) (expr: TypedExpr) : unit =
             append ctx "return "
             generateExpr ctx body
             append ctx "; })()"
+    | TThrow msgExpr ->
+        append ctx "throw new Exception("
+        generateExpr ctx msgExpr
+        append ctx ")"
     | _ ->
         append ctx "/* Unimplemented expression node */"
 

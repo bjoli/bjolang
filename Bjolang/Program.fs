@@ -149,6 +149,17 @@ let main argv =
             p.WaitForExit()
             
             if p.ExitCode = 0 then
+                let generatedDll = Path.Combine(outDir, assemblyName + ".dll")
+                if System.IO.File.Exists(generatedDll) && Path.GetFullPath(generatedDll) <> Path.GetFullPath(outputFilePath) then
+                    if System.IO.File.Exists(outputFilePath) then System.IO.File.Delete(outputFilePath)
+                    System.IO.File.Move(generatedDll, outputFilePath)
+                
+                let genRuntimeConfig = Path.Combine(outDir, assemblyName + ".runtimeconfig.json")
+                let outRuntimeConfig = Path.ChangeExtension(outputFilePath, ".runtimeconfig.json")
+                if System.IO.File.Exists(genRuntimeConfig) && Path.GetFullPath(genRuntimeConfig) <> Path.GetFullPath(outRuntimeConfig) then
+                    if System.IO.File.Exists(outRuntimeConfig) then System.IO.File.Delete(outRuntimeConfig)
+                    System.IO.File.Move(genRuntimeConfig, outRuntimeConfig)
+
                 printfn $"Successfully built %s{outputFilePath}"
                 try Directory.Delete(tmpDir, true) with | _ -> ()
                 0
