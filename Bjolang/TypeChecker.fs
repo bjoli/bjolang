@@ -640,7 +640,11 @@ let rec infer (env: Env) (expr: Expr) : HMType * TypedExpr =
                                 recEnv
 
                         let bodyType, typedBody = infer localEnv expr
-                        TFun(argTypes, bodyType), typedBody
+                        let lambdaNode =
+                            ({ Type = TFun(argTypes, bodyType)
+                               Range = r
+                               Node = TLambda(args, typedBody) } : TypedExpr)
+                        TFun(argTypes, bodyType), lambdaNode
                     else
                         infer recEnv expr
 

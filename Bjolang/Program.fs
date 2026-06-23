@@ -133,6 +133,7 @@ let main argv =
 </Project>"""
             File.WriteAllText(Path.Combine(tmpDir, "Project.csproj"), csprojContent)
             File.WriteAllText(Path.Combine(tmpDir, "Program.cs"), fullCode)
+            File.WriteAllText("out.cs", fullCode)
             
             let outDir = Path.GetFullPath(if System.String.IsNullOrWhiteSpace(Path.GetDirectoryName(outputFilePath)) then "." else Path.GetDirectoryName(outputFilePath))
             let assemblyName = Path.GetFileNameWithoutExtension(outputFilePath)

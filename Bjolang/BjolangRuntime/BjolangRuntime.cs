@@ -18,12 +18,18 @@ public static class BjolangRuntime {
     
     public static List<T> Cons<T>(T head, List<T> tail) => new List<T>.Cons(head, tail);
     
-    public static bool is_empty<T>(List<T> lst) => lst is List<T>.Nil || lst == null;
+    public static bool issubempty<T>(List<T> lst) => lst is List<T>.Nil || lst == null;
     
     public static void displayln(object o) => Console.WriteLine(o);
     
     public static bool @true = true;
     public static bool @false = false;
+    
+    public static bool eq<T>(T a, T b) => EqualityComparer<T>.Default.Equals(a, b);
+    public static int sub(int a, int b) => a - b;
+    public static int pl(int a, int b) => a + b;
+    public static int star(int a, int b) => a * b;
+    public static int sl(int a, int b) => a / b;
     
     public static string byte_gtstring(byte b) => b.ToString();
     public static string int_gtstring(int i) => i.ToString();

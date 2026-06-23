@@ -51,7 +51,7 @@ let rec typeToString (hm: HMType) : string =
         else "T_" + name
     | TFun (args, ret) ->
         let argsStr = args |> List.map typeToString |> String.concat ", "
-        if ret = TypeConstants.voidType then
+        if typeToString ret = "void" then
             if args.IsEmpty then "Action" else $"Action<%s{argsStr}>"
         else
             if args.IsEmpty then $"Func<%s{typeToString ret}>" else $"Func<%s{argsStr}, %s{typeToString ret}>"
@@ -91,7 +91,7 @@ let rec serializeHMType (t: HMType) : string =
         $"object"
 
 let sanitizeIdent (s: string) =
-    let s = s.Replace("-", "_").Replace("?", "_QMARK").Replace("!", "_BANG").Replace("+", "add").Replace("*", "mul").Replace("/", "div").Replace("<", "lt").Replace(">", "gt").Replace("=", "eq")
+    let s = s.Replace("-", "sub").Replace("?", "_QMARK").Replace("!", "_BANG").Replace("+", "add").Replace("*", "mul").Replace("/", "div").Replace("<", "lt").Replace(">", "gt").Replace("=", "eq")
     let s = if s.Length > 0 && Char.IsDigit(s[0]) then "_" + s else s
     match s with
     | "class" | "struct" | "public" | "private" | "protected" | "internal" | "static" | "readonly" | "var" | "ref" | "out" | "in" | "params" | "new" | "return" | "if" | "else" | "while" | "for" | "foreach" | "do" | "switch" | "case" | "default" | "break" | "continue" | "goto" | "try" | "catch" | "finally" | "throw" | "lock" | "typeof" | "sizeof" | "is" | "as" | "true" | "false" | "null" | "void" | "object" | "string" | "int" | "bool" -> "@" + s
@@ -129,13 +129,22 @@ let rec generateExpr (ctx: CodegenContext) (expr: TypedExpr) : unit =
         append ctx ") => "
         generateExpr ctx body
     | TIf (cond, t, f) ->
-        append ctx "("
-        generateExpr ctx cond
-        append ctx " ? "
-        generateExpr ctx t
-        append ctx " : "
-        generateExpr ctx f
-        append ctx ")"
+        if typeToString expr.Type = "void" then
+            append ctx "new Action(() => { if ("
+            generateExpr ctx cond
+            append ctx ") { "
+            generateExpr ctx t
+            append ctx "; } else { "
+            generateExpr ctx f
+            append ctx "; } })()"
+        else
+            append ctx "("
+            generateExpr ctx cond
+            append ctx " ? "
+            generateExpr ctx t
+            append ctx " : "
+            generateExpr ctx f
+            append ctx ")"
     | TTupleMake args ->
         append ctx "("
         for i, arg in List.indexed args do
@@ -169,9 +178,13 @@ let rec generateExpr (ctx: CodegenContext) (expr: TypedExpr) : unit =
         generateExpr ctx target
         append ctx "))"
     | TLet (name, _, _, value, body) ->
-        append ctx "new Func<"
-        append ctx (typeToString body.Type)
-        append ctx ">(() => { "
+        let isVoid = typeToString body.Type = "void"
+        if isVoid then append ctx "new Action(() => { "
+        else
+            append ctx "new Func<"
+            append ctx (typeToString body.Type)
+            append ctx ">(() => { "
+        
         if typeToString value.Type = "void" then
             generateExpr ctx value
         else
@@ -180,9 +193,43 @@ let rec generateExpr (ctx: CodegenContext) (expr: TypedExpr) : unit =
             append ctx (sanitizeIdent name)
             append ctx " = "
             generateExpr ctx value
-        append ctx "; return "
-        generateExpr ctx body
-        append ctx "; })()"
+        append ctx "; "
+        if isVoid then
+            generateExpr ctx body
+            append ctx "; })()"
+        else
+            append ctx "return "
+            generateExpr ctx body
+            append ctx "; })()"
+
+    | TLetRec (bindings, body) ->
+        let isVoid = typeToString body.Type = "void"
+        if isVoid then append ctx "new Action(() => { "
+        else
+            append ctx "new Func<"
+            append ctx (typeToString body.Type)
+            append ctx ">(() => { "
+
+        for (name, _, _, value) in bindings do
+            append ctx (typeToString value.Type)
+            append ctx " "
+            append ctx (sanitizeIdent name)
+            append ctx " = default!;"
+            append ctx " "
+        for (name, _, _, value) in bindings do
+            append ctx (sanitizeIdent name)
+            append ctx " = "
+            generateExpr ctx value
+            append ctx ";"
+            append ctx " "
+        
+        if isVoid then
+            generateExpr ctx body
+            append ctx "; })()"
+        else
+            append ctx "return "
+            generateExpr ctx body
+            append ctx "; })()"
     | _ ->
         append ctx "/* Unimplemented expression node */"
 
