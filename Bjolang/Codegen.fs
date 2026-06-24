@@ -65,6 +65,12 @@ let rec typeToString (hm: HMType) : string =
     | TAssoc (traitName, assocName, implType) ->
         "object /* unresolved assoc */"
 
+type BlockTarget =
+    | Return
+    | Assign of string
+    | DeclareAndAssign of string * string
+    | Discard
+
 let rec serializeHMType (t: HMType) : string =
     match t with
     | TCon (name, args) ->
@@ -135,25 +141,19 @@ let rec generateExpr (ctx: CodegenContext) (expr: TypedExpr) : unit =
         append ctx "("
         let argsStr = args |> List.map sanitizeIdent |> String.concat ", "
         append ctx argsStr
-        append ctx ") => "
-        generateExpr ctx body
+        append ctx ") => {\n"
+        withIndent ctx (fun c -> generateBlock c Return body)
+        indent ctx; append ctx "}"
     | TIf (cond, t, f) ->
-        if typeToString expr.Type = "void" then
-            append ctx "new Action(() => { if ("
-            generateExpr ctx cond
-            append ctx ") { "
-            generateExpr ctx t
-            append ctx "; } else { "
-            generateExpr ctx f
-            append ctx "; } })()"
+        let isVoid = typeToString expr.Type = "void"
+        if isVoid then
+            append ctx "new Action(() => {\n"
+            withIndent ctx (fun c -> generateBlock c Discard expr)
+            indent ctx; append ctx "})()"
         else
-            append ctx "("
-            generateExpr ctx cond
-            append ctx " ? "
-            generateExpr ctx t
-            append ctx " : "
-            generateExpr ctx f
-            append ctx ")"
+            append ctx $"new Func<{typeToString expr.Type}>(() => {{\n"
+            withIndent ctx (fun c -> generateBlock c Return expr)
+            indent ctx; append ctx "})()"
     | TTupleMake args ->
         append ctx "("
         for i, arg in List.indexed args do
@@ -186,63 +186,93 @@ let rec generateExpr (ctx: CodegenContext) (expr: TypedExpr) : unit =
         append ctx ")("
         generateExpr ctx target
         append ctx "))"
+    | TLet _ | TLetRec _ | TThrow _ as node ->
+        let isVoid = typeToString expr.Type = "void"
+        if isVoid then
+            append ctx "new Action(() => {\n"
+            withIndent ctx (fun c -> generateBlock c Discard expr)
+            indent ctx; append ctx "})()"
+        else
+            append ctx $"new Func<{typeToString expr.Type}>(() => {{\n"
+            withIndent ctx (fun c -> generateBlock c Return expr)
+            indent ctx; append ctx "})()"
+    | _ ->
+        append ctx "/* Unimplemented expression node */"
+
+and generateBlock (ctx: CodegenContext) (target: BlockTarget) (expr: TypedExpr) : unit =
+    match expr.Node with
     | TLet (name, _, _, value, body) ->
-        let isVoid = typeToString body.Type = "void"
-        if isVoid then append ctx "new Action(() => { "
-        else
-            append ctx "new Func<"
-            append ctx (typeToString body.Type)
-            append ctx ">(() => { "
-        
         if typeToString value.Type = "void" then
-            generateExpr ctx value
+            generateBlock ctx Discard value
         else
-            append ctx (typeToString value.Type)
-            append ctx " "
-            append ctx (sanitizeIdent name)
-            append ctx " = "
-            generateExpr ctx value
-        append ctx "; "
-        if isVoid then
-            generateExpr ctx body
-            append ctx "; })()"
-        else
-            append ctx "return "
-            generateExpr ctx body
-            append ctx "; })()"
-
+            generateBlock ctx (DeclareAndAssign (typeToString value.Type, sanitizeIdent name)) value
+        generateBlock ctx target body
+    
     | TLetRec (bindings, body) ->
-        let isVoid = typeToString body.Type = "void"
-        if isVoid then append ctx "new Action(() => { "
-        else
-            append ctx "new Func<"
-            append ctx (typeToString body.Type)
-            append ctx ">(() => { "
-
         for (name, _, _, value) in bindings do
-            append ctx (typeToString value.Type)
-            append ctx " "
-            append ctx (sanitizeIdent name)
-            append ctx " = default!;"
-            append ctx " "
+            indent ctx
+            appendLine ctx $"{typeToString value.Type} {sanitizeIdent name} = default!;"
         for (name, _, _, value) in bindings do
-            append ctx (sanitizeIdent name)
-            append ctx " = "
-            generateExpr ctx value
-            append ctx ";"
-            append ctx " "
+            generateBlock ctx (Assign (sanitizeIdent name)) value
+        generateBlock ctx target body
         
-        if isVoid then
-            generateExpr ctx body
-            append ctx "; })()"
-        else
-            append ctx "return "
-            generateExpr ctx body
-            append ctx "; })()"
+    | TIf (cond, t, f) ->
+        match target with
+        | DeclareAndAssign (varType, varName) ->
+            indent ctx; appendLine ctx $"{varType} {varName};"
+            indent ctx; append ctx "if ("
+            generateExpr ctx cond
+            appendLine ctx ") {"
+            withIndent ctx (fun c -> generateBlock c (Assign varName) t)
+            indent ctx; appendLine ctx "} else {"
+            withIndent ctx (fun c -> generateBlock c (Assign varName) f)
+            indent ctx; appendLine ctx "}"
+        | _ ->
+            indent ctx; append ctx "if ("
+            generateExpr ctx cond
+            appendLine ctx ") {"
+            withIndent ctx (fun c -> generateBlock c target t)
+            indent ctx; appendLine ctx "} else {"
+            withIndent ctx (fun c -> generateBlock c target f)
+            indent ctx; appendLine ctx "}"
+
     | TThrow msgExpr ->
-        append ctx "throw new Exception("
+        indent ctx; append ctx "throw new Exception("
         generateExpr ctx msgExpr
-        append ctx ")"
+        appendLine ctx ");"
+
+    | _ ->
+        let isVoid = typeToString expr.Type = "void"
+        indent ctx
+        match target with
+        | Return ->
+            if isVoid then
+                generateExpr ctx expr
+                appendLine ctx ";"
+                indent ctx; appendLine ctx "return;"
+            else
+                append ctx "return "
+                generateExpr ctx expr
+                appendLine ctx ";"
+        | Assign name ->
+            if isVoid then
+                generateExpr ctx expr
+                appendLine ctx ";"
+            else
+                append ctx $"{name} = "
+                generateExpr ctx expr
+                appendLine ctx ";"
+        | DeclareAndAssign (varType, varName) ->
+            if isVoid then
+                generateExpr ctx expr
+                appendLine ctx ";"
+            else
+                append ctx $"{varType} {varName} = "
+                generateExpr ctx expr
+                appendLine ctx ";"
+        | Discard ->
+            generateExpr ctx expr
+            appendLine ctx ";"
     | _ ->
         append ctx "/* Unimplemented expression node */"
 
@@ -265,10 +295,7 @@ let rec generateDecl (ctx: CodegenContext) (decl: TDecl) : unit =
             append ctx (sanitizeIdent argName)
         append ctx ") {\n"
         withIndent ctx (fun ctx ->
-            indent ctx
-            append ctx "return "
-            generateExpr ctx body
-            appendLine ctx ";"
+            generateBlock ctx Return body
         )
         indent ctx
         appendLine ctx "}"
@@ -389,10 +416,7 @@ let rec generateDecl (ctx: CodegenContext) (decl: TDecl) : unit =
                         append ctx (sanitizeIdent argName)
                     append ctx ") {\n"
                     withIndent ctx (fun ctx ->
-                        indent ctx
-                        append ctx "return "
-                        generateExpr ctx body
-                        appendLine ctx ";"
+                        generateBlock ctx Return body
                     )
                     indent ctx
                     appendLine ctx "}"
