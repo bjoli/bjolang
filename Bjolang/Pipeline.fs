@@ -88,6 +88,22 @@ let loadModuleGraph (mainFilePath: string) : Decl list * string list =
                     dllDeps.Add(absPath) |> ignore
                     let asm = System.Reflection.Assembly.LoadFile(absPath)
                     let attr = asm.GetCustomAttributes(typeof<System.Reflection.AssemblyMetadataAttribute>, false)
+                    
+                    // Collect transitive DLL dependencies from BjolangDeps metadata
+                    let transitiveDeps =
+                        attr
+                        |> Array.choose (fun a -> 
+                            let meta = a :?> System.Reflection.AssemblyMetadataAttribute
+                            if meta.Key = "BjolangDeps" then Some meta.Value else None)
+                        |> Array.tryHead
+                    match transitiveDeps with
+                    | Some depsStr ->
+                        for dep in depsStr.Split(';') do
+                            let depPath = dep.Trim()
+                            if depPath <> "" && System.IO.File.Exists(depPath) then
+                                dllDeps.Add(depPath) |> ignore
+                    | None -> ()
+                    
                     let exports =
                         attr
                         |> Array.choose (fun a -> 

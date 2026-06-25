@@ -115,9 +115,12 @@ and TExprNode =
     | TTryFinally of TypedExpr * TypedExpr
     | TMatch of TypedExpr * TMatchClause list
     | TInterfaceCall of HMType * string * TypedExpr * TypedExpr list
+    | TThrow of TypedExpr
     // Lowered
     | TIsInst of TypedExpr * HMType
+    | TIsInstCase of TypedExpr * HMType * string
     | TCast of TypedExpr * HMType
+    | TCaseCast of TypedExpr * HMType * string
     | TGetField of TypedExpr * string
     | TTypeEq of TypedExpr * TypedExpr
 
@@ -137,7 +140,7 @@ type TDecl =
     | TType of TypeDef list * Range
     | TTypeRec of TypeDef list * Range
     | TTrait of string * string * string list * Map<string, HMType> * Range
-    | TImpl of string * HMType * Map<string, HMType> * TDecl list * Range
+    | TImpl of string * HMType * (string * HMType) list * TDecl list * Range
     | TExtern of string * FType * Range
 
 type TraitConstraint =
@@ -471,6 +474,7 @@ let private typeNameMap =
         "double", TypeConstants.doubleType
         "string", TypeConstants.stringType
         "bool", TypeConstants.boolType
+        "void", TypeConstants.voidType
     ]
 
 let rec resolveTypeAnnotation (registry: TraitRegistry) (ptype: FType) : HMType =
@@ -577,7 +581,11 @@ let rec infer (env: Env) (expr: Expr) : HMType * TypedExpr =
                         env
 
                 let bodyType, typedBody = infer localEnv value
-                TFun(argTypes, bodyType), typedBody
+                let lambdaNode =
+                    ({ Type = TFun(argTypes, bodyType)
+                       Range = r
+                       Node = TLambda(args, typedBody) } : TypedExpr)
+                TFun(argTypes, bodyType), lambdaNode
             else
                 infer env value
 
@@ -786,6 +794,7 @@ let rec infer (env: Env) (expr: Expr) : HMType * TypedExpr =
         { Type = bodyType
           Range = r
           Node = TTryFinally(tBody, tCleanup) }
+
 
     | EMatch(target, clauses, r) ->
         let targetType, typedTarget = infer env target
@@ -1004,86 +1013,36 @@ module MatchCompiler =
             : TypedExpr)
 
         | TPConstruct(name, subPats) ->
-            match name with
-            | "Nil" ->
-                let isEmptyFn =
-                    ({ Type = TFun([ target.Type ], TypeConstants.boolType)
-                       Range = pat.Range
-                       Node = TIdent("is-empty", []) }
-                    : TypedExpr)
-
-                let cond =
-                    ({ Type = TypeConstants.boolType
-                       Range = pat.Range
-                       Node = TApply(isEmptyFn, [ target ], false) }
-                    : TypedExpr)
-
-                ({ Type = failExpr.Type
+            let isConsCond =
+                ({ Type = TypeConstants.boolType
                    Range = pat.Range
-                   Node = TIf(cond, cont failExpr, failExpr) }
+                   Node = TIsInstCase(target, target.Type, name) }
                 : TypedExpr)
 
-            | "Cons" ->
-                let isEmptyFn =
-                    ({ Type = TFun([ target.Type ], TypeConstants.boolType)
+            let compileSubPats actualFail =
+                let castedTarget =
+                    ({ Type = target.Type
                        Range = pat.Range
-                       Node = TIdent("is-empty", []) }
+                       Node = TCaseCast(target, target.Type, name) }
                     : TypedExpr)
 
-                let isEmptyCall =
-                    ({ Type = TypeConstants.boolType
-                       Range = pat.Range
-                       Node = TApply(isEmptyFn, [ target ], false) }
-                    : TypedExpr)
+                let rec buildSubPats idx remainingPats cont =
+                    match remainingPats with
+                    | [] -> cont actualFail
+                    | p :: ps ->
+                        let fieldExpr =
+                            ({ Type = p.Type
+                               Range = pat.Range
+                               Node = TGetField(castedTarget, $"Item%d{idx}") }
+                            : TypedExpr)
+                        compilePattern traits fieldExpr p (fun f1 -> buildSubPats (idx + 1) ps cont) actualFail
 
-                let falseIdent =
-                    ({ Type = TypeConstants.boolType
-                       Range = pat.Range
-                       Node = TIdent("false", []) }
-                    : TypedExpr)
+                buildSubPats 1 subPats (fun _ -> cont actualFail)
 
-                let trueIdent =
-                    ({ Type = TypeConstants.boolType
-                       Range = pat.Range
-                       Node = TIdent("true", []) }
-                    : TypedExpr)
-
-                let isConsCond =
-                    ({ Type = TypeConstants.boolType
-                       Range = pat.Range
-                       Node = TIf(isEmptyCall, falseIdent, trueIdent) }
-                    : TypedExpr)
-
-                let compileSubPats actualFail =
-                    let elemType =
-                        match prune traits target.Type with
-                        | TCon(_, [ t ]) -> t
-                        | _ -> TypeConstants.objType
-
-                    let headField =
-                        ({ Type = elemType
-                           Range = pat.Range
-                           Node = TGetField(target, "Head") }
-                        : TypedExpr)
-
-                    let tailField =
-                        ({ Type = target.Type
-                           Range = pat.Range
-                           Node = TGetField(target, "Tail") }
-                        : TypedExpr)
-
-                    compilePattern
-                        traits
-                        headField
-                        subPats[0]
-                        (fun f1 -> compilePattern traits tailField subPats[1] (fun f2 -> cont f2) f1)
-                        actualFail
-
-                ({ Type = failExpr.Type
-                   Range = pat.Range
-                   Node = TIf(isConsCond, compileSubPats failExpr, failExpr) }
-                : TypedExpr)
-            | _ -> failwithf $"Unsupported constructor lowering: %s{name}"
+            ({ Type = failExpr.Type
+               Range = pat.Range
+               Node = TIf(isConsCond, compileSubPats failExpr, failExpr) }
+            : TypedExpr)
 
         | TPList(items, tailOpt) ->
             let rec desugarListToConstruct elements : TypedPattern =
@@ -1148,55 +1107,13 @@ module MatchCompiler =
 
             let panicMsg = $"Match failure occurred at line %d{expr.Range.Start.Line}"
 
-            let logFn =
-                ({ Type = TFun([ TypeConstants.stringType ], TypeConstants.voidType)
-                   Range = expr.Range
-                   Node = TIdent("displayln", []) }
-                : TypedExpr)
-
-            let msgStr =
-                ({ Type = TypeConstants.stringType
-                   Range = expr.Range
-                   Node = TString panicMsg }
-                : TypedExpr)
-
-            let defaultNode =
-                match prune env.Registry expr.Type with
-                | TCon(name, _) when name = TypeConstants.Int32Name ->
-                    ({ Type = expr.Type
-                       Range = expr.Range
-                       Node = TInt "0" }
-                    : TypedExpr)
-                | TCon(name, _) when name = TypeConstants.BooleanName ->
-                    ({ Type = TypeConstants.boolType
-                       Range = expr.Range
-                       Node = TIdent("false", []) }
-                    : TypedExpr)
-                | TCon(name, _) when name = TypeConstants.StringName ->
-                    ({ Type = TypeConstants.stringType
-                       Range = expr.Range
-                       Node = TString "" }
-                    : TypedExpr)
-                | _ ->
-                    ({ Type = expr.Type
-                       Range = expr.Range
-                       Node = TIdent("Nil", []) }
-                    : TypedExpr)
-
             let failNode =
                 ({ Type = expr.Type
                    Range = expr.Range
                    Node =
-                     TLet(
-                         "_",
-                         false,
-                         [],
-                         ({ Type = TypeConstants.voidType
-                            Range = expr.Range
-                            Node = TApply(logFn, [ msgStr ], false) }
-                         : TypedExpr),
-                         defaultNode
-                     ) }
+                       TThrow({ Type = TypeConstants.stringType
+                                Range = expr.Range
+                                Node = TString panicMsg } : TypedExpr) }
                 : TypedExpr)
 
             let tempVar = freshLocalName ()
@@ -1289,12 +1206,13 @@ module DictionaryLowering =
                 | Some(traitName, _) ->
                     let targetObj = args.Head
                     let loweredArgs = args |> List.map recurse
-                    let receiverType = argTypes[0]
+                    let receiverType = prune env.Registry argTypes[0]
 
-                    match targetObj.Type with
+                    match prune env.Registry targetObj.Type with
                     | TCon(targetTypeName, _) ->
                         // STATIC DISPATCH: Direct devirtualization
-                        let implClassName = $"%s{traitName}_%s{targetTypeName}"
+                        let targetTypeSanitized = targetTypeName.Replace(".", "_")
+                        let implClassName = $"%s{traitName}_%s{targetTypeSanitized}"
 
                         let staticDirectTarget =
                             { target with
@@ -1369,12 +1287,15 @@ module DictionaryLowering =
                 TMatch(recurse target, lowClauses)
 
             | TIsInst(tgt, t) -> TIsInst(recurse tgt, t)
-
+            | TIsInstCase(tgt, t, caseName) -> TIsInstCase(recurse tgt, t, caseName)
             | TCast(tgt, t) -> TCast(recurse tgt, t)
+            | TCaseCast(tgt, t, caseName) -> TCaseCast(recurse tgt, t, caseName)
 
             | TGetField(tgt, n) -> TGetField(recurse tgt, n)
 
             | TTypeEq(t1, t2) -> TTypeEq(recurse t1, recurse t2)
+
+            | TThrow e -> TThrow(recurse e)
 
         { expr with Node = node }
 
@@ -1448,9 +1369,9 @@ let registerTypeDefs (isRec: bool) (typeDefs: TypeDef list) (env: Env) : Env =
                     match case with
                     | SimpleCase(n, _) -> n, []
                     | DataCase(n, types, _) -> n, types |> List.map (resolveTypeAnnotation finalRegistry)
-                let schemeArgs = tArgs |> List.map (fun s -> s.TrimStart('\''))
+                let schemeArgs = tArgs
                 let consScheme =
-                    if resolvedArgs.Length = 0 then
+                    if resolvedArgs.IsEmpty then
                         Scheme(schemeArgs, [], parentType)
                     else
                         Scheme(schemeArgs, [], TFun(resolvedArgs, parentType))
@@ -1630,7 +1551,7 @@ let rec checkDecl (env: Env) (sigs: Map<string, HMType>) (decl: Decl) : Env * Ma
             finalEnv <- addBinding kvp.Key { Scheme = scheme; IsMutable = false } finalEnv
 
         // TDecl representation requires a TTrait node definition in your AST
-        finalEnv, sigs, []
+        finalEnv, sigs, [ TTrait(traitName, implementorVar, assocTypes, hmSignatures, r) ]
     | DTypeRec(typeDefs, r) -> registerTypeDefs true typeDefs env, sigs, [ TTypeRec(typeDefs, r) ]
     | DImpl(traitName, targetTypeExpr, assocBindings, methods, r) ->
         let targetType = resolveTypeAnnotation env.Registry targetTypeExpr
@@ -1650,16 +1571,16 @@ let rec checkDecl (env: Env) (sigs: Map<string, HMType>) (decl: Decl) : Env * Ma
         let hmAssocBindings =
             assocBindings
             |> List.map (fun (name, fType) -> name, resolveTypeAnnotation env.Registry fType)
-            |> Map.ofList
 
-        let regEnv = addImplementation traitName typeKey hmAssocBindings env
+        let hmAssocBindingsMap = Map.ofList hmAssocBindings
+        let regEnv = addImplementation traitName typeKey hmAssocBindingsMap env
         let traitInfo = Map.find traitName regEnv.Registry.Traits
 
         // FIX 1: Prepend the "'" to the substitution keys so they match TVar "'c"
         let mutable substitutions = Map.add ("'" + traitInfo.ImplementorVar) targetType Map.empty
 
-        for kvp in hmAssocBindings do
-            substitutions <- Map.add ("'" + kvp.Key) kvp.Value substitutions
+        for (k, v) in hmAssocBindings do
+            substitutions <- Map.add ("'" + k) v substitutions
 
         let rec applySubst t =
             match prune regEnv.Registry t with

@@ -6,9 +6,11 @@ open Bjolang.TypeChecker
 // Helper for function types
 let makeFunType args ret = TFun (args, ret)
 
+let makeVecType a = TCon("Vec", [a])
+
 let emptyRegistry : TraitRegistry =
     { LocalTraits = Set.empty
-      LocalTypes = Set.singleton "List"
+      LocalTypes = Set.ofList ["List"; "Vec"]
       Traits = Map.empty
       Implementations = Map.empty
       Aliases = Map.empty
@@ -41,21 +43,13 @@ let prelude : Env =
         // equal? : 'a -> 'a -> bool (Structural/Generic equality)
         ("equal?", {Scheme = Scheme(["a"], [], makeFunType [TVar "a"; TVar "a"] boolType); IsMutable = false })
 
-        // List constructors
-        // Nil : List<'a>
-        ("Nil", {Scheme = Scheme(["a"], [], TCon ("List", [TVar "a"])); IsMutable = false })
-        // Cons : 'a -> List<'a> -> List<'a>
-        ("Cons", {Scheme = Scheme(["a"], [], makeFunType [TVar "a"; TCon ("List", [TVar "a"])] (TCon ("List", [TVar "a"]))); IsMutable = false })
-
-        // List operations
-        ("is-empty", {Scheme = Scheme(["a"], [], makeFunType [TCon ("List", [TVar "a"])] boolType); IsMutable = false })
-        ("head", {Scheme = Scheme(["a"], [], makeFunType [TCon ("List", [TVar "a"])] (TVar "a")); IsMutable = false })
-        ("tail", {Scheme = Scheme(["a"], [], makeFunType [TCon ("List", [TVar "a"])] (TCon ("List", [TVar "a"]))); IsMutable = false })
 
         // I/O
         ("print", {Scheme = Scheme(["a"], [], makeFunType [TVar "a"] voidType); IsMutable = false })
         ("display", {Scheme = Scheme([], [], makeFunType [stringType] voidType); IsMutable = false })
         ("displayln", {Scheme = Scheme([], [], makeFunType [stringType] voidType); IsMutable = false })
+
+        ("read-line", {Scheme = Scheme([], [], makeFunType [] stringType); IsMutable = false })
         ("newline", {Scheme = Scheme([], [], makeFunType [] voidType); IsMutable = false })
 
         // String operations
@@ -70,5 +64,29 @@ let prelude : Env =
         ("int->string", {Scheme = Scheme([], [], makeFunType [intType] stringType); IsMutable = false })
         ("string->int", {Scheme = Scheme([], [], makeFunType [stringType] intType); IsMutable = false })
         ("string->double", {Scheme = Scheme([], [], makeFunType [stringType] doubleType); IsMutable = false })
+
+        // Vec operations
+        ("vec-empty", {Scheme = Scheme(["a"], [], makeFunType [] (makeVecType (TVar "a"))); IsMutable = false })
+        ("vec-get", {Scheme = Scheme(["a"], [], makeFunType [makeVecType (TVar "a"); intType] (TVar "a")); IsMutable = false })
+        ("vec-set", {Scheme = Scheme(["a"], [], makeFunType [makeVecType (TVar "a"); intType; TVar "a"] (makeVecType (TVar "a"))); IsMutable = false })
+        ("vec-add", {Scheme = Scheme(["a"], [], makeFunType [makeVecType (TVar "a"); TVar "a"] (makeVecType (TVar "a"))); IsMutable = false })
+        ("vec-insert", {Scheme = Scheme(["a"], [], makeFunType [makeVecType (TVar "a"); intType; TVar "a"] (makeVecType (TVar "a"))); IsMutable = false })
+        ("vec-remove-at", {Scheme = Scheme(["a"], [], makeFunType [makeVecType (TVar "a"); intType] (makeVecType (TVar "a"))); IsMutable = false })
+        ("vec-pop", {Scheme = Scheme(["a"], [], makeFunType [makeVecType (TVar "a")] (makeVecType (TVar "a"))); IsMutable = false })
+        ("vec-pop-first", {Scheme = Scheme(["a"], [], makeFunType [makeVecType (TVar "a")] (makeVecType (TVar "a"))); IsMutable = false })
+        ("vec-slice", {Scheme = Scheme(["a"], [], makeFunType [makeVecType (TVar "a"); intType; intType] (makeVecType (TVar "a"))); IsMutable = false })
+        ("vec-merge", {Scheme = Scheme(["a"], [], makeFunType [makeVecType (TVar "a"); makeVecType (TVar "a")] (makeVecType (TVar "a"))); IsMutable = false })
+        ("vec-merge/pure", {Scheme = Scheme(["a"], [], makeFunType [makeVecType (TVar "a"); makeVecType (TVar "a")] (makeVecType (TVar "a"))); IsMutable = false })
+        ("vec-split", {Scheme = Scheme(["a"], [], makeFunType [makeVecType (TVar "a"); intType] (TTuple [makeVecType (TVar "a"); makeVecType (TVar "a")])); IsMutable = false })
+        ("vec-map", {Scheme = Scheme(["a"; "b"], [], makeFunType [makeVecType (TVar "a"); makeFunType [TVar "a"] (TVar "b")] (makeVecType (TVar "b"))); IsMutable = false })
+        ("vec-filter", {Scheme = Scheme(["a"], [], makeFunType [makeVecType (TVar "a"); makeFunType [TVar "a"] boolType] (makeVecType (TVar "a"))); IsMutable = false })
+        ("vec-fold", {Scheme = Scheme(["a"; "b"], [], makeFunType [makeVecType (TVar "a"); TVar "b"; makeFunType [TVar "b"; TVar "a"] (TVar "b")] (TVar "b")); IsMutable = false })
+        ("vec-reduce", {Scheme = Scheme(["a"], [], makeFunType [makeVecType (TVar "a"); makeFunType [TVar "a"; TVar "a"] (TVar "a")] (TVar "a")); IsMutable = false })
+        ("vec-for-each", {Scheme = Scheme(["a"], [], makeFunType [makeVecType (TVar "a"); makeFunType [TVar "a"] voidType] voidType); IsMutable = false })
+        ("vec-for-each/range", {Scheme = Scheme(["a"], [], makeFunType [makeVecType (TVar "a"); makeFunType [TVar "a"] voidType; intType; intType] voidType); IsMutable = false })
+        ("vec-iter", {Scheme = Scheme(["a"], [], makeFunType [makeVecType (TVar "a"); makeFunType [TVar "a"] boolType] boolType); IsMutable = false })
+        ("vec-count", {Scheme = Scheme(["a"], [], makeFunType [makeVecType (TVar "a")] intType); IsMutable = false })
+        ("vec-contains", {Scheme = Scheme(["a"], [], makeFunType [makeVecType (TVar "a"); TVar "a"] boolType); IsMutable = false })
+        ("vec-compact", {Scheme = Scheme(["a"], [], makeFunType [makeVecType (TVar "a")] (makeVecType (TVar "a"))); IsMutable = false })
       ]
       Registry = emptyRegistry }

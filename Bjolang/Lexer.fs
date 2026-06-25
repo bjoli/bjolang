@@ -105,8 +105,6 @@ module Lexer =
                     let endLine, endCol = advance text line col
                     loop nextPos endLine endCol tokens
 
-                // Function arrow
-                | '-' when pos + 1 < length && input[pos + 1] = '>' -> emit (Symbol "->") 2
 
                 // Delimiters
                 | '(' -> emit LParen 1

@@ -4,4 +4,13 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
   </PropertyGroup>
+  <ItemGroup>
+    <Compile Remove="RrbList\**" />
+    <Compile Remove="Map\**" />
+    <EmbeddedResource Remove="RrbList\**" />
+    <EmbeddedResource Remove="Map\**" />
+    <None Remove="RrbList\**" />
+    <None Remove="Map\**" />
+    <ProjectReference Include="RrbList/src/Collections/Collections.csproj" />
+  </ItemGroup>
 </Project>

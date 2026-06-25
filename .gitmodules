@@ -1,0 +1,6 @@
+[submodule "Bjolang/BjolangRuntime/RrbList"]
+	path = Bjolang/BjolangRuntime/RrbList
+	url = https://github.com/bjoli/RrbList/
+[submodule "Bjolang/BjolangRuntime/Map"]
+	path = Bjolang/BjolangRuntime/Map
+	url = https://github.com/bjoli/Map

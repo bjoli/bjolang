@@ -84,24 +84,81 @@ let main argv =
             
             let exports = extractExports typedAst |> List.concat
             
+            let rec extractTypes (decls: TypeChecker.TDecl list) =
+                decls |> List.choose (function
+                    | TypeChecker.TType(defs, _) -> Some (defs |> List.map (fun d -> d, false))
+                    | TypeChecker.TTypeRec(defs, _) -> Some (defs |> List.map (fun d -> d, true))
+                    | TypeChecker.TModule(_, innerDecls, _) -> Some (extractTypes innerDecls |> List.concat)
+                    | _ -> None)
+            
+            let typesToExport = extractTypes typedAst |> List.concat
+            
             let exportMetadata =
-                if options.IsLibrary && not exports.IsEmpty then
+                if options.IsLibrary && (not exports.IsEmpty || not typesToExport.IsEmpty) then
                     let serializeExport name =
                         match Map.tryFind name env.Bindings with
-                        | Some b -> 
+                        | Some b ->
                             let (TypeChecker.Scheme(_, _, t)) = b.Scheme
                             $"(: %s{name} %s{Codegen.serializeHMType t})"
                         | None -> ""
-                    exports |> List.map serializeExport |> String.concat "\n"
+                        
+                    let rec serializeFType (ft: Parser.FType) : string =
+                        match ft with
+                        | Parser.TName(n, _) -> n
+                        | Parser.TApp(n, args, _) -> $"({n} " + String.concat " " (List.map serializeFType args) + ")"
+                        
+                    let serializeTypeDef (td: Parser.TypeDef, isRec: bool) : string =
+                        let quotedArgs = td.TypeArgs |> List.map (fun a -> if a.StartsWith("'") then a else "'" + a)
+                        let typeArgsStr = if td.TypeArgs.IsEmpty then "" else " " + String.concat " " quotedArgs
+                        match td.Kind with
+                        | Parser.Alias(ft) -> $"(type ({td.Name}{typeArgsStr}) {serializeFType ft})"
+                        | Parser.Union(cases) ->
+                            let serializeCase c =
+                                match c with
+                                | Parser.SimpleCase(n, _) -> n
+                                | Parser.DataCase(n, args, _) -> $"(: {n} " + String.concat " " (List.map serializeFType args) + ")"
+                            let head = if isRec then "type-rec" else "type"
+                            $"({head} (({td.Name}{typeArgsStr})\n  " + String.concat "\n  " (List.map serializeCase cases) + "))"
+                        | Parser.Record(fields) -> "" // Ignore for now
+                        
+                    let sigsStr = exports |> List.map serializeExport |> String.concat "\n"
+                    let typesStr = typesToExport |> List.map serializeTypeDef |> String.concat "\n"
+                    typesStr + "\n" + sigsStr
                 else ""
 
-            let csCode = Codegen.generateProgram exportMetadata typedAst
+            let csCode = Codegen.generateProgram exportMetadata (if options.IsLibrary then dllDeps else []) typedAst
             
             // DEBUG: Dump the AST to a file so we can inspect it
             File.WriteAllText("ast_dump.txt", sprintf "%A" typedAst)
             
+            let mainArgKind =
+                match Map.tryFind "main" env.Bindings with
+                | Some b ->
+                    let (TypeChecker.Scheme(_, _, t)) = b.Scheme
+                    match t with
+                    | TypeChecker.TFun([TypeChecker.TCon("List", [TypeChecker.TCon("System.String", [])])], _) -> "list_string"
+                    | TypeChecker.TFun([], _) -> "no_args"
+                    | TypeChecker.TFun(_, _) -> "other"
+                    | _ -> "no_args" // Not a function, treat as no-args
+                | None -> "other"
+
             let mainModuleName = Path.GetFileNameWithoutExtension(inputFilePath) |> Codegen.sanitizeIdent
-            let entryPointCode = if not options.IsLibrary then $"\npublic static class BjolangEntryPoint {{ public static void Main(string[] args) {{ %s{mainModuleName}.main(0); }} }}\n" else ""
+            let entryPointCode = 
+                if options.IsLibrary then ""
+                elif mainArgKind = "list_string" then
+                    $"\npublic static class BjolangEntryPoint {{\n" +
+                    $"    public static void Main(string[] args) {{\n" +
+                    $"        List<string> bjoArgs = new List<string>.Nil();\n" +
+                    $"        for (int i = args.Length - 1; i >= 0; i--) {{\n" +
+                    $"            bjoArgs = new List<string>.Cons(args[i], bjoArgs);\n" +
+                    $"        }}\n" +
+                    $"        %s{mainModuleName}_Module.main(bjoArgs);\n" +
+                    $"    }}\n" +
+                    $"}}\n"
+                elif mainArgKind = "no_args" then
+                    $"\npublic static class BjolangEntryPoint {{ public static void Main(string[] args) {{ %s{mainModuleName}_Module.main(); }} }}\n"
+                else
+                    $"\npublic static class BjolangEntryPoint {{ public static void Main(string[] args) {{ %s{mainModuleName}_Module.main(0); }} }}\n"
             let fullCode = csCode + entryPointCode
 
             let tmpDir = Path.Combine(Path.GetTempPath(), "Bjolang_" + System.Guid.NewGuid().ToString("N"))
@@ -109,7 +166,9 @@ let main argv =
             
             let projType = if options.IsLibrary then "Library" else "Exe"
             let runtimeDllPath = Path.GetFullPath("BjolangRuntime/bin/Release/net10.0/BjolangRuntime.dll")
+            let collectionsDllPath = Path.GetFullPath("BjolangRuntime/bin/Release/net10.0/Collections.dll")
             
+
             let dllReferences =
                 dllDeps
                 |> List.map (fun dllPath ->
@@ -127,6 +186,9 @@ let main argv =
   <ItemGroup>
     <Reference Include="BjolangRuntime">
       <HintPath>{runtimeDllPath}</HintPath>
+    </Reference>
+    <Reference Include="Collections">
+      <HintPath>{collectionsDllPath}</HintPath>
     </Reference>
 {dllReferences}
   </ItemGroup>
