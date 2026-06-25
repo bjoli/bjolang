@@ -41,7 +41,8 @@ let rec exprFreeVars (isGuarded: bool) (bound: Set<string>) (expr: Expr) : Map<s
         else
             Map.add name classify Map.empty
     | ETuple(exprs, _)
-    | EList(exprs, _) ->
+    | EList(exprs, _)
+    | EVec(exprs, _) ->
         exprs
         |> List.map (exprFreeVars isGuarded bound)
         |> List.fold mergeVarUseMaps Map.empty
@@ -215,6 +216,7 @@ let rec letrecifyExpr (expr: Expr) : Expr =
 
     | ETuple(exprs, r) -> ETuple(List.map letrecifyExpr exprs, r)
     | EList(exprs, r) -> EList(List.map letrecifyExpr exprs, r)
+    | EVec(exprs, r) -> EVec(List.map letrecifyExpr exprs, r)
     | EApp(target, args, r) -> EApp(letrecifyExpr target, List.map letrecifyExpr args, r)
     | ECast(t, e, r) -> ECast(t, letrecifyExpr e, r)
 

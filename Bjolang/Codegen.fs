@@ -276,6 +276,41 @@ let rec generateExpr (ctx: CodegenContext) (expr: TypedExpr) : unit =
             append ctx $"new Func<{typeToString expr.Type}>(() => {{\n"
             withIndent ctx (fun c -> generateBlock c Return expr)
             indent ctx; append ctx "})()"
+    | TListMake items ->
+        // Desugar to nested Cons calls: new List<T>.Cons(e1, new List<T>.Cons(e2, new List<T>.Nil()))
+        let listTypeStr = typeToString expr.Type
+        let rec emitCons remaining =
+            match remaining with
+            | [] ->
+                append ctx $"new {listTypeStr}.Nil()"
+            | item :: rest ->
+                append ctx $"new {listTypeStr}.Cons("
+                generateExpr ctx item
+                append ctx ", "
+                emitCons rest
+                append ctx ")"
+        emitCons items
+    | TVecMake items ->
+        // Emit builder pattern:
+        // ((Func<Collections.RrbList<T>>)(() => {
+        //     var b = new Collections.RrbBuilder<T>();
+        //     b.Add(e1); b.Add(e2); ...
+        //     return b.ToImmutable();
+        // }))()
+        let vecTypeStr = typeToString expr.Type
+        let elementTypeStr =
+            match expr.Type with
+            | TCon(_, [elemT]) -> typeToString elemT
+            | _ -> "object"
+        let builderTypeStr = $"Collections.RrbBuilder<{elementTypeStr}>"
+        append ctx $"((Func<{vecTypeStr}>)(() => {{\n"
+        withIndent ctx (fun c ->
+            indent c; appendLine c $"var __b = new {builderTypeStr}();"
+            for item in items do
+                indent c; append c "__b.Add("; generateExpr c item; appendLine c ");"
+            indent c; appendLine c "return __b.ToImmutable();"
+        )
+        indent ctx; append ctx "}))()"
     | _ ->
         append ctx "/* Unimplemented expression node */"
 

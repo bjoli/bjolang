@@ -71,6 +71,7 @@ type Expr =
     | ERecordUpdate of string * (string * Expr) list * Range
     | EGetField of Expr * string * Range
     | EList of Expr list * Range
+    | EVec of Expr list * Range
     | EMatch of Expr * (Pattern * Expr option * Expr) list * Range
     | ETryFinally of Expr * Expr * Range
 
@@ -133,7 +134,7 @@ let rec parseType (s: SExpr) : FType =
     let r = getRange s
 
     match s with
-    | SAtom { Token = QuotedSymbol sym } -> TName("'" + sym, r)
+    | SAtom { Token = QuotedSymbol sym } -> TName("'" + sym, r)  // %a in source → 'a internally
     | SAtom { Token = Symbol sym }
     | SAtom { Token = TypeVar sym } -> TName(sym, r)
     | SList(SAtom { Token = Symbol name } :: typeArgs, _) -> TApp(name, List.map parseType typeArgs, r)
@@ -210,6 +211,33 @@ let parseDefunRest (rest: SExpr list) : (FType option * SExpr list) =
     | SAtom { Token = Colon } :: t :: body -> (Some(parseType t), body)
     | body -> (None, body)
 
+// Desugar a quoted list '(1 2 3) into (Cons 1 (Cons 2 (Cons 3 Nil)))
+// Nested lists are recursively quoted: '(1 (2 3)) → (Cons 1 (Cons (Cons 2 (Cons 3 Nil)) Nil))
+// Dotted pairs (a . b) within quoted lists become tuples
+let desugarQuotedList (items: SExpr list) (r: Range) : Expr =
+    let rec quoteItem (s: SExpr) : Expr =
+        let ir = getRange s
+        match s with
+        | SAtom { Token = NumberLit n } -> EInt(n, ir)
+        | SAtom { Token = StringLit str } -> EString(str, ir)
+        | SAtom { Token = Symbol sym } -> EIdent(sym, ir)
+        | SAtom { Token = QuotedSymbol sym } -> EQuotedSymbol(sym, ir)
+        // Nested list → recursive Cons chain
+        | SList(SAtom { Token = Symbol "Tuple" } :: tupleItems, _) ->
+            // Dotted pair in a quoted list: '(a . b) → (Tuple a b)
+            ETuple(List.map quoteItem tupleItems, ir)
+        | SList(inner, _) ->
+            buildConsChain inner ir
+        | _ -> failwithf $"Unsupported item in quoted list at line %d{ir.Start.Line}"
+    and buildConsChain (items: SExpr list) (r: Range) : Expr =
+        match items with
+        | [] -> EIdent("Nil", r)
+        | item :: rest ->
+            let hd = quoteItem item
+            let tl = buildConsChain rest r
+            EApp(EIdent("Cons", r), [hd; tl], r)
+    buildConsChain items r
+
 let rec parseExpr (s: SExpr) : Expr =
     let r = getRange s
 
@@ -217,9 +245,6 @@ let rec parseExpr (s: SExpr) : Expr =
         match items with
         | [] -> []
         | SAtom { Token = Comma } :: rest -> processArgs rest
-        // Handles quoted list syntax: '(items...) -> desugars to EList
-        | SAtom { Token = TypeVar "" } :: SList(inner, rInner) :: rest ->
-            EList(processArgs inner, rInner) :: processArgs rest
         | item :: rest -> parseExpr item :: processArgs rest
 
     // Treat specific operator tokens as valid identifiers in expressions
@@ -381,7 +406,11 @@ let rec parseExpr (s: SExpr) : Expr =
 
             | "Tuple" -> ETuple(processArgs args, listRange)
 
+            // Quoted list literal: '(1 2 3) → Cons chain
+            | "quoted-list" -> desugarQuotedList args listRange
 
+            // Vec literal: [1 2 3] → EVec
+            | "vec-literal" -> EVec(processArgs args, listRange)
 
             // Standard function application
             | _ -> EApp(EIdent(sym, getRange head), processArgs args, listRange)
@@ -395,7 +424,7 @@ let rec parseExpr (s: SExpr) : Expr =
 
     // Explicit token catches for better debugging
     | SAtom { Token = Comma } -> failwithf $"Unexpected comma at line %d{r.Start.Line}"
-    | SAtom { Token = TypeVar "" } -> failwithf $"Unexpected quote at line %d{r.Start.Line}"
+    | SAtom { Token = Quote } -> failwithf $"Unexpected quote at line %d{r.Start.Line}"
     | _ -> failwithf $"Unexpected expression at line %d{r.Start.Line}"
 
 and parseBody (exprs: SExpr list) (fallbackRange: Range) : Expr =

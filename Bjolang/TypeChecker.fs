@@ -107,6 +107,7 @@ and TExprNode =
     | TApply of TypedExpr * TypedExpr list * bool
     | TTupleMake of TypedExpr list
     | TListMake of TypedExpr list
+    | TVecMake of TypedExpr list
     | TRecordMake of (string * TypedExpr) list
     | TRecordUpdate of string * (string * TypedExpr) list
     | TLetMutable of string * TypedExpr * TypedExpr
@@ -599,6 +600,7 @@ let rec infer (env: Env) (expr: Expr) : HMType * TypedExpr =
             | TIdent(_, _) -> true
             | TTupleMake es -> List.forall isValue es
             | TListMake es -> List.forall isValue es
+            | TVecMake es -> List.forall isValue es
             | TRecordMake fields -> fields |> List.forall (snd >> isValue)
             | _ -> false
 
@@ -785,6 +787,23 @@ let rec infer (env: Env) (expr: Expr) : HMType * TypedExpr =
         { Type = listType
           Range = r
           Node = TListMake typedExprs }
+
+    | EVec(exprs, r) ->
+        let elementType = freshMeta ()
+
+        let typedExprs =
+            exprs
+            |> List.map (fun e ->
+                let t, te = infer env e
+                unify env.Registry t elementType
+                te)
+
+        let vecType = TCon("Vec", [ elementType ])
+
+        vecType,
+        { Type = vecType
+          Range = r
+          Node = TVecMake typedExprs }
 
     | ETryFinally(body, cleanup, r) ->
         let bodyType, tBody = infer env body
@@ -1159,6 +1178,9 @@ module MatchCompiler =
         | TListMake items ->
             { expr with
                 Node = TListMake(items |> List.map (lowerMatchExpressions env)) }
+        | TVecMake items ->
+            { expr with
+                Node = TVecMake(items |> List.map (lowerMatchExpressions env)) }
         | TLetMutable(name, value, body) ->
             { expr with
                 Node = TLetMutable(name, lowerMatchExpressions env value, lowerMatchExpressions env body) }
@@ -1263,6 +1285,8 @@ module DictionaryLowering =
             | TTupleMake items -> TTupleMake(items |> List.map recurse)
 
             | TListMake items -> TListMake(items |> List.map recurse)
+
+            | TVecMake items -> TVecMake(items |> List.map recurse)
 
             | TRecordMake fields -> TRecordMake(fields |> List.map (fun (k, v) -> k, recurse v))
 

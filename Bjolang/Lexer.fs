@@ -158,19 +158,25 @@ module Lexer =
                            Range = range }
                          :: tokens)
 
-                // This emits a quote. The Parser will have to understand whether it is a quoted symbol
-                // or a type var
-                | '\'' ->
-                    // If followed by a valid symbol character, read it as a single token
-                    if pos + 1 < length && isSymbolChar input[pos + 1] then
+                // Type variables use % prefix: %a, %b, etc.
+                | '%' when pos + 1 < length && isSymbolChar input[pos + 1] ->
+                    let nextPos = readSymbol (pos + 1)
+                    let len = nextPos - pos
+                    let varName = input.Substring(pos + 1, len - 1)
+                    emit (QuotedSymbol varName) len
 
+                // Quote: '(1 2 3) for list literals, 'symbol for quoted symbols
+                | '\'' ->
+                    if pos + 1 < length && input[pos + 1] = '(' then
+                        // Standalone quote before a paren — the S-expression reader handles the rest
+                        emit Quote 1
+                    elif pos + 1 < length && isSymbolChar input[pos + 1] then
+                        // Quoted symbol: 'foo
                         let nextPos = readSymbol (pos + 1)
                         let len = nextPos - pos
                         let varName = input.Substring(pos + 1, len - 1)
-                        emit (QuotedSymbol varName) len // Or QuotedSymbol varName
+                        emit (QuotedSymbol varName) len
                     else
-                        // Otherwise, it's a standalone quote for lists: '(1 2 3)<
-                        raise (NotImplementedException "Quoteda symbols are not yet implemented")
                         emit Quote 1
                 // Numbers
                 | _ when Char.IsDigit c || (c = '-' && pos + 1 < length && Char.IsDigit input[pos + 1]) ->
