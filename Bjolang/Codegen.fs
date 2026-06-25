@@ -44,6 +44,7 @@ let mapPrimitiveType (name: string) =
     | "System.Void" -> "void"
     | "System.Object" -> "object"
     | "Vec" -> "Collections.RrbList"
+    | "VecBuilder" -> "Collections.RrbBuilder"
     | _ -> name
 
 let rec typeToString (hm: HMType) : string =

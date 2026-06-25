@@ -7,10 +7,11 @@ open Bjolang.TypeChecker
 let makeFunType args ret = TFun (args, ret)
 
 let makeVecType a = TCon("Vec", [a])
+let makeVecBuilderType a = TCon("VecBuilder", [a])
 
 let emptyRegistry : TraitRegistry =
     { LocalTraits = Set.empty
-      LocalTypes = Set.ofList ["List"; "Vec"]
+      LocalTypes = Set.ofList ["List"; "Vec"; "VecBuilder"]
       Traits = Map.empty
       Implementations = Map.empty
       Aliases = Map.empty
@@ -88,5 +89,14 @@ let prelude : Env =
         ("vec-count", {Scheme = Scheme(["a"], [], makeFunType [makeVecType (TVar "a")] intType); IsMutable = false })
         ("vec-contains", {Scheme = Scheme(["a"], [], makeFunType [makeVecType (TVar "a"); TVar "a"] boolType); IsMutable = false })
         ("vec-compact", {Scheme = Scheme(["a"], [], makeFunType [makeVecType (TVar "a")] (makeVecType (TVar "a"))); IsMutable = false })
+
+        // VecBuilder operations
+        ("vecbuilder-empty", {Scheme = Scheme(["a"], [], makeFunType [] (makeVecBuilderType (TVar "a"))); IsMutable = false })
+        ("vec->vecbuilder", {Scheme = Scheme(["a"], [], makeFunType [makeVecType (TVar "a")] (makeVecBuilderType (TVar "a"))); IsMutable = false })
+        ("vecbuilder-add!", {Scheme = Scheme(["a"], [], makeFunType [makeVecBuilderType (TVar "a"); TVar "a"] (makeVecBuilderType (TVar "a"))); IsMutable = false })
+        ("vecbuilder-set!", {Scheme = Scheme(["a"], [], makeFunType [makeVecBuilderType (TVar "a"); intType; TVar "a"] (makeVecBuilderType (TVar "a"))); IsMutable = false })
+        ("vecbuilder-get", {Scheme = Scheme(["a"], [], makeFunType [makeVecBuilderType (TVar "a"); intType] (TVar "a")); IsMutable = false })
+        ("vecbuilder-count", {Scheme = Scheme(["a"], [], makeFunType [makeVecBuilderType (TVar "a")] intType); IsMutable = false })
+        ("vecbuilder->vec", {Scheme = Scheme(["a"], [], makeFunType [makeVecBuilderType (TVar "a")] (makeVecType (TVar "a"))); IsMutable = false })
       ]
       Registry = emptyRegistry }

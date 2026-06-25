@@ -105,4 +105,26 @@ public static class BjolangRuntime {
 
     [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.AggressiveInlining)]
     public static Collections.RrbList<T> vecsubcompact<T>(Collections.RrbList<T> list) => Collections.RrbFun.Compact(list);
+
+    // --- VecBuilder Wrappers ---
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static Collections.RrbBuilder<T> vecbuildersubempty<T>() => Collections.RrbBuilderFun.Empty<T>();
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static Collections.RrbBuilder<T> vecsubgtvecbuilder<T>(Collections.RrbList<T> list) => Collections.RrbBuilderFun.FromList(list);
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static Collections.RrbBuilder<T> vecbuildersubadd_BANG<T>(Collections.RrbBuilder<T> builder, T item) => Collections.RrbBuilderFun.Add(builder, item);
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static Collections.RrbBuilder<T> vecbuildersubset_BANG<T>(Collections.RrbBuilder<T> builder, int index, T item) => Collections.RrbBuilderFun.SetItem(builder, index, item);
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static T vecbuildersubget<T>(Collections.RrbBuilder<T> builder, int index) => Collections.RrbBuilderFun.Get(builder, index);
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static int vecbuildersubcount<T>(Collections.RrbBuilder<T> builder) => Collections.RrbBuilderFun.Count(builder);
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static Collections.RrbList<T> vecbuildersubgtvec<T>(Collections.RrbBuilder<T> builder) => Collections.RrbBuilderFun.ToImmutable(builder);
 }
