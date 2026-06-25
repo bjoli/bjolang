@@ -57,6 +57,7 @@ let rec analyzeExpr (inTailPosition: bool) (currentFuncName: string option) (exp
 
         | TTupleMake exprs -> TTupleMake (List.map (analyzeExpr false currentFuncName) exprs)
         | TListMake exprs -> TListMake (List.map (analyzeExpr false currentFuncName) exprs)
+        | TVecMake exprs -> TVecMake (List.map (analyzeExpr false currentFuncName) exprs)
         | TRecordMake fields -> TRecordMake (fields |> List.map (fun (k, v) -> k, analyzeExpr false currentFuncName v))
         | TRecordUpdate (n, fields) -> TRecordUpdate (n, fields |> List.map (fun (k, v) -> k, analyzeExpr false currentFuncName v))
 
@@ -66,7 +67,9 @@ let rec analyzeExpr (inTailPosition: bool) (currentFuncName: string option) (exp
         | TSet (n, v) -> TSet (n, analyzeExpr false currentFuncName v)
         | TGetField (e, f) -> TGetField (analyzeExpr false currentFuncName e, f)
         | TIsInst (e, t) -> TIsInst (analyzeExpr false currentFuncName e, t)
+        | TIsInstCase (e, t, caseName) -> TIsInstCase (analyzeExpr false currentFuncName e, t, caseName)
         | TCast (e, t) -> TCast (analyzeExpr false currentFuncName e, t)
+        | TCaseCast (e, t, caseName) -> TCaseCast (analyzeExpr false currentFuncName e, t, caseName)
         | TTypeEq (e1, e2) -> TTypeEq (analyzeExpr false currentFuncName e1, analyzeExpr false currentFuncName e2)
         | TThrow e -> TThrow (analyzeExpr false currentFuncName e)
 

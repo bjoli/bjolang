@@ -47,10 +47,18 @@ let mapPrimitiveType (name: string) =
     | "VecBuilder" -> "Collections.RrbBuilder"
     | _ -> name
 
+let sanitizeIdent (s: string) =
+    let s = s.Replace("::", ".").Replace("-", "sub").Replace("?", "_QMARK").Replace("!", "_BANG").Replace("+", "add").Replace("*", "mul").Replace("/", "div").Replace("<", "lt").Replace(">", "gt").Replace("=", "eq").Replace("'", "")
+    let s = if s.Length > 0 && Char.IsDigit(s[0]) then "_" + s else s
+    match s with
+    | "class" | "struct" | "public" | "private" | "protected" | "internal" | "static" | "readonly" | "var" | "ref" | "out" | "in" | "params" | "new" | "return" | "if" | "else" | "while" | "for" | "foreach" | "do" | "switch" | "case" | "default" | "break" | "continue" | "goto" | "try" | "catch" | "finally" | "throw" | "lock" | "typeof" | "sizeof" | "is" | "as" | "true" | "false" | "null" | "void" | "object" | "string" | "int" | "bool" -> "@" + s
+    | _ -> s
+
 let rec typeToString (hm: HMType) : string =
     match hm with
     | TCon (name, args) ->
-        let baseName = mapPrimitiveType name
+        let mapped = mapPrimitiveType name
+        let baseName = if mapped = name then sanitizeIdent name else mapped
         if args.IsEmpty then baseName
         else
             let argsStr = args |> List.map typeToString |> String.concat ", "
@@ -104,12 +112,6 @@ let rec serializeHMType (t: HMType) : string =
     | TAssoc (traitName, assocName, implType) ->
         $"object"
 
-let sanitizeIdent (s: string) =
-    let s = s.Replace("-", "sub").Replace("?", "_QMARK").Replace("!", "_BANG").Replace("+", "add").Replace("*", "mul").Replace("/", "div").Replace("<", "lt").Replace(">", "gt").Replace("=", "eq")
-    let s = if s.Length > 0 && Char.IsDigit(s[0]) then "_" + s else s
-    match s with
-    | "class" | "struct" | "public" | "private" | "protected" | "internal" | "static" | "readonly" | "var" | "ref" | "out" | "in" | "params" | "new" | "return" | "if" | "else" | "while" | "for" | "foreach" | "do" | "switch" | "case" | "default" | "break" | "continue" | "goto" | "try" | "catch" | "finally" | "throw" | "lock" | "typeof" | "sizeof" | "is" | "as" | "true" | "false" | "null" | "void" | "object" | "string" | "int" | "bool" -> "@" + s
-    | _ -> s
 
 let getUnionTypeString (hm: HMType) (parentName: string) : string =
     let rec findCon t =

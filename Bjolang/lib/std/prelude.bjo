@@ -1,0 +1,9 @@
+;; std/prelude.bjo
+;; Standard library entry point
+
+(import
+    (std core)
+    (std list)
+    (std iter))
+
+(defun (noop) 0)

@@ -1,0 +1,30 @@
+
+
+  ;; 1. Define a trait with an associated type and a method signature
+  (def/trait (Container %c)
+    (type %item)
+    (: get (-> %c int %item)))
+
+  ;; 2. Implement the trait for a concrete type (List int)
+  (def/impl (Container (List int))
+    (type %item int)
+    (defun (get xs i)
+      0)) ;; Stub return matching the 'int' associated type
+
+  ;; 3. Implement the trait for a primitive type (string)
+  (def/impl (Container string)
+    (type %item string)
+    (defun (get s i)
+      "stub")) ;; Stub return matching the 'string' associated type
+
+  ;; 4. Intentionally break the contract to test the TypeChecker (Uncomment to test)
+  ;; (def/impl (Container int)
+  ;;   (type %item string)
+  ;;   (defun (get n i)
+  ;;     0)) ;; ERROR: Expected 'string' (from assoc binding) but got 'int'
+
+
+(defun (main b) 
+  (def a "hej hopp")
+  (displayln (get a 0))
+  0)

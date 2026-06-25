@@ -1,26 +1,9 @@
 
+(import (std list))
 
 (defun (id x) x)
-(type-rec
-  ((List 'a)
-    (: Cons 'a (List 'a))
-    Nil))
 
-(defun (is-empty lst)
-  (match lst
-    (Nil #t)
-    ((Cons _ _) #f)))
-(defun (head lst)
-  (match lst
-    ((Cons h _) h)))
-(defun (tail lst)
-  (match lst
-    ((Cons _ t) t)))
 
-(defun (map f lst)
-  (if (is-empty lst)
-      Nil
-      (Cons (f (head lst)) (map f (tail lst))                             )))
 
       
 ;; Higher-order function returning a captured closure with generics

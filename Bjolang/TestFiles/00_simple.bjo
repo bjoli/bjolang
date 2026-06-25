@@ -1,5 +1,6 @@
 
-(: match-list (-> strl string))
+(import (std list))
+
 (defun (match-list l)
   (match l
     ((Cons hd tl) hd)

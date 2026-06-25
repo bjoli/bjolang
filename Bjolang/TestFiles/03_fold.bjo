@@ -1,9 +1,11 @@
+(import (std list))
+
 (defun (foldl f init lst)
-  (if (is-empty lst)
+  (if (empty? lst)
       init
       (foldl f (f init (head lst)) (tail lst))))
 
 (defun (main argv)
   (def lst (Cons 1 (Cons 2 (Cons 3 Nil))))
-  (print (foldl (fun (acc x) (+ acc x)) 0 lst))
+  (displayln (int->string (foldl (fun (acc x) (+ acc x)) 0 lst)))
   0)

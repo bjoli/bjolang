@@ -6,6 +6,9 @@ public static class BjolangRuntime {
     
     
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static void display(object o) => Console.Write(o);
+    
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static void displayln(object o) => Console.WriteLine(o);
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]

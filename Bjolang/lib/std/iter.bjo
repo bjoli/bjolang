@@ -1,0 +1,33 @@
+;; std/iter.bjo
+
+(import (std list))
+;; Standard Iterator Protocol
+
+;; An iterator has three core methods:
+;; 1. done?: Returns true if there are no more elements
+;; 2. current: Returns the current element
+;; 3. next: Advances the iterator and returns the next iterator state
+
+(def/trait (Iterator %iter)
+  (type %a)
+  (: done? (-> %iter bool))
+  (: current (-> %iter %a))
+  (: next (-> %iter %iter)))
+
+(def/trait (Iterable %col)
+  (type %iter)
+  (type %a)
+  (: iterate (-> %col %iter)))
+
+
+(def/impl (Iterator (List %a))
+  (type %a %a)
+  (defun (done? lst) (empty? lst))
+  (defun (current lst) (head lst))
+  (defun (next lst) (tail lst)))
+
+(def/impl (Iterable (List %a))
+  (type %iter (List %a))
+  (type %a %a)
+  (defun (iterate lst) lst))
+;; (export done? current next iterate)

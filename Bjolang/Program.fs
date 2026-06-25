@@ -98,8 +98,16 @@ let main argv =
                     let serializeExport name =
                         match Map.tryFind name env.Bindings with
                         | Some b ->
-                            let (TypeChecker.Scheme(_, _, t)) = b.Scheme
-                            $"(: %s{name} %s{Codegen.serializeHMType t})"
+                            let (TypeChecker.Scheme(_, constraints, t)) = b.Scheme
+                            let typeStr = $"(: %s{name} %s{Codegen.serializeHMType t})"
+                            if constraints.IsEmpty then typeStr
+                            else
+                                let constraintStrs = 
+                                    constraints |> List.map (fun c ->
+                                        let targetStr = Codegen.serializeHMType c.TargetType
+                                        $"(%s{c.TraitName} %s{targetStr})")
+                                let whereClause = "(where " + String.concat " " constraintStrs + ")"
+                                $"(: %s{name} %s{Codegen.serializeHMType t} %s{whereClause})"
                         | None -> ""
                         
                     let rec serializeFType (ft: Parser.FType) : string =

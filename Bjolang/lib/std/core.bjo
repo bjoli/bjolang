@@ -1,0 +1,32 @@
+;; std/core.bjo
+(export print println)
+
+;; Type to String Trait
+(def/trait (->str %a)
+  (: ->str (-> %a string)))
+
+;; Implementations for standard scalars
+(def/impl (->str string)
+  (defun (->str s) s))
+
+(def/impl (->str int)
+  (defun (->str n) (int->string n)))
+
+(def/impl (->str double)
+  (defun (->str n) (double->string n)))
+
+(def/impl (->str byte)
+  (defun (->str n) (byte->string n)))
+
+(def/impl (->str long)
+  (defun (->str n) (long->string n)))
+
+;; Generic display functions utilizing the ->str trait
+;; Currently commented out as implicit dictionary passing for generic functions is not yet supported.
+ (: print (-> %a void))
+ (defun (print x)
+   (display (->str x)))
+ 
+ (: println (-> %a void))
+ (defun (println x)
+   (displayln (->str x)))

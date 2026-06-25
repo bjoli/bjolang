@@ -92,7 +92,7 @@ type Decl =
     | DTypeRec of TypeDef list * Range
     // DTrait (Name, ImplementorVar, AssociatedTypes, Signatures, Range)
     | DTrait of string * string * string list * (string * FType) list * Range
-    | DExtern of string * FType * Range
+    | DExtern of string * FType * (string * string) list * Range
     
     // DImpl (TraitName, TargetType, AssociatedTypeBindings, Methods, Range)
     | DImpl of string * FType * (string * FType) list * Decl list * Range
@@ -482,6 +482,9 @@ let rec parseDecl (s: SExpr) : Decl =
 
     match s with
     | SList([ SAtom { Token = Colon }; SAtom { Token = Symbol name }; tType ], _) ->
+        DSignature(name, parseType tType, r)
+    // (: name type (where (trait var) ...)) — signature with trait constraints (from DLL metadata)
+    | SList([ SAtom { Token = Colon }; SAtom { Token = Symbol name }; tType; SList(SAtom { Token = Symbol "where" } :: _, _) ], _) ->
         DSignature(name, parseType tType, r)
 
     | SList(SAtom { Token = Symbol "import" } :: imports, _) ->

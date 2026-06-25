@@ -1,0 +1,21 @@
+;; Test iterators over a list
+(import (std core))
+(import (std list))
+(import (std iter))
+
+(defun (main args)
+  (def my-list (Cons 10 (Cons 20 (Cons 30 Nil))))
+  
+  ;; Use Iterable trait to get an iterator
+  (def it (iterate my-list))
+  
+  ;; Loop and print
+  (let loop ((i it))
+    (if (done? i)
+        (println "Done!")
+        (let ((val (current i)))
+          (display "Item: ")
+          (println (cast int val))
+          (loop (next i)))))
+          
+  0)

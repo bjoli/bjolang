@@ -14,6 +14,26 @@ let rec read (tokens: LexedToken list) : SExpr list * LexedToken list =
         match remaining with
         | [] -> List.rev acc, []
         | { Token = RParen } :: rest -> List.rev acc, rest
+        | { Token = RBracket } :: rest -> List.rev acc, rest
+
+        // Quoted list: '(items...) → (quoted-list items...)
+        | { Token = Quote; Range = qr } :: { Token = LParen; Range = r } :: rest ->
+            let innerNodes, afterList = read rest
+            let endRange = if List.isEmpty afterList then r else (List.head afterList).Range
+            let listRange = unionLexerRanges qr endRange
+
+            let isDot = function SAtom { Token = Dot } -> true | _ -> false
+
+            let finalNodes =
+                if List.exists isDot innerNodes then
+                    let tupleToken = { Token = Lexer.Symbol "Tuple"; Range = r }
+                    SAtom tupleToken :: List.filter (not << isDot) innerNodes
+                else
+                    let headToken = { Token = Lexer.Symbol "quoted-list"; Range = qr }
+                    SAtom headToken :: innerNodes
+
+            loop (SList(finalNodes, listRange) :: acc) afterList
+
         | { Token = LParen; Range = r } as t :: rest ->
             let innerNodes, afterList = read rest
             let endRange = if List.isEmpty afterList then r else (List.head afterList).Range
@@ -29,6 +49,16 @@ let rec read (tokens: LexedToken list) : SExpr list * LexedToken list =
                     innerNodes
 
             loop (SList(finalNodes, listRange) :: acc) afterList
+
+        // Vec literal: [items...] → (vec-literal items...)
+        | { Token = LBracket; Range = r } :: rest ->
+            let innerNodes, afterList = read rest
+            let endRange = if List.isEmpty afterList then r else (List.head afterList).Range
+            let listRange = unionLexerRanges r endRange
+            let headToken = { Token = Lexer.Symbol "vec-literal"; Range = r }
+            let finalNodes = SAtom headToken :: innerNodes
+            loop (SList(finalNodes, listRange) :: acc) afterList
+
         | token :: rest -> loop (SAtom token :: acc) rest
 
     loop [] tokens
@@ -66,7 +96,7 @@ let wrapInModule (moduleName: string) (decls: Decl list) : Decl list =
                 match d with
                 | DDef(_, _, r) | DDefun(_, _, _, _, r) | DDefTuple(_, _, r) | DDefMutable(_, _, r)
                 | DSignature(_, _, r) | DType(_, r) | DTypeRec(_, r) | DTrait(_, _, _, _, r) | DImpl(_, _, _, _, r)
-                | DModule(_, _, r) | DImport(_, r) | DExport(_, r) | DExtern(_, _, r) -> r
+                | DModule(_, _, r) | DImport(_, r) | DExport(_, r) | DExtern(_, _, _, r) -> r
             unionLexerRanges (getRange first) (getRange last)
     
     [ DModule(moduleName, decls, r) ]
@@ -96,12 +126,16 @@ let loadModuleGraph (mainFilePath: string) : Decl list * string list =
                             let meta = a :?> System.Reflection.AssemblyMetadataAttribute
                             if meta.Key = "BjolangDeps" then Some meta.Value else None)
                         |> Array.tryHead
+                    let transitiveDllDeps = System.Collections.Generic.List<string>()
                     match transitiveDeps with
                     | Some depsStr ->
                         for dep in depsStr.Split(';') do
                             let depPath = dep.Trim()
                             if depPath <> "" && System.IO.File.Exists(depPath) then
                                 dllDeps.Add(depPath) |> ignore
+                                transitiveDllDeps.Add(depPath)
+                                // Also recursively load the dep so its exports get parsed
+                                load depPath
                     | None -> ()
                     
                     let exports =
@@ -113,14 +147,45 @@ let loadModuleGraph (mainFilePath: string) : Decl list * string list =
                     match exports with
                     | Some metaStr ->
                         let tokens, _ = Lexer.tokenize metaStr |> read
+                        
+                        // Extract constraint info from S-expressions before parsing
+                        // Format: (: name type (where (trait var) ...))
+                        let extractConstraints (sexpr: SExpr) : (string * string) list =
+                            match sexpr with
+                            | SList(items, _) ->
+                                items |> List.tryPick (function
+                                    | SList(SAtom { Token = Lexer.Symbol "where" } :: constraintExprs, _) ->
+                                        constraintExprs |> List.choose (function
+                                            | SList([ SAtom { Token = Lexer.Symbol traitName }; SAtom { Token = Lexer.QuotedSymbol varName } ], _) ->
+                                                Some (traitName, "'" + varName)
+                                            | SList([ SAtom { Token = Lexer.Symbol traitName }; SAtom { Token = Lexer.Symbol varName } ], _) ->
+                                                Some (traitName, varName)
+                                            | _ -> None)
+                                        |> Some
+                                    | _ -> None)
+                                |> Option.defaultValue []
+                            | _ -> []
+                        
+                        // Build a map from name to constraints  
+                        let constraintMap =
+                            tokens |> List.choose (function
+                                | SList(SAtom { Token = Lexer.Colon } :: SAtom { Token = Lexer.Symbol name } :: _, _) as sexpr ->
+                                    let constraints = extractConstraints sexpr
+                                    if constraints.IsEmpty then None
+                                    else Some (name, constraints)
+                                | _ -> None)
+                            |> Map.ofList
+                        
                         let parsedDecls = 
                             Parser.parseModule tokens
                             |> List.map (function
-                                | DSignature(name, t, r) -> DExtern(name, t, r)
+                                | DSignature(name, t, r) ->
+                                    let constraints = Map.tryFind name constraintMap |> Option.defaultValue []
+                                    DExtern(name, t, constraints, r)
                                 | d -> d)
-                        parsedDecls, []
+                        parsedDecls, transitiveDllDeps |> Seq.toList
                     | None ->
-                        [], []
+                        [], transitiveDllDeps |> Seq.toList
                 else
                     let sourceCode = File.ReadAllText(absPath)
                     let tokens, _ = Lexer.tokenize sourceCode |> read

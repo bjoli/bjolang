@@ -46,7 +46,6 @@ let prelude : Env =
 
 
         // I/O
-        ("print", {Scheme = Scheme(["a"], [], makeFunType [TVar "a"] voidType); IsMutable = false })
         ("display", {Scheme = Scheme([], [], makeFunType [stringType] voidType); IsMutable = false })
         ("displayln", {Scheme = Scheme([], [], makeFunType [stringType] voidType); IsMutable = false })
 

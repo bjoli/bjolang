@@ -1,0 +1,16 @@
+(import (std list))
+(import "dummy_lib")
+
+(: head (-> (List string) string))
+(defun (head lst)
+  (match lst
+    ((Cons h _) h)
+    (Nil "")))
+
+(: main (-> int int))
+(defun (main args)
+  (def lst (Cons "a" (Cons "b" Nil)))
+  (defun (f x) x)
+  (def mapped (map f lst))
+  (displayln (head mapped))
+  0)

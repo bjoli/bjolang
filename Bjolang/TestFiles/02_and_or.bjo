@@ -25,4 +25,5 @@
     (if (not #f)
         (displayln "Right")
         (displayln "Wrong"))
+    0
 )

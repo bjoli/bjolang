@@ -1,0 +1,10 @@
+(import (std list))
+(import "dummy_lib")
+
+(: main (-> (List string) int))
+(defun (main args)
+  (def lst (Cons "a" (Cons "b" Nil)))
+  (defun (f x) x)
+  (def mapped (map f lst))
+  (displayln (head mapped))
+  0)
