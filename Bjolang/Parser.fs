@@ -319,6 +319,18 @@ let rec parseExpr (s: SExpr) : Expr =
                 | [ cond; t; f ] -> EIf(parseExpr cond, parseExpr t, parseExpr f, r)
                 | _ -> failwith "Invalid if syntax"
 
+            | "when" ->
+                match args with
+                | cond :: bodyExprs when not bodyExprs.IsEmpty ->
+                    EIf(parseExpr cond, parseBody bodyExprs listRange, ETuple([], listRange), listRange)
+                | _ -> failwithf $"Invalid when syntax at line %d{r.Start.Line}. Expected: (when cond body...)"
+
+            | "unless" ->
+                match args with
+                | cond :: bodyExprs when not bodyExprs.IsEmpty ->
+                    EIf(parseExpr cond, ETuple([], listRange), parseBody bodyExprs listRange, listRange)
+                | _ -> failwithf $"Invalid unless syntax at line %d{r.Start.Line}. Expected: (unless cond body...)"
+
             | "and" ->
                 let rec buildAnd items =
                     match items with
