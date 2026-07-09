@@ -130,4 +130,16 @@ public static class BjolangRuntime {
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static Collections.RrbList<T> vecbuildersubgtvec<T>(Collections.RrbBuilder<T> builder) => Collections.RrbBuilderFun.ToImmutable(builder);
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static T[] makesubarray<T>(int length) => new T[length];
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static T arraysubref<T>(T[] arr, int index) => arr[index];
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static void arraysubset_BANG<T>(T[] arr, int index, T value) { arr[index] = value; }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static int arraysublength<T>(T[] arr) => arr.Length;
 }

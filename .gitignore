@@ -1,0 +1,43 @@
+# .gitignore for Bjolang
+
+# IDE files
+.idea/
+*.suo
+*.user
+*.sln.docstates
+
+# Build artifacts
+bin/
+obj/
+Bjolang/bin/
+Bjolang/obj/
+
+# Generated binaries
+*.exe
+*.dll
+*.pdb
+*.runtimeconfig.json
+*.il
+
+# Log files and compiler trace files
+*.log
+*.txt
+ast_dump*.txt
+scheme_dump*.txt
+unify_dump*.txt
+eapp_debug.txt
+il_dump.txt
+il_summary.txt
+test_debug*.txt
+dump*.log
+dump*.txt
+
+# Exclude build output under TestFiles and lib
+Bjolang/TestFiles/*.exe
+Bjolang/TestFiles/*.runtimeconfig.json
+Bjolang/TestFiles/lib/
+Bjolang/lib/*.exe
+Bjolang/lib/*.runtimeconfig.json
+
+# But make sure standard library source files are not ignored
+!Bjolang/lib/std/**/*.bjo
