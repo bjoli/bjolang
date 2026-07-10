@@ -56,19 +56,19 @@ let rec exprFreeVars (isGuarded: bool) (bound: Set<string>) (expr: Expr) : Map<s
 
         mergeVarUseMaps tfv afvs
     | ECast(_, expr, _) -> exprFreeVars isGuarded bound expr
-    | ELet(name, isFun, args, value, body, _) ->
+    | ELet(name, isFun, args, typeAnn, value, body, _) ->
         let boundInValue = if isFun then Set.union bound (Set.ofList args) else bound
         let vfv = exprFreeVars (isGuarded || isFun) boundInValue value
         let bfv = exprFreeVars isGuarded (Set.add name bound) body
         mergeVarUseMaps vfv bfv
 
     | ELetRec(bindings, body, _) ->
-        let boundNames = bindings |> List.map (fun (n, _, _, _) -> n) |> Set.ofList
+        let boundNames = bindings |> List.map (fun (n, _, _, _, _) -> n) |> Set.ofList
         let allBound = Set.union bound boundNames
 
         let bfvs =
             bindings
-            |> List.map (fun (_, isFun, args, expr) ->
+            |> List.map (fun (_, isFun, args, _, expr) ->
                 let boundInExpr =
                     if isFun then
                         Set.union allBound (Set.ofList args)
@@ -118,7 +118,7 @@ let rec exprFreeVars (isGuarded: bool) (bound: Set<string>) (expr: Expr) : Map<s
             |> List.fold mergeVarUseMaps Map.empty
 
         mergeVarUseMaps tfv cfvs
-    | ELetMutable(name, value, body, _) ->
+    | ELetMutable(name, typeAnn, value, body, _) ->
         let vfv = exprFreeVars isGuarded bound value
         let bfv = exprFreeVars isGuarded (Set.add name bound) body
         mergeVarUseMaps vfv bfv
@@ -220,7 +220,7 @@ let rec letrecifyExpr (expr: Expr) : Expr =
     | EApp(target, args, r) -> EApp(letrecifyExpr target, List.map letrecifyExpr args, r)
     | ECast(t, e, r) -> ECast(t, letrecifyExpr e, r)
 
-    | ELet(name, isFun, args, value, body, r) -> ELet(name, isFun, args, letrecifyExpr value, letrecifyExpr body, r)
+    | ELet(name, isFun, args, typeAnn, value, body, r) -> ELet(name, isFun, args, typeAnn, letrecifyExpr value, letrecifyExpr body, r)
 
     | ELetTuple(names, value, body, r) -> ELetTuple(names, letrecifyExpr value, letrecifyExpr body, r)
 
@@ -242,7 +242,7 @@ let rec letrecifyExpr (expr: Expr) : Expr =
 
         EMatch(letrecifyExpr target, optimizedClauses, r)
 
-    | ELetMutable(name, value, body, r) -> ELetMutable(name, letrecifyExpr value, letrecifyExpr body, r)
+    | ELetMutable(name, typeAnn, value, body, r) -> ELetMutable(name, typeAnn, letrecifyExpr value, letrecifyExpr body, r)
 
     | ESet(name, value, r) -> ESet(name, letrecifyExpr value, r)
 
@@ -251,16 +251,16 @@ let rec letrecifyExpr (expr: Expr) : Expr =
     | ELetRec(bindings, body, r) ->
         // 1. Optimize nested expressions within the bindings and the body first
         let optBindings =
-            bindings |> List.map (fun (n, isF, args, e) -> (n, isF, args, letrecifyExpr e))
+            bindings |> List.map (fun (n, isF, args, t, e) -> (n, isF, args, t, letrecifyExpr e))
 
         let optBody = letrecifyExpr body
 
         // 2. Map nodes to expressions and build edges based on localized free variables
-        let nodes = optBindings |> List.map (fun (n, _, _, _) -> n) |> Set.ofList
+        let nodes = optBindings |> List.map (fun (n, _, _, _, _) -> n) |> Set.ofList
 
         let edges =
             optBindings
-            |> List.map (fun (n, isFun, args, e) ->
+            |> List.map (fun (n, isFun, args, _, e) ->
                 let boundInExpr = if isFun then Set.ofList args else Set.empty
                 let fvs = exprFreeVars isFun boundInExpr e
                 let localDeps = fvs |> Map.filter (fun k _ -> Set.contains k nodes)
@@ -272,7 +272,7 @@ let rec letrecifyExpr (expr: Expr) : Expr =
 
         // 4. Reconstruct the syntax tree
         let bindingMap =
-            optBindings |> List.map (fun ((n, _, _, _) as b) -> n, b) |> Map.ofList
+            optBindings |> List.map (fun ((n, _, _, _, _) as b) -> n, b) |> Map.ofList
 
         List.foldBack
             (fun scc accBody ->
@@ -281,7 +281,7 @@ let rec letrecifyExpr (expr: Expr) : Expr =
 
                 if componentNodes.Length = 1 then
                     let n = componentNodes[0]
-                    let (_, isF, args, e) = componentBindings[0]
+                    let (_, isF, args, t, e) = componentBindings[0]
 
                     let isSelfRecursive =
                         match Map.tryFind n edges with
@@ -291,7 +291,7 @@ let rec letrecifyExpr (expr: Expr) : Expr =
                     if isSelfRecursive then
                         ELetRec(componentBindings, accBody, r)
                     else
-                        ELet(n, isF, args, e, accBody, r)
+                        ELet(n, isF, args, t, e, accBody, r)
                 else
                     ELetRec(componentBindings, accBody, r)
 

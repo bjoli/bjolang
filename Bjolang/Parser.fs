@@ -59,13 +59,13 @@ and Expr =
     | ETuple of Expr list * Range
     | EApp of Expr * Expr list * Range
     | ECast of FType * Expr * Range
-    // ELet (name, isFun, args, body, restOfScope, range)
-    | ELet of string * bool * string list * Expr * Expr * Range
+    // ELet (name, isFun, args, typeAnn, value, restOfScope, range)
+    | ELet of string * bool * string list * FType option * Expr * Expr * Range
     // ELetRec (bindings, restOfScope, range)
-    // binding tuple: (name, isFun, args, body)
-    | ELetRec of (string * bool * string list * Expr) list * Expr * Range
+    // binding tuple: (name, isFun, args, typeAnn, value)
+    | ELetRec of (string * bool * string list * FType option * Expr) list * Expr * Range
     | ELetTuple of string list * Expr * Expr * Range
-    | ELetMutable of string * Expr * Expr * Range
+    | ELetMutable of string * FType option * Expr * Expr * Range
     | ESet of string * Expr * Range
     | EIf of Expr * Expr * Expr * Range
     | EFun of string list * Expr * Range
@@ -317,7 +317,7 @@ let rec parseExpr (s: SExpr) : Expr =
                     List.foldBack
                         (fun bind acc ->
                             match bind with
-                            | SList([ Ident k; v ], _) -> ELet(k, false, [], parseExpr v, acc, getRange bind)
+                            | SList([ Ident k; v ], _) -> ELet(k, false, [], None, parseExpr v, acc, getRange bind)
                             | _ -> failwith "Invalid let binding")
                         bindings
                         body
@@ -332,7 +332,7 @@ let rec parseExpr (s: SExpr) : Expr =
                     let argNames = parsedBindings |> List.map fst
                     let argVals = parsedBindings |> List.map snd
                     let body = parseBody bodyExprs listRange
-                    let funcBinding = (name, true, argNames, body)
+                    let funcBinding = (name, true, argNames, None, body)
                     ELetRec([funcBinding], EApp(EIdent(name, r), argVals, r), r)
                 | _ -> failwith "Invalid let syntax"
 
@@ -343,7 +343,7 @@ let rec parseExpr (s: SExpr) : Expr =
                         bindings
                         |> List.map (function
                             // Standard explicit letrec assumes value bindings or manually desugared lambdas
-                            | SList([ Ident k; v ], _) -> (k, false, [], parseExpr v)
+                            | SList([ Ident k; v ], _) -> (k, false, [], None, parseExpr v)
                             | _ -> failwith "Invalid letrec binding")
 
                     ELetRec(parsedBindings, parseBody bodyExprs listRange, r)
@@ -483,12 +483,11 @@ and parseBody (exprs: SExpr list) (fallbackRange: Range) : Expr =
         // 1. Standard value definition (def name expr)
         | SList(SAtom { Token = Symbol "def" } :: SAtom { Token = Symbol name } :: [ expr ], _) :: rest ->
             // isFun = false, args = []
-            collectDefs ((name, false, [], parseExpr expr) :: acc) rest
+            collectDefs ((name, false, [], None, parseExpr expr) :: acc) rest
 
         // 1b. Annotated value definition (def (: name type) expr)
         | SList(SAtom { Token = Symbol "def" } :: SList([ SAtom { Token = Colon }; SAtom { Token = Symbol name }; tType ], _) :: [ expr ], _) :: rest ->
-            // We ignore the type annotation for now, as ELet has no type annotation parameter
-            collectDefs ((name, false, [], parseExpr expr) :: acc) rest
+            collectDefs ((name, false, [], Some(parseType tType), parseExpr expr) :: acc) rest
 
         // 2. Local function definition (defun (name args...) body)
         | SList(SAtom { Token = Symbol "defun" } :: SList(SAtom { Token = Symbol name } :: args, _) :: rest, r) :: rest' ->
@@ -496,7 +495,7 @@ and parseBody (exprs: SExpr list) (fallbackRange: Range) : Expr =
             let _, bodyExprs = parseDefunRest rest
             let fBody = parseBody bodyExprs r
             // isFun = true, args = argNames
-            collectDefs ((name, true, argNames, fBody) :: acc) rest'
+            collectDefs ((name, true, argNames, None, fBody) :: acc) rest'
 
         | _ -> (List.rev acc, remaining)
 
@@ -506,12 +505,11 @@ and parseBody (exprs: SExpr list) (fallbackRange: Range) : Expr =
 
         // 1. Intercept local mutable definitions FIRST
         | SList(SAtom { Token = Symbol "def/mutable" } :: SAtom { Token = Symbol name } :: [ expr ], r) :: rest ->
-            ELetMutable(name, parseExpr expr, parseItems rest, fallbackRange)
+            ELetMutable(name, None, parseExpr expr, parseItems rest, fallbackRange)
 
-        // Annotated form: (def/mutable (: name type) expr) — type annotation is intentionally
-        // ignored here; the type checker will infer and verify the type from the initializer.
+        // Annotated form: (def/mutable (: name type) expr) — the type checker will unify it with the initializer.
         | SList(SAtom { Token = Symbol "def/mutable" } :: SList([ SAtom { Token = Colon }; SAtom { Token = Symbol name }; tType ], _) :: [ expr ], r) :: rest ->
-            ELetMutable(name, parseExpr expr, parseItems rest, fallbackRange)
+            ELetMutable(name, Some(parseType tType), parseExpr expr, parseItems rest, fallbackRange)
 
         // 2. Starts with def or defun: collect consecutive defs into a letrec block
         | (SList(SAtom { Token = Symbol "def" } :: _, _)) :: _
@@ -523,7 +521,7 @@ and parseBody (exprs: SExpr list) (fallbackRange: Range) : Expr =
         | [ expr ] -> parseExpr expr
 
         // 4. Multiple expressions — sequence them with ELet (isFun = false, empty args)
-        | expr :: rest -> ELet("_", false, [], parseExpr expr, parseItems rest, fallbackRange)
+        | expr :: rest -> ELet("_", false, [], None, parseExpr expr, parseItems rest, fallbackRange)
 
     parseItems exprs
 

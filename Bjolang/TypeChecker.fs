@@ -707,7 +707,7 @@ let rec infer (env: Env) (expr: Expr) : HMType * TypedExpr =
               Range = r
               Node = TApply(typedTarget, positionalArgs |> List.map snd, [], false) }
 
-    | ELet(name, isFun, args, value, body, r) ->
+    | ELet(name, isFun, args, typeAnn, value, body, r) ->
         let valType, typedVal =
             if isFun then
                 let argTypes = args |> List.map (fun _ -> freshMeta ())
@@ -731,6 +731,12 @@ let rec infer (env: Env) (expr: Expr) : HMType * TypedExpr =
                 TFun(argTypes, bodyType), lambdaNode
             else
                 infer env value
+
+        match typeAnn with
+        | Some tAnn ->
+            let expectedType = resolveTypeAnnotation env.Registry tAnn
+            unify env.Registry valType expectedType
+        | None -> ()
 
         let rec isValue (expr: TypedExpr) =
             match expr.Node with
@@ -758,7 +764,7 @@ let rec infer (env: Env) (expr: Expr) : HMType * TypedExpr =
           Node = TLet(name, isFun, args, typedVal, typedBody) }
 
     | ELetRec(bindings, body, r) ->
-        let bindingMetas = bindings |> List.map (fun (n, _, _, _) -> n, freshMeta ())
+        let bindingMetas = bindings |> List.map (fun (n, _, _, _, _) -> n, freshMeta ())
 
         let recEnv =
             bindingMetas
@@ -773,7 +779,7 @@ let rec infer (env: Env) (expr: Expr) : HMType * TypedExpr =
 
         let typedBindings =
             bindings
-            |> List.mapi (fun i (name, isFun, args, expr) ->
+            |> List.mapi (fun i (name, isFun, args, typeAnn, expr) ->
                 let expectedType = snd bindingMetas[i]
 
                 let valType, typedVal =
@@ -801,6 +807,13 @@ let rec infer (env: Env) (expr: Expr) : HMType * TypedExpr =
                         infer recEnv expr
 
                 unify env.Registry valType expectedType
+                
+                match typeAnn with
+                | Some tAnn ->
+                    let annType = resolveTypeAnnotation env.Registry tAnn
+                    unify env.Registry valType annType
+                | None -> ()
+                
                 name, isFun, args, typedVal)
 
         let finalEnv =
@@ -821,8 +834,14 @@ let rec infer (env: Env) (expr: Expr) : HMType * TypedExpr =
           Range = r
           Node = TLetRec(typedBindings, typedBody) }
 
-    | ELetMutable(name, value, body, r) ->
+    | ELetMutable(name, typeAnn, value, body, r) ->
         let valType, typedVal = infer env value
+        
+        match typeAnn with
+        | Some tAnn ->
+            let expectedType = resolveTypeAnnotation env.Registry tAnn
+            unify env.Registry valType expectedType
+        | None -> ()
 
         let localEnv =
             addBinding
