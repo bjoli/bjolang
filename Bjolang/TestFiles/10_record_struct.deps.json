@@ -1,0 +1,53 @@
+{
+  "runtimeTarget": {
+    "name": ".NETCoreApp,Version=v10.0",
+    "signature": ""
+  },
+  "compilationOptions": {},
+  "targets": {
+    ".NETCoreApp,Version=v10.0": {
+      "10_record_struct/1.0.0": {
+        "dependencies": {
+          "BjolangRuntime": "1.0.0.0",
+          "Collections": "0.0.1.0"
+        },
+        "runtime": {
+          "10_record_struct.dll": {}
+        }
+      },
+      "BjolangRuntime/1.0.0.0": {
+        "runtime": {
+          "BjolangRuntime.dll": {
+            "assemblyVersion": "1.0.0.0",
+            "fileVersion": "1.0.0.0"
+          }
+        }
+      },
+      "Collections/0.0.1.0": {
+        "runtime": {
+          "Collections.dll": {
+            "assemblyVersion": "0.0.1.0",
+            "fileVersion": "0.0.1.0"
+          }
+        }
+      }
+    }
+  },
+  "libraries": {
+    "10_record_struct/1.0.0": {
+      "type": "project",
+      "serviceable": false,
+      "sha512": ""
+    },
+    "BjolangRuntime/1.0.0.0": {
+      "type": "reference",
+      "serviceable": false,
+      "sha512": ""
+    },
+    "Collections/0.0.1.0": {
+      "type": "reference",
+      "serviceable": false,
+      "sha512": ""
+    }
+  }
+}

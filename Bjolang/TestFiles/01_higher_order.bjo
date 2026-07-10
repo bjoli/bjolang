@@ -1,12 +1,14 @@
 
 (import (std list))
 
+(: id (-> %a %a))
 (defun (id x) x)
 
 
 
       
 ;; Higher-order function returning a captured closure with generics
+(: make-mapper (-> (-> %a %b) (-> (List %a) (List %b))))
 (defun (make-mapper f)
   (fun (lst) (map f lst)))
 
