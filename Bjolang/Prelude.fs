@@ -98,4 +98,5 @@ let prelude : Env =
         ("vecbuilder-count", {Scheme = Scheme(["a"], [], makeFunType [makeVecBuilderType (TVar "a")] intType); IsMutable = false })
         ("vecbuilder->vec", {Scheme = Scheme(["a"], [], makeFunType [makeVecBuilderType (TVar "a")] (makeVecType (TVar "a"))); IsMutable = false })
       ]
-      Registry = emptyRegistry }
+      Registry = emptyRegistry
+      FunMetas = Map.empty }

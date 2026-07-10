@@ -56,6 +56,8 @@ let sanitizeIdent (s: string) =
 
 let rec typeToString (hm: HMType) : string =
     match hm with
+    | TCon ("Array", [elemType]) ->
+        $"{typeToString elemType}[]"
     | TCon (name, args) ->
         let mapped = mapPrimitiveType name
         let baseName = if mapped = name then sanitizeIdent name else mapped
@@ -165,7 +167,7 @@ let rec generateExpr (ctx: CodegenContext) (expr: TypedExpr) : unit =
                 append ctx $"(({typeToString expr.Type})({targetName}))"
             | _ ->
                 append ctx targetName
-    | TApply (target, args, _) ->
+    | TApply (target, args, kwArgs, _) ->
         match target.Node with
         | TIdent (name, _) when Map.containsKey name ctx.UnionCases ->
             let info = Map.find name ctx.UnionCases
@@ -183,15 +185,65 @@ let rec generateExpr (ctx: CodegenContext) (expr: TypedExpr) : unit =
                     | Some modName -> $"%s{sanitizeIdent modName}_Module.%s{sanitizeIdent name}"
                     | None -> sanitizeIdent name
                 append ctx targetName
-                if not tArgs.IsEmpty && args.IsEmpty then
+                if not tArgs.IsEmpty && args.IsEmpty && kwArgs.IsEmpty then
                     let tyArgsStr = tArgs |> List.map (fun t -> typeToString t) |> String.concat ", "
-                    append ctx $"<{tyArgsStr}>"
+                    append ctx $"<%s{tyArgsStr}>"
             | _ ->
                 generateExpr ctx target
             append ctx "("
-            for i, arg in List.indexed args do
-                if i > 0 then append ctx ", "
-                generateExpr ctx arg
+            if kwArgs.IsEmpty then
+                // Simple case: no keyword args, just emit all positional args
+                for i, arg in List.indexed args do
+                    if i > 0 then append ctx ", "
+                    generateExpr ctx arg
+            else
+                // We have keyword args. Determine how many mandatory args there are.
+                // Function type is TFun([mandatoryTypes..., keywordTypes..., optionalArrayType], retType)
+                // positionalArgs = mandatoryArgs ++ restArgs
+                // kwArgs = keyword values
+                let funArgCount =
+                    match target.Type with
+                    | TFun(argTypes, _) -> argTypes.Length
+                    | _ -> args.Length + kwArgs.Length
+
+                // Check if last param is a rest/params array
+                let hasRest =
+                    match target.Type with
+                    | TFun(argTypes, _) when not argTypes.IsEmpty ->
+                        match List.last argTypes with
+                        | TCon("Array", _) -> true
+                        | _ -> false
+                    | _ -> false
+
+                let mandatoryCount = funArgCount - kwArgs.Length - (if hasRest then 1 else 0)
+                let mandatoryArgs = args |> List.take (min args.Length mandatoryCount)
+                let restArgs = args |> List.skip (min args.Length mandatoryCount)
+
+                let mutable argIdx = 0
+                // 1. Emit mandatory positional args
+                for arg in mandatoryArgs do
+                    if argIdx > 0 then append ctx ", "
+                    generateExpr ctx arg
+                    argIdx <- argIdx + 1
+                // 2. Emit keyword args
+                if hasRest then
+                    // Emit positionally (can't mix named + params in C#)
+                    for (_, kwExpr) in kwArgs do
+                        if argIdx > 0 then append ctx ", "
+                        generateExpr ctx kwExpr
+                        argIdx <- argIdx + 1
+                else
+                    // Emit as C# named arguments
+                    for (kwName, kwExpr) in kwArgs do
+                        if argIdx > 0 then append ctx ", "
+                        append ctx $"%s{sanitizeIdent kwName}: "
+                        generateExpr ctx kwExpr
+                        argIdx <- argIdx + 1
+                // 3. Emit rest args
+                for arg in restArgs do
+                    if argIdx > 0 then append ctx ", "
+                    generateExpr ctx arg
+                    argIdx <- argIdx + 1
             append ctx ")"
     | TInterfaceCall (iType, mName, dict, args) ->
         generateExpr ctx dict
@@ -441,7 +493,7 @@ and generateBlock (ctx: CodegenContext) (target: BlockTarget) (expr: TypedExpr) 
 
 let rec generateDecl (ctx: CodegenContext) (decl: TDecl) : unit =
     match decl with
-    | TDefun (name, tyArgs, args, retType, body, _) ->
+    | TDefun (name, tyArgs, args, kwArgs, restArg, retType, body, _) ->
         indent ctx
         append ctx "public static "
         append ctx (typeToString retType)
@@ -451,11 +503,29 @@ let rec generateDecl (ctx: CodegenContext) (decl: TDecl) : unit =
             let tyArgsStr = tyArgs |> List.map (fun t -> if t.StartsWith("'") then "T_" + t.Substring(1) else "T_" + t) |> String.concat ", "
             append ctx $"<%s{tyArgsStr}>"
         append ctx "("
-        for i, (argName, argType) in List.indexed args do
-            if i > 0 then append ctx ", "
+        let mutable paramIdx = 0
+        // Mandatory args
+        for (argName, argType) in args do
+            if paramIdx > 0 then append ctx ", "
             append ctx (typeToString argType)
             append ctx " "
             append ctx (sanitizeIdent argName)
+            paramIdx <- paramIdx + 1
+        // Keyword args with defaults
+        for (kwName, kwType, kwDefault) in kwArgs do
+            if paramIdx > 0 then append ctx ", "
+            append ctx (typeToString kwType)
+            append ctx " "
+            append ctx (sanitizeIdent kwName)
+            append ctx " = "
+            generateExpr ctx kwDefault
+            paramIdx <- paramIdx + 1
+        // Rest arg (params)
+        match restArg with
+        | Some (restName, restElemType) ->
+            if paramIdx > 0 then append ctx ", "
+            append ctx $"params %s{typeToString restElemType}[] %s{sanitizeIdent restName}"
+        | None -> ()
         append ctx ") {\n"
         withIndent ctx (fun ctx ->
             generateBlock ctx Return body
@@ -569,18 +639,33 @@ let rec generateDecl (ctx: CodegenContext) (decl: TDecl) : unit =
             appendLine ctx $"public static readonly %s{className}%s{tyParamsStr} Instance = new();"
             for m in methods do
                 match m with
-                | TDefun (n, _, args, retType, body, _) ->
+                | TDefun (n, _, args, kwArgs, restArg, retType, body, _) ->
                     indent ctx
                     append ctx "public "
                     append ctx (typeToString retType)
                     append ctx " "
                     append ctx (sanitizeIdent n)
                     append ctx "("
-                    for i, (argName, argType) in List.indexed args do
-                        if i > 0 then append ctx ", "
+                    let mutable paramIdx = 0
+                    for (argName, argType) in args do
+                        if paramIdx > 0 then append ctx ", "
                         append ctx (typeToString argType)
                         append ctx " "
                         append ctx (sanitizeIdent argName)
+                        paramIdx <- paramIdx + 1
+                    for (kwName, kwType, kwDefault) in kwArgs do
+                        if paramIdx > 0 then append ctx ", "
+                        append ctx (typeToString kwType)
+                        append ctx " "
+                        append ctx (sanitizeIdent kwName)
+                        append ctx " = "
+                        generateExpr ctx kwDefault
+                        paramIdx <- paramIdx + 1
+                    match restArg with
+                    | Some (restName, restElemType) ->
+                        if paramIdx > 0 then append ctx ", "
+                        append ctx $"params %s{typeToString restElemType}[] %s{sanitizeIdent restName}"
+                    | None -> ()
                     append ctx ") {\n"
                     withIndent ctx (fun ctx ->
                         generateBlock ctx Return body
@@ -667,7 +752,7 @@ let generateProgram (exportMetadata: string) (dllDeps: string list) (decls: TDec
                 | TModule (modName, innerDecls, _) ->
                     innerDecls |> List.choose (function
                         | TDef (n, _, _, _) -> Some (n, modName)
-                        | TDefun (n, _, _, _, _, _) -> Some (n, modName)
+                        | TDefun (n, _, _, _, _, _, _, _) -> Some (n, modName)
                         | _ -> None
                     )
                 | _ -> []

@@ -104,7 +104,7 @@ and TExprNode =
     | TLetRec of (string * bool * string list * TypedExpr) list * TypedExpr
     | TLetTuple of string list * TypedExpr * TypedExpr
     | TLambda of string list * TypedExpr
-    | TApply of TypedExpr * TypedExpr list * bool
+    | TApply of TypedExpr * TypedExpr list * (string * TypedExpr) list * bool
     | TTupleMake of TypedExpr list
     | TListMake of TypedExpr list
     | TVecMake of TypedExpr list
@@ -137,12 +137,19 @@ type TDecl =
     | TDef of string * TypedExpr * HMType * Range
     | TDefTuple of string list * TypedExpr * HMType * Range
     | TDefMutable of string * TypedExpr * HMType * Range
-    | TDefun of string * string list * (string * HMType) list * HMType * TypedExpr * Range
+    | TDefun of string * string list * (string * HMType) list * (string * HMType * TypedExpr) list * (string * HMType) option * HMType * TypedExpr * Range
+    //          name     tyArgs          mandatoryArgs           keywordArgs(name,type,default)      restArg(name,elemType)       retType  body       range
     | TType of TypeDef list * Range
     | TTypeRec of TypeDef list * Range
     | TTrait of string * string * string list * Map<string, HMType> * Range
     | TImpl of string * HMType * (string * HMType) list * TDecl list * Range
     | TExtern of string * FType * Range
+
+type FunMeta = {
+    MandatoryCount: int
+    KeywordParams: (string * HMType) list   // keyword name, type
+    RestParam: HMType option                // element type of rest array
+}
 
 type TraitConstraint =
     { TraitName: string
@@ -187,7 +194,8 @@ type TraitRegistry =
 
 type Env =
     { Bindings: Map<string, Binding>
-      Registry: TraitRegistry }
+      Registry: TraitRegistry
+      FunMetas: Map<string, FunMeta> }
 
 
 let addTrait (name: string) (info: TraitInfo) (env: Env) : Env =
@@ -367,7 +375,7 @@ let collectTraitConstraints (registry: TraitRegistry) (body: TypedExpr) : TraitC
     let constraints = System.Collections.Generic.HashSet<string * string>()
     let rec walk (expr: TypedExpr) =
         match expr.Node with
-        | TApply({ Node = TIdent(methodName, _); Type = TFun(argTypes, _) }, args, _) ->
+        | TApply({ Node = TIdent(methodName, _); Type = TFun(argTypes, _) }, args, _, _) ->
             // Check if this is a trait method call
             let traitMethodOpt =
                 registry.Traits
@@ -386,7 +394,7 @@ let collectTraitConstraints (registry: TraitRegistry) (body: TypedExpr) : TraitC
             | _ -> ()
             // Recurse into sub-expressions
             args |> List.iter walk
-        | TApply(target, args, _) ->
+        | TApply(target, args, _, _) ->
             walk target; args |> List.iter walk
         | TLet(_, _, _, value, body) ->
             walk value; walk body
@@ -552,6 +560,16 @@ let rec resolveTypeAnnotation (registry: TraitRegistry) (ptype: FType) : HMType 
     | TApp("->", args, _) ->
         let resolvedArgs = args |> List.map (resolveTypeAnnotation registry)
         TFun(List.take (resolvedArgs.Length - 1) resolvedArgs, List.last resolvedArgs)
+    | TArrow(mandatory, keywords, restOpt, ret, _) ->
+        let mandatoryTypes = mandatory |> List.map (resolveTypeAnnotation registry)
+        let keywordTypes = keywords |> List.map (fun (_, t) -> resolveTypeAnnotation registry t)
+        let restArrayType =
+            match restOpt with
+            | Some rt -> [TCon("Array", [resolveTypeAnnotation registry rt])]
+            | None -> []
+        let retType = resolveTypeAnnotation registry ret
+        let allArgTypes = mandatoryTypes @ keywordTypes @ restArrayType
+        TFun(allArgTypes, retType)
     | TApp(name, args, _) ->
         let resolvedArgs = args |> List.map (resolveTypeAnnotation registry)
         match Map.tryFind name registry.Aliases with
@@ -612,14 +630,82 @@ let rec infer (env: Env) (expr: Expr) : HMType * TypedExpr =
 
     | EApp(target, args, r) ->
         let targetType, typedTarget = infer env target
-        let typedArgs = args |> List.map (infer env)
-        let retType = freshMeta ()
-        unify env.Registry targetType (TFun(typedArgs |> List.map fst, retType))
 
-        retType,
-        { Type = retType
-          Range = r
-          Node = TApply(typedTarget, typedArgs |> List.map snd, false) }
+        // Separate keyword args from positional args
+        // Keyword args appear as EKeyword("name") followed by a value expr
+        let rec splitArgs positional keywords remaining =
+            match remaining with
+            | [] -> List.rev positional, List.rev keywords
+            | EKeyword(kwName, _) :: value :: rest ->
+                let valType, typedVal = infer env value
+                splitArgs positional ((kwName, (valType, typedVal)) :: keywords) rest
+            | EKeyword(kwName, kr) :: [] ->
+                failwithf $"Keyword argument '#:%s{kwName}' is missing a value at line %d{kr.Start.Line}"
+            | arg :: rest ->
+                let argType, typedArg = infer env arg
+                splitArgs ((argType, typedArg) :: positional) keywords rest
+
+        let positionalArgs, keywordArgs = splitArgs [] [] args
+        let retType = freshMeta ()
+
+        // Look up FunMeta if the target is a known identifier
+        let funMeta =
+            match target with
+            | EIdent(name, _) -> Map.tryFind name env.FunMetas
+            | _ -> None
+
+        match funMeta with
+        | Some meta when not keywordArgs.IsEmpty || meta.RestParam.IsSome || not meta.KeywordParams.IsEmpty ->
+            // Structured call: separate mandatory, keyword, and rest args
+            let mandatoryArgs = positionalArgs |> List.take (min positionalArgs.Length meta.MandatoryCount)
+            let restArgs = positionalArgs |> List.skip (min positionalArgs.Length meta.MandatoryCount)
+
+            // Build the flat arg types for unification (mandatory + keyword in decl order + rest array)
+            let kwArgTypes =
+                meta.KeywordParams |> List.map (fun (kwName, kwType) ->
+                    match keywordArgs |> List.tryFind (fun (n, _) -> n = kwName) with
+                    | Some (_, (valType, _)) ->
+                        unify env.Registry valType kwType
+                        kwType
+                    | None -> kwType)  // keyword not provided, will use default
+
+            let restArgTypes =
+                match meta.RestParam with
+                | Some elemType ->
+                    for (rt, _) in restArgs do
+                        unify env.Registry rt elemType
+                    [TCon("Array", [elemType])]
+                | None ->
+                    if not restArgs.IsEmpty then
+                        failwithf $"Too many arguments at line %d{r.Start.Line}"
+                    []
+
+            let allFlatTypes = (mandatoryArgs |> List.map fst) @ kwArgTypes @ restArgTypes
+            unify env.Registry targetType (TFun(allFlatTypes, retType))
+
+            let typedKwArgs =
+                keywordArgs |> List.map (fun (n, (_, te)) -> (n, te))
+
+            // Positional args in TApply = mandatory + rest (keyword args are separate)
+            let positionalTypedArgs =
+                (mandatoryArgs |> List.map snd) @ (restArgs |> List.map snd)
+
+            retType,
+            { Type = retType
+              Range = r
+              Node = TApply(typedTarget, positionalTypedArgs, typedKwArgs, false) }
+
+        | _ ->
+            // No FunMeta or no keyword args: simple positional call
+            if not keywordArgs.IsEmpty then
+                failwithf $"Keyword arguments used on a function without keyword parameter metadata at line %d{r.Start.Line}"
+
+            unify env.Registry targetType (TFun(positionalArgs |> List.map fst, retType))
+
+            retType,
+            { Type = retType
+              Range = r
+              Node = TApply(typedTarget, positionalArgs |> List.map snd, [], false) }
 
     | ELet(name, isFun, args, value, body, r) ->
         let valType, typedVal =
@@ -1222,9 +1308,9 @@ module MatchCompiler =
         | TLambda(args, body) ->
             { expr with
                 Node = TLambda(args, lowerMatchExpressions env body) }
-        | TApply(target, args, isTail) ->
+        | TApply(target, args, kwArgs, isTail) ->
             { expr with
-                Node = TApply(lowerMatchExpressions env target, args |> List.map (lowerMatchExpressions env), isTail) }
+                Node = TApply(lowerMatchExpressions env target, args |> List.map (lowerMatchExpressions env), kwArgs |> List.map (fun (n, e) -> n, lowerMatchExpressions env e), isTail) }
         | TIf(c, t, f) ->
             { expr with
                 Node = TIf(lowerMatchExpressions env c, lowerMatchExpressions env t, lowerMatchExpressions env f) }
@@ -1248,8 +1334,8 @@ module MatchCompiler =
     let rec lowerDeclMatches (env: Env) (decl: TDecl) : TDecl =
         match decl with
         | TDef(name, value, t, r) -> TDef(name, lowerMatchExpressions env value, t, r)
-        | TDefun(name, typeParams, args, retT, body, r) ->
-            TDefun(name, typeParams, args, retT, lowerMatchExpressions env body, r)
+        | TDefun(name, typeParams, args, kwArgs, restArg, retT, body, r) ->
+            TDefun(name, typeParams, args, kwArgs |> List.map (fun (n, t, e) -> n, t, lowerMatchExpressions env e), restArg, retT, lowerMatchExpressions env body, r)
         | TModule(name, decls, r) -> TModule(name, decls |> List.map (lowerDeclMatches env), r)
         | _ -> decl
 
@@ -1270,7 +1356,7 @@ module DictionaryLowering =
             // Target trait method invocations
             | TApply({ Node = TIdent(methodName, _)
                        Type = TFun(argTypes, _) } as target,
-                     args,
+                     args, kwArgs,
                      isTail) ->
                 let traitMethodOpt =
                     env.Registry.Traits
@@ -1296,7 +1382,7 @@ module DictionaryLowering =
                             { target with
                                 Node = TIdent( $"%s{implClassName}::%s{methodName}", []) }
 
-                        TApply(staticDirectTarget, loweredArgs, isTail)
+                        TApply(staticDirectTarget, loweredArgs, [], isTail)
 
                     | TVar varName ->
                         // GENERIC DISPATCH
@@ -1357,16 +1443,16 @@ module DictionaryLowering =
                                               Node = TIdent(expectedDictName, []) } : TypedExpr
                                         | _ ->
                                             failwithf $"Cannot resolve dictionary for type %A{resolvedType} at line %d{expr.Range.Start.Line}")
-                                TApply(recurse target, dictArgs @ (args |> List.map recurse), false)
+                                TApply(recurse target, dictArgs @ (args |> List.map recurse), kwArgs |> List.map (fun (n, e) -> n, recurse e), false)
                             else
                                 // No constraints or no type args — standard call
-                                TApply(recurse target, args |> List.map recurse, false)
+                                TApply(recurse target, args |> List.map recurse, kwArgs |> List.map (fun (n, e) -> n, recurse e), false)
                         | None ->
                             // Unknown callee — standard call
-                            TApply(recurse target, args |> List.map recurse, false)
+                            TApply(recurse target, args |> List.map recurse, kwArgs |> List.map (fun (n, e) -> n, recurse e), false)
                     | _ ->
                         // Non-identifier target — standard call
-                        TApply(recurse target, args |> List.map recurse, false)
+                        TApply(recurse target, args |> List.map recurse, kwArgs |> List.map (fun (n, e) -> n, recurse e), false)
 
             // Explicit TInterfaceCall (if re-running the pass or generated elsewhere)
             | TInterfaceCall(iType, mName, dict, args) ->
@@ -1383,8 +1469,8 @@ module DictionaryLowering =
 
             | TLambda(args, body) -> TLambda(args, recurse body)
 
-            | TApply(target, args, isTail) -> // Fallback for non-identifier targets
-                TApply(recurse target, args |> List.map recurse, isTail)
+            | TApply(target, args, kwArgs, isTail) -> // Fallback for non-identifier targets
+                TApply(recurse target, args |> List.map recurse, kwArgs |> List.map (fun (n, e) -> n, recurse e), isTail)
 
             | TTupleMake items -> TTupleMake(items |> List.map recurse)
 
@@ -1435,7 +1521,7 @@ module DictionaryLowering =
 
         | TDefMutable(name, value, t, r) -> TDefMutable(name, lowerExpr env Map.empty value, t, r)
 
-        | TDefun(name, tyArgs, args, retType, body, r) ->
+        | TDefun(name, tyArgs, args, kwArgs, restArg, retType, body, r) ->
             let binding = lookup env name
 
             match binding.Scheme with
@@ -1457,7 +1543,8 @@ module DictionaryLowering =
                     |> List.fold (fun acc (dName, _) -> Map.add dName dName acc) Map.empty
 
                 let loweredBody = lowerExpr env activeDicts body
-                TDefun(name, tyArgs, dictParams @ args, retType, loweredBody, r)
+                let loweredKwArgs = kwArgs |> List.map (fun (n, t, e) -> n, t, lowerExpr env activeDicts e)
+                TDefun(name, tyArgs, dictParams @ args, loweredKwArgs, restArg, retType, loweredBody, r)
 
         | TImpl(traitName, targetType, assoc, methods, r) ->
             TImpl(traitName, targetType, assoc, methods |> List.map (lowerDecl env), r)
@@ -1507,15 +1594,16 @@ let registerTypeDefs (isRec: bool) (typeDefs: TypeDef list) (env: Env) : Env =
 
     { env with Registry = finalRegistry; Bindings = finalBindings }
 
-let rec checkDecl (env: Env) (sigs: Map<string, HMType>) (decl: Decl) : Env * Map<string, HMType> * TDecl list =
+let rec checkDecl (env: Env) (sigs: Map<string, HMType * FType option>) (decl: Decl) : Env * Map<string, HMType * FType option> * TDecl list =
     match decl with
-    | DSignature(name, ftype, _) -> env, Map.add name (resolveTypeAnnotation env.Registry ftype) sigs, []
+    | DSignature(name, ftype, _) -> env, Map.add name (resolveTypeAnnotation env.Registry ftype, Some ftype) sigs, []
 
     | DDef(name, expr, r) ->
         let exprType, typedExpr = infer env expr
 
-        if Map.containsKey name sigs then
-            unify env.Registry exprType sigs[name]
+        match Map.tryFind name sigs with
+        | Some (sigType, _) -> unify env.Registry exprType sigType
+        | None -> ()
 
         let newEnv =
             addBinding
@@ -1526,24 +1614,75 @@ let rec checkDecl (env: Env) (sigs: Map<string, HMType>) (decl: Decl) : Env * Ma
 
         newEnv, Map.remove name sigs, [ TDef(name, typedExpr, exprType, r) ]
 
-    | DDefun(name, args, retTypeOpt, body, r) ->
-        let argTypes =
-            args
-            |> List.map (fun (n, tOpt) ->
-                n,
-                match tOpt with
-                | Some t -> resolveTypeAnnotation env.Registry t
-                | None -> freshMeta ())
+    | DDefun(name, defunArgs, body, r) ->
+        // Enforce mandatory signature for all top-level defuns except 'main'
+        let sigOpt = Map.tryFind name sigs
+        if name <> "main" && sigOpt.IsNone then
+            failwithf $"Type Error: Function '%s{name}' requires a type signature (: %s{name} ...) at line %d{r.Start.Line}"
+
+        // Extract structured keyword/rest info from the raw FType (if available)
+        let mandatoryFTypes, keywordFTypes, restFTypeOpt, retFType =
+            match sigOpt with
+            | Some (_, Some (TArrow(m, kw, rest, ret, _))) -> m, kw, rest, Some ret
+            | _ -> [], [], None, None
+
+        let sigHMType = sigOpt |> Option.map fst
+
+        // Match defun args with the signature types
+        let mandatoryArgNames =
+            defunArgs |> List.choose (function MandatoryArg n -> Some n | _ -> None)
+        let keywordArgDefs =
+            defunArgs |> List.choose (function KeywordArg(n, defaultExpr) -> Some(n, defaultExpr) | _ -> None)
+        let restArgName =
+            defunArgs |> List.tryPick (function RestArg n -> Some n | _ -> None)
+
+        // Resolve mandatory arg types from signature
+        let mandatoryTypes =
+            if mandatoryFTypes.Length > 0 then
+                if mandatoryArgNames.Length <> mandatoryFTypes.Length then
+                    failwithf $"Type Error: Function '%s{name}' has %d{mandatoryArgNames.Length} mandatory args but signature specifies %d{mandatoryFTypes.Length} at line %d{r.Start.Line}"
+                List.zip mandatoryArgNames (mandatoryFTypes |> List.map (resolveTypeAnnotation env.Registry))
+            else
+                // For main or functions without TArrow signature, use fresh metas
+                mandatoryArgNames |> List.map (fun n -> n, freshMeta())
+
+        // Resolve keyword arg types from signature and type-check defaults
+        let keywordTypes =
+            keywordArgDefs |> List.map (fun (kwName, _defaultExpr) ->
+                let kwType =
+                    match keywordFTypes |> List.tryFind (fun (n, _) -> n = kwName) with
+                    | Some (_, ft) -> resolveTypeAnnotation env.Registry ft
+                    | None ->
+                        if sigOpt.IsSome then
+                            failwithf $"Type Error: Keyword argument '#:%s{kwName}' not found in signature for '%s{name}' at line %d{r.Start.Line}"
+                        else freshMeta()
+                kwName, kwType)
+
+        // Resolve rest arg type from signature
+        let restArgType =
+            match restArgName, restFTypeOpt with
+            | Some _, Some ft -> Some (resolveTypeAnnotation env.Registry ft)
+            | Some _, None ->
+                if sigOpt.IsSome then
+                    failwithf $"Type Error: Function '%s{name}' has a rest arg but signature has no #:rest at line %d{r.Start.Line}"
+                else Some (freshMeta())
+            | None, _ -> None
 
         let expectedRetType =
-            match retTypeOpt with
-            | Some t -> resolveTypeAnnotation env.Registry t
-            | None -> freshMeta ()
+            match retFType with
+            | Some ft -> resolveTypeAnnotation env.Registry ft
+            | None -> freshMeta()
 
-        let funType = TFun(argTypes |> List.map snd, expectedRetType)
+        // Build the flat function type for unification
+        let allArgTypes =
+            (mandatoryTypes |> List.map snd) @
+            (keywordTypes |> List.map snd) @
+            (match restArgType with Some rt -> [TCon("Array", [rt])] | None -> [])
+        let funType = TFun(allArgTypes, expectedRetType)
 
-        if Map.containsKey name sigs then
-            unify env.Registry funType sigs[name]
+        match sigHMType with
+        | Some st -> unify env.Registry funType st
+        | None -> ()
 
         let recEnv =
             addBinding
@@ -1552,35 +1691,68 @@ let rec checkDecl (env: Env) (sigs: Map<string, HMType>) (decl: Decl) : Env * Ma
                   IsMutable = false }
                 env
 
+        // Bind mandatory args
         let bodyEnv =
-            argTypes
+            mandatoryTypes
             |> List.fold
                 (fun acc (n, t) ->
-                    addBinding
-                        n
-                        { Scheme = Scheme([], [], t)
-                          IsMutable = false }
-                        acc)
+                    addBinding n { Scheme = Scheme([], [], t); IsMutable = false } acc)
                 recEnv
+
+        // Bind keyword args
+        let bodyEnv =
+            keywordTypes
+            |> List.fold
+                (fun acc (n, t) ->
+                    addBinding n { Scheme = Scheme([], [], t); IsMutable = false } acc)
+                bodyEnv
+
+        // Bind rest arg as Array type
+        let bodyEnv =
+            match restArgName, restArgType with
+            | Some rn, Some rt ->
+                addBinding rn { Scheme = Scheme([], [], TCon("Array", [rt])); IsMutable = false } bodyEnv
+            | _ -> bodyEnv
 
         let bodyType, typedBody = infer bodyEnv body
         unify env.Registry bodyType expectedRetType
 
+        // Type-check keyword default expressions
+        let typedKeywordArgs =
+            List.zip keywordArgDefs keywordTypes
+            |> List.map (fun ((kwName, defaultExpr), (_, kwType)) ->
+                let defaultType, typedDefault = infer env defaultExpr
+                unify env.Registry defaultType kwType
+                kwName, kwType, typedDefault)
+
         let scheme = generalize env funType
         let (Scheme(vars, _, schemeType)) = scheme
-        
-        // Collect trait constraints from the body (find trait method calls on TVars)
+
+        // Collect trait constraints from the body
         let traitConstraints = collectTraitConstraints env.Registry typedBody
         let schemeWithConstraints = Scheme(vars, traitConstraints, schemeType)
-        
+
+        // Build FunMeta for call-site keyword/rest handling
+        let funMeta = {
+            MandatoryCount = mandatoryTypes.Length
+            KeywordParams = keywordTypes
+            RestParam = restArgType
+        }
+
         let finalEnv =
             addBinding
                 name
                 { Scheme = schemeWithConstraints
                   IsMutable = false }
                 env
+        let finalEnv = { finalEnv with FunMetas = Map.add name funMeta finalEnv.FunMetas }
 
-        let decl = TDefun(name, vars, argTypes, expectedRetType, typedBody, r)
+        let restArgInfo =
+            match restArgName, restArgType with
+            | Some rn, Some rt -> Some(rn, rt)
+            | _ -> None
+
+        let decl = TDefun(name, vars, mandatoryTypes, typedKeywordArgs, restArgInfo, expectedRetType, typedBody, r)
         finalEnv, Map.remove name sigs, [ decl ]
 
     | DDefTuple(names, expr, r) ->
@@ -1604,8 +1776,9 @@ let rec checkDecl (env: Env) (sigs: Map<string, HMType>) (decl: Decl) : Env * Ma
     | DDefMutable(name, expr, r) ->
         let exprType, typedExpr = infer env expr
 
-        if Map.containsKey name sigs then
-            unify env.Registry exprType sigs[name]
+        match Map.tryFind name sigs with
+        | Some (sigType, _) -> unify env.Registry exprType sigType
+        | None -> ()
 
         let newEnv =
             addBinding
@@ -1621,7 +1794,7 @@ let rec checkDecl (env: Env) (sigs: Map<string, HMType>) (decl: Decl) : Env * Ma
         let explicitSigs =
             decls
             |> List.choose (function
-                | DSignature(name, ftype, _) -> Some(name, resolveTypeAnnotation env.Registry ftype)
+                | DSignature(name, ftype, _) -> Some(name, (resolveTypeAnnotation env.Registry ftype, Some ftype))
                 | _ -> None)
             |> Map.ofList
 
@@ -1736,7 +1909,7 @@ let rec checkDecl (env: Env) (sigs: Map<string, HMType>) (decl: Decl) : Env * Ma
             methods
             |> List.map (fun methodDecl ->
                 match methodDecl with
-                | DDefun(name, args, retTypeOpt, body, methodRange) ->
+                | DDefun(name, args, body, methodRange) ->
                     let expectedSignature =
                         match Map.tryFind name traitInfo.Signatures with
                         | Some sigType -> applySubst sigType
@@ -1746,7 +1919,7 @@ let rec checkDecl (env: Env) (sigs: Map<string, HMType>) (decl: Decl) : Env * Ma
 
                     // FIX 3: Pass expectedSignature through 'sigs'. 
                     // This forces DDefun to unify the expected types into the arguments BEFORE inference and generalization!
-                    let methodSigs = Map.add name expectedSignature Map.empty
+                    let methodSigs = Map.add name (expectedSignature, None) Map.empty
                     
                     let _, _, tDecls = checkDecl regEnv methodSigs methodDecl
                     List.head tDecls // Return the fully verified TDefun node
@@ -1758,7 +1931,7 @@ let rec checkDecl (env: Env) (sigs: Map<string, HMType>) (decl: Decl) : Env * Ma
             let isImplemented =
                 methods
                 |> List.exists (function
-                    | DDefun(name, _, _, _, _) -> name = requiredMethod
+                    | DDefun(name, _, _, _) -> name = requiredMethod
                     | _ -> false)
 
             if not isImplemented then
@@ -1773,7 +1946,7 @@ let checkProgram (initialEnv: Env) (program: Decl list) : Env * TDecl list =
     let explicitSigs =
         program
         |> List.choose (function
-            | DSignature(name, typ, _) -> Some(name, resolveTypeAnnotation initialEnv.Registry typ)
+            | DSignature(name, typ, _) -> Some(name, (resolveTypeAnnotation initialEnv.Registry typ, Some typ))
             | _ -> None)
         |> Map.ofList
 

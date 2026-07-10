@@ -18,6 +18,8 @@ let getRange =
 type FType =
     | TName of string * Range
     | TApp of string * FType list * Range
+    // (-> MandatoryTypes... (#:key KeyType)... #:rest RestElemType ReturnType)
+    | TArrow of FType list * (string * FType) list * FType option * FType * Range
 
 type UnionCase =
     | SimpleCase of string * Range
@@ -48,7 +50,7 @@ type Pattern =
     | PList of Pattern list * Pattern option * Range // (items, optional tail, range)
     | PConstruct of string * Pattern list * Range
 
-type Expr =
+and Expr =
     | EInt of string * Range
     | EString of string * Range
     | EQuotedSymbol of string * Range
@@ -75,6 +77,11 @@ type Expr =
     | EMatch of Expr * (Pattern * Expr option * Expr) list * Range
     | ETryFinally of Expr * Expr * Range
 
+and DefunArg =
+    | MandatoryArg of string
+    | KeywordArg of string * Expr              // (#:keyword defaultValue)
+    | RestArg of string                        // #:rest name
+
 type ImportSpec =
     | RelativePath of string
     | ModulePath of string list
@@ -87,7 +94,7 @@ type Decl =
     | DDef of string * Expr * Range
     | DDefTuple of string list * Expr * Range
     | DDefMutable of string * Expr * Range
-    | DDefun of string * (string * FType option) list * FType option * Expr * Range
+    | DDefun of string * DefunArg list * Expr * Range
     | DType of TypeDef list * Range
     | DTypeRec of TypeDef list * Range
     // DTrait (Name, ImplementorVar, AssociatedTypes, Signatures, Range)
@@ -130,6 +137,35 @@ let rec parsePattern (s: SExpr) : Pattern =
 
     | _ -> failwithf $"Invalid pattern at line %d{r.Start.Line}"
 
+let parseArrowType (items: SExpr list) (r: Range) : FType =
+    if items.IsEmpty then failwithf $"Arrow type must have at least a return type at line %d{r.Start.Line}"
+    let returnTypeExpr = List.last items
+    let argItems = List.take (items.Length - 1) items
+
+    let rec parseArrowTypeInner (s: SExpr) : FType =
+        let r = getRange s
+        match s with
+        | SAtom { Token = QuotedSymbol sym } -> TName("'" + sym, r)
+        | SAtom { Token = Symbol sym }
+        | SAtom { Token = TypeVar sym } -> TName(sym, r)
+        | SList(SAtom { Token = Symbol name } :: typeArgs, _) -> TApp(name, List.map parseArrowTypeInner typeArgs, r)
+        | _ -> failwithf $"Invalid type syntax in arrow type at line %d{r.Start.Line}"
+
+    let rec collectArgs mandatory keywords argItems =
+        match argItems with
+        | [] -> TArrow(List.rev mandatory, List.rev keywords, None, parseArrowTypeInner returnTypeExpr, r)
+        | [SAtom { Token = Keyword "rest" }] ->
+            failwithf $"Expected rest element type after #:rest at line %d{r.Start.Line}"
+        | SAtom { Token = Keyword "rest" } :: restTypeExpr :: [] ->
+            TArrow(List.rev mandatory, List.rev keywords, Some (parseArrowTypeInner restTypeExpr), parseArrowTypeInner returnTypeExpr, r)
+        | SList(SAtom { Token = Keyword name } :: [ typeExpr ], _) :: rest ->
+            collectArgs mandatory ((name, parseArrowTypeInner typeExpr) :: keywords) rest
+        | item :: rest when keywords.IsEmpty ->
+            collectArgs (parseArrowTypeInner item :: mandatory) keywords rest
+        | _ -> failwithf $"Mandatory types must come before keyword/rest types in arrow type at line %d{r.Start.Line}"
+
+    collectArgs [] [] argItems
+
 let rec parseType (s: SExpr) : FType =
     let r = getRange s
 
@@ -137,6 +173,7 @@ let rec parseType (s: SExpr) : FType =
     | SAtom { Token = QuotedSymbol sym } -> TName("'" + sym, r)  // %a in source → 'a internally
     | SAtom { Token = Symbol sym }
     | SAtom { Token = TypeVar sym } -> TName(sym, r)
+    | SList(SAtom { Token = Symbol "->" } :: arrowArgs, _) -> parseArrowType arrowArgs r
     | SList(SAtom { Token = Symbol name } :: typeArgs, _) -> TApp(name, List.map parseType typeArgs, r)
     | _ -> failwithf $"Invalid type syntax at line %d{r.Start.Line}"
 
@@ -210,6 +247,7 @@ let parseDefunRest (rest: SExpr list) : (FType option * SExpr list) =
     match rest with
     | SAtom { Token = Colon } :: t :: body -> (Some(parseType t), body)
     | body -> (None, body)
+
 
 // Desugar a quoted list '(1 2 3) into (Cons 1 (Cons 2 (Cons 3 Nil)))
 // Nested lists are recursively quoted: '(1 (2 3)) → (Cons 1 (Cons (Cons 2 (Cons 3 Nil)) Nil))
@@ -489,6 +527,20 @@ and parseBody (exprs: SExpr list) (fallbackRange: Range) : Expr =
 
     parseItems exprs
 
+// New defun arg parser for top-level defuns with keyword/rest support
+let rec parseNewDefunArgs (args: SExpr list) : DefunArg list =
+    match args with
+    | [] -> []
+    | SAtom { Token = Symbol n } :: rest -> MandatoryArg n :: parseNewDefunArgs rest
+    | SAtom { Token = Comma } :: rest -> parseNewDefunArgs rest
+    | SList(SAtom { Token = Keyword name } :: [ defaultExpr ], _) :: rest ->
+        KeywordArg(name, parseExpr defaultExpr) :: parseNewDefunArgs rest
+    | SAtom { Token = Keyword "rest" } :: SAtom { Token = Symbol name } :: rest ->
+        if not rest.IsEmpty then
+            failwithf $"Rest argument must be the last argument at line %d{(getRange (List.head rest)).Start.Line}"
+        [RestArg name]
+    | bad :: _ -> failwithf $"Invalid defun argument at line %d{(getRange bad).Start.Line}"
+
 let rec parseDecl (s: SExpr) : Decl =
     let r = getRange s
 
@@ -551,9 +603,13 @@ let rec parseDecl (s: SExpr) : Decl =
         DDefMutable(name, parseExpr expr, r)
 
     | SList(SAtom { Token = Symbol "defun" } :: SList(SAtom { Token = Symbol name } :: args, _) :: rest, _) ->
-        let parsedArgs = parseDefunArgs args
-        let retType, bodyExprs = parseDefunRest rest
-        DDefun(name, parsedArgs, retType, parseBody bodyExprs r, r)
+        let parsedArgs = parseNewDefunArgs args
+        // Skip optional inline return type annotation (backward compat, ignored — type comes from signature)
+        let bodyExprs =
+            match rest with
+            | SAtom { Token = Colon } :: _ :: body -> body
+            | body -> body
+        DDefun(name, parsedArgs, parseBody bodyExprs r, r)
     | SList(SAtom { Token = Symbol "type" } :: typeDefs, _) -> DType(List.map parseTypeDef typeDefs, r)
 
     | SList(SAtom { Token = Symbol "type-rec" } :: typeDefs, _) -> DTypeRec(List.map parseTypeDef typeDefs, r)

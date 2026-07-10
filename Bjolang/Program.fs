@@ -114,6 +114,12 @@ let main argv =
                         match ft with
                         | Parser.TName(n, _) -> n
                         | Parser.TApp(n, args, _) -> $"({n} " + String.concat " " (List.map serializeFType args) + ")"
+                        | Parser.TArrow(mandatory, keywords, restOpt, ret, _) ->
+                            let mandatoryStrs = mandatory |> List.map serializeFType
+                            let keywordStrs = keywords |> List.map (fun (n, t) -> $"(#:{n} {serializeFType t})")
+                            let restStrs = match restOpt with Some t -> [$"#:rest {serializeFType t}"] | None -> []
+                            let allParts = mandatoryStrs @ keywordStrs @ restStrs @ [serializeFType ret]
+                            "(-> " + String.concat " " allParts + ")"
                         
                     let serializeTypeDef (td: Parser.TypeDef, isRec: bool) : string =
                         let quotedArgs = td.TypeArgs |> List.map (fun a -> if a.StartsWith("'") then a else "'" + a)

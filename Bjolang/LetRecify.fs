@@ -305,7 +305,12 @@ let rec letrecifyDecl (decl: Decl) : Decl =
     | DDef(name, expr, r) -> DDef(name, letrecifyExpr expr, r)
     | DDefTuple(names, expr, r) -> DDefTuple(names, letrecifyExpr expr, r)
     | DDefMutable(name, expr, r) -> DDefMutable(name, letrecifyExpr expr, r)
-    | DDefun(name, args, retType, body, r) -> DDefun(name, args, retType, letrecifyExpr body, r)
+    | DDefun(name, args, body, r) ->
+        let letrecifiedArgs =
+            args |> List.map (function
+                | KeywordArg(n, defaultExpr) -> KeywordArg(n, letrecifyExpr defaultExpr)
+                | other -> other)
+        DDefun(name, letrecifiedArgs, letrecifyExpr body, r)
     | DModule(name, decls, r) -> DModule(name, letrecifyModule decls, r)
     | _ -> decl // Types, imports, exports, and signatures carry no executable body [cite: 29, 30, 31, 37, 38]
 

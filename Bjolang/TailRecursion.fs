@@ -7,18 +7,19 @@ let rec analyzeExpr (inTailPosition: bool) (currentFuncName: string option) (exp
         match node with
         | TInt _ | TString _ | TKeyword _ | TSymbol _ | TIdent _ -> node
 
-        | TApply (t, args, _) ->
+        | TApply (t, args, kwArgs, _) ->
             let isSelfRecursive =
                 match currentFuncName, t.Node with
                 | Some cName, TIdent(tName, _) when cName = tName -> true
                 | _ -> false
 
             let newArgs = args |> List.map (analyzeExpr false currentFuncName)
+            let newKwArgs = kwArgs |> List.map (fun (n, e) -> n, analyzeExpr false currentFuncName e)
 
             if isSelfRecursive && inTailPosition then
-                TApply (analyzeExpr false currentFuncName t, newArgs, true)
+                TApply (analyzeExpr false currentFuncName t, newArgs, newKwArgs, true)
             else
-                TApply (analyzeExpr false currentFuncName t, newArgs, false)
+                TApply (analyzeExpr false currentFuncName t, newArgs, newKwArgs, false)
 
         | TInterfaceCall (i, m, d, args) ->
             TInterfaceCall (i, m, analyzeExpr false currentFuncName d, args |> List.map (analyzeExpr false currentFuncName))
@@ -81,8 +82,9 @@ let rec analyzeDecl (decl: TDecl) : TDecl =
     | TDef (n, e, t, r) -> TDef (n, analyzeExpr false None e, t, r)
     | TDefTuple (names, e, t, r) -> TDefTuple (names, analyzeExpr false None e, t, r)
     | TDefMutable (n, e, t, r) -> TDefMutable (n, analyzeExpr false None e, t, r)
-    | TDefun (n, tyArgs, args, retType, body, r) ->
-        TDefun (n, tyArgs, args, retType, analyzeExpr true (Some n) body, r)
+    | TDefun (n, tyArgs, args, kwArgs, restArg, retType, body, r) ->
+        let analyzedKwArgs = kwArgs |> List.map (fun (kn, kt, ke) -> kn, kt, analyzeExpr false None ke)
+        TDefun (n, tyArgs, args, analyzedKwArgs, restArg, retType, analyzeExpr true (Some n) body, r)
     | TImpl (traitName, targetType, assocBindings, methods, r) ->
         TImpl (traitName, targetType, assocBindings, List.map analyzeDecl methods, r)
     | _ -> decl
