@@ -1594,15 +1594,15 @@ let registerTypeDefs (isRec: bool) (typeDefs: TypeDef list) (env: Env) : Env =
 
     { env with Registry = finalRegistry; Bindings = finalBindings }
 
-let rec checkDecl (env: Env) (sigs: Map<string, HMType * FType option>) (decl: Decl) : Env * Map<string, HMType * FType option> * TDecl list =
+let rec checkDecl (env: Env) (sigs: Map<string, HMType * FType option * (string * string) list>) (decl: Decl) : Env * Map<string, HMType * FType option * (string * string) list> * TDecl list =
     match decl with
-    | DSignature(name, ftype, _) -> env, Map.add name (resolveTypeAnnotation env.Registry ftype, Some ftype) sigs, []
+    | DSignature(name, ftype, constraints, _) -> env, Map.add name (resolveTypeAnnotation env.Registry ftype, Some ftype, constraints) sigs, []
 
     | DDef(name, expr, r) ->
         let exprType, typedExpr = infer env expr
 
         match Map.tryFind name sigs with
-        | Some (sigType, _) -> unify env.Registry exprType sigType
+        | Some (sigType, _, _) -> unify env.Registry exprType sigType
         | None -> ()
 
         let newEnv =
@@ -1623,10 +1623,18 @@ let rec checkDecl (env: Env) (sigs: Map<string, HMType * FType option>) (decl: D
         // Extract structured keyword/rest info from the raw FType (if available)
         let mandatoryFTypes, keywordFTypes, restFTypeOpt, retFType =
             match sigOpt with
-            | Some (_, Some (TArrow(m, kw, rest, ret, _))) -> m, kw, rest, Some ret
+            | Some (_, Some (TArrow(m, kw, rest, ret, _)), _) -> m, kw, rest, Some ret
             | _ -> [], [], None, None
 
-        let sigHMType = sigOpt |> Option.map fst
+        let sigHMType = sigOpt |> Option.map (fun (t, _, _) -> t)
+
+        // Extract explicit trait constraints from the signature
+        let explicitConstraints =
+            match sigOpt with
+            | Some (_, _, constraints) ->
+                constraints |> List.map (fun (traitName, varName) ->
+                    { TraitName = traitName; TargetType = TVar varName })
+            | None -> []
 
         // Match defun args with the signature types
         let mandatoryArgNames =
@@ -1728,9 +1736,14 @@ let rec checkDecl (env: Env) (sigs: Map<string, HMType * FType option>) (decl: D
         let scheme = generalize env funType
         let (Scheme(vars, _, schemeType)) = scheme
 
-        // Collect trait constraints from the body
-        let traitConstraints = collectTraitConstraints env.Registry typedBody
-        let schemeWithConstraints = Scheme(vars, traitConstraints, schemeType)
+        // Collect trait constraints from the body and merge with explicit ones
+        let inferredConstraints = collectTraitConstraints env.Registry typedBody
+        let allConstraints =
+            let seen = System.Collections.Generic.HashSet<string * string>()
+            [ for c in explicitConstraints @ inferredConstraints do
+                let key = (c.TraitName, match c.TargetType with TVar v -> v | _ -> "")
+                if seen.Add(key) then yield c ]
+        let schemeWithConstraints = Scheme(vars, allConstraints, schemeType)
 
         // Build FunMeta for call-site keyword/rest handling
         let funMeta = {
@@ -1777,7 +1790,7 @@ let rec checkDecl (env: Env) (sigs: Map<string, HMType * FType option>) (decl: D
         let exprType, typedExpr = infer env expr
 
         match Map.tryFind name sigs with
-        | Some (sigType, _) -> unify env.Registry exprType sigType
+        | Some (sigType, _, _) -> unify env.Registry exprType sigType
         | None -> ()
 
         let newEnv =
@@ -1794,7 +1807,7 @@ let rec checkDecl (env: Env) (sigs: Map<string, HMType * FType option>) (decl: D
         let explicitSigs =
             decls
             |> List.choose (function
-                | DSignature(name, ftype, _) -> Some(name, (resolveTypeAnnotation env.Registry ftype, Some ftype))
+                | DSignature(name, ftype, constraints, _) -> Some(name, (resolveTypeAnnotation env.Registry ftype, Some ftype, constraints))
                 | _ -> None)
             |> Map.ofList
 
@@ -1919,7 +1932,7 @@ let rec checkDecl (env: Env) (sigs: Map<string, HMType * FType option>) (decl: D
 
                     // FIX 3: Pass expectedSignature through 'sigs'. 
                     // This forces DDefun to unify the expected types into the arguments BEFORE inference and generalization!
-                    let methodSigs = Map.add name (expectedSignature, None) Map.empty
+                    let methodSigs = Map.add name (expectedSignature, None, []) Map.empty
                     
                     let _, _, tDecls = checkDecl regEnv methodSigs methodDecl
                     List.head tDecls // Return the fully verified TDefun node
@@ -1946,7 +1959,7 @@ let checkProgram (initialEnv: Env) (program: Decl list) : Env * TDecl list =
     let explicitSigs =
         program
         |> List.choose (function
-            | DSignature(name, typ, _) -> Some(name, (resolveTypeAnnotation initialEnv.Registry typ, Some typ))
+            | DSignature(name, typ, constraints, _) -> Some(name, (resolveTypeAnnotation initialEnv.Registry typ, Some typ, constraints))
             | _ -> None)
         |> Map.ofList
 

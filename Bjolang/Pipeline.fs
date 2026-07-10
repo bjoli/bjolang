@@ -95,7 +95,7 @@ let wrapInModule (moduleName: string) (decls: Decl list) : Decl list =
             let getRange d = 
                 match d with
                 | DDef(_, _, r) | DDefun(_, _, _, r) | DDefTuple(_, _, r) | DDefMutable(_, _, r)
-                | DSignature(_, _, r) | DType(_, r) | DTypeRec(_, r) | DTrait(_, _, _, _, r) | DImpl(_, _, _, _, r)
+                | DSignature(_, _, _, r) | DType(_, r) | DTypeRec(_, r) | DTrait(_, _, _, _, r) | DImpl(_, _, _, _, r)
                 | DModule(_, _, r) | DImport(_, r) | DExport(_, r) | DExtern(_, _, _, r) -> r
             unionLexerRanges (getRange first) (getRange last)
     
@@ -179,7 +179,7 @@ let loadModuleGraph (mainFilePath: string) : Decl list * string list =
                         let parsedDecls = 
                             Parser.parseModule tokens
                             |> List.map (function
-                                | DSignature(name, t, r) ->
+                                | DSignature(name, t, _, r) ->
                                     let constraints = Map.tryFind name constraintMap |> Option.defaultValue []
                                     DExtern(name, t, constraints, r)
                                 | d -> d)

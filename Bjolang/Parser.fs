@@ -87,7 +87,7 @@ type ImportSpec =
     | ModulePath of string list
 
 type Decl =
-    | DSignature of string * FType * Range
+    | DSignature of string * FType * (string * string) list * Range
     | DImport of ImportSpec list * Range
     | DExport of string list * Range
     | DModule of string * Decl list * Range
@@ -546,10 +546,17 @@ let rec parseDecl (s: SExpr) : Decl =
 
     match s with
     | SList([ SAtom { Token = Colon }; SAtom { Token = Symbol name }; tType ], _) ->
-        DSignature(name, parseType tType, r)
-    // (: name type (where (trait var) ...)) — signature with trait constraints (from DLL metadata)
-    | SList([ SAtom { Token = Colon }; SAtom { Token = Symbol name }; tType; SList(SAtom { Token = Symbol "where" } :: _, _) ], _) ->
-        DSignature(name, parseType tType, r)
+        DSignature(name, parseType tType, [], r)
+    // (: name type (where (TraitName %var) ...)) — signature with trait constraints
+    | SList(SAtom { Token = Colon } :: SAtom { Token = Symbol name } :: tType :: SList(SAtom { Token = Symbol "where" } :: constraintExprs, _) :: _, _) ->
+        let constraints =
+            constraintExprs |> List.choose (function
+                | SList([ SAtom { Token = Symbol traitName }; SAtom { Token = QuotedSymbol varName } ], _) ->
+                    Some (traitName, "'" + varName)
+                | SList([ SAtom { Token = Symbol traitName }; SAtom { Token = Symbol varName } ], _) ->
+                    Some (traitName, varName)
+                | _ -> None)
+        DSignature(name, parseType tType, constraints, r)
 
     | SList(SAtom { Token = Symbol "import" } :: imports, _) ->
         // Parse paths like (io readline) into ["io"; "readline"]
