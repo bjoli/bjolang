@@ -24,19 +24,19 @@ let prelude : Env =
         ("true", {Scheme = Scheme([], [], boolType); IsMutable = false  })
         ("false", {Scheme = Scheme([], [], boolType); IsMutable = false })
 
-        // Math Operators (Monomorphic, restricted to Int for now to avoid overloading complexity)
-        ("+", {Scheme = Scheme([], [], makeFunType [intType; intType] intType); IsMutable = false })
-        ("-", {Scheme = Scheme([], [], makeFunType [intType; intType] intType); IsMutable = false })
-        ("*", {Scheme = Scheme([], [], makeFunType [intType; intType] intType); IsMutable = false })
-        ("/", {Scheme = Scheme([], [], makeFunType [intType; intType] intType); IsMutable = false })
-        ("%", {Scheme = Scheme([], [], makeFunType [intType; intType] intType); IsMutable = false })
+        // Math Operators (Polymorphic, deferring resolution to C#)
+        ("+", {Scheme = Scheme(["a"], [], makeFunType [TVar "a"; TVar "a"] (TVar "a")); IsMutable = false })
+        ("-", {Scheme = Scheme(["a"], [], makeFunType [TVar "a"; TVar "a"] (TVar "a")); IsMutable = false })
+        ("*", {Scheme = Scheme(["a"], [], makeFunType [TVar "a"; TVar "a"] (TVar "a")); IsMutable = false })
+        ("/", {Scheme = Scheme(["a"], [], makeFunType [TVar "a"; TVar "a"] (TVar "a")); IsMutable = false })
+        ("%", {Scheme = Scheme(["a"], [], makeFunType [TVar "a"; TVar "a"] (TVar "a")); IsMutable = false })
 
         // Comparison Operators
-        ("=", {Scheme = Scheme([], [], makeFunType [intType; intType] boolType); IsMutable = false })
-        ("<", {Scheme = Scheme([], [], makeFunType [intType; intType] boolType); IsMutable = false })
-        (">", {Scheme = Scheme([], [], makeFunType [intType; intType] boolType); IsMutable = false })
-        ("<=", {Scheme = Scheme([], [], makeFunType [intType; intType] boolType); IsMutable = false })
-        (">=", {Scheme = Scheme([], [], makeFunType [intType; intType] boolType); IsMutable = false })
+        ("=", {Scheme = Scheme(["a"], [], makeFunType [TVar "a"; TVar "a"] boolType); IsMutable = false })
+        ("<", {Scheme = Scheme(["a"], [], makeFunType [TVar "a"; TVar "a"] boolType); IsMutable = false })
+        (">", {Scheme = Scheme(["a"], [], makeFunType [TVar "a"; TVar "a"] boolType); IsMutable = false })
+        ("<=", {Scheme = Scheme(["a"], [], makeFunType [TVar "a"; TVar "a"] boolType); IsMutable = false })
+        (">=", {Scheme = Scheme(["a"], [], makeFunType [TVar "a"; TVar "a"] boolType); IsMutable = false })
 
         // Polymorphic equality
         // eq? : 'a -> 'a -> bool (Pointer/Reference equality)

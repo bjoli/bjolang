@@ -9,7 +9,8 @@
       "07_named_let/1.0.0": {
         "dependencies": {
           "BjolangRuntime": "1.0.0.0",
-          "Collections": "0.0.1.0"
+          "Collections": "0.0.1.0",
+          "core": "1.0.0.0"
         },
         "runtime": {
           "07_named_let.dll": {}
@@ -30,6 +31,14 @@
             "fileVersion": "0.0.1.0"
           }
         }
+      },
+      "core/1.0.0.0": {
+        "runtime": {
+          "core.dll": {
+            "assemblyVersion": "1.0.0.0",
+            "fileVersion": "1.0.0.0"
+          }
+        }
       }
     }
   },
@@ -45,6 +54,11 @@
       "sha512": ""
     },
     "Collections/0.0.1.0": {
+      "type": "reference",
+      "serviceable": false,
+      "sha512": ""
+    },
+    "core/1.0.0.0": {
       "type": "reference",
       "serviceable": false,
       "sha512": ""

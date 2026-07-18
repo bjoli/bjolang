@@ -63,7 +63,7 @@ let rec analyzeExpr (inTailPosition: bool) (currentFuncName: string option) (exp
         | TRecordUpdate (n, fields) -> TRecordUpdate (n, fields |> List.map (fun (k, v) -> k, analyzeExpr false currentFuncName v))
 
         | TLambda (args, b) ->
-            TLambda (args, analyzeExpr true None b)
+            TLambda (args, analyzeExpr true currentFuncName b)
 
         | TSet (n, v) -> TSet (n, analyzeExpr false currentFuncName v)
         | TGetField (e, f) -> TGetField (analyzeExpr false currentFuncName e, f)

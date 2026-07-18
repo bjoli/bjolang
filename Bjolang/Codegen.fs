@@ -15,6 +15,7 @@ type CodegenContext = {
     IndentLevel: int
     UnionCases: Map<string, UnionCaseInfo>
     GlobalBindings: Map<string, string>
+    TailCallArgs: string list option
 }
 
 let inline append (ctx: CodegenContext) (s: string) =
@@ -135,6 +136,15 @@ let getUnionTypeString (hm: HMType) (parentName: string) : string =
     | None ->
         sanitizeIdent parentName
 
+let rec hasTailCall (expr: TypedExpr) =
+    match expr.Node with
+    | TApply (_, _, _, true) -> true
+    | TIf (_, t, f) -> hasTailCall t || hasTailCall f
+    | TLet (_, _, _, _, b) | TLetMutable (_, _, b) | TLetTuple (_, _, b) -> hasTailCall b
+    | TLetRec (_, b) -> hasTailCall b
+    | TMatch (_, clauses) -> clauses |> List.exists (fun c -> hasTailCall c.Body)
+    | _ -> false
+
 let rec generateExpr (ctx: CodegenContext) (expr: TypedExpr) : unit =
     match expr.Node with
     | TInt i -> append ctx i
@@ -176,6 +186,18 @@ let rec generateExpr (ctx: CodegenContext) (expr: TypedExpr) : unit =
             for i, arg in List.indexed args do
                 if i > 0 then append ctx ", "
                 generateExpr ctx arg
+            append ctx ")"
+        | TIdent (name, _) when List.contains name ["+"; "-"; "*"; "/"; "%"; "<"; ">"; "<="; ">="] && args.Length = 2 && kwArgs.IsEmpty ->
+            append ctx "("
+            generateExpr ctx args.[0]
+            append ctx $" {name} "
+            generateExpr ctx args.[1]
+            append ctx ")"
+        | TIdent ("=", _) when args.Length = 2 && kwArgs.IsEmpty ->
+            append ctx "("
+            generateExpr ctx args.[0]
+            append ctx " == "
+            generateExpr ctx args.[1]
             append ctx ")"
         | _ ->
             match target.Node with
@@ -259,7 +281,16 @@ let rec generateExpr (ctx: CodegenContext) (expr: TypedExpr) : unit =
         let argsStr = args |> List.map sanitizeIdent |> String.concat ", "
         append ctx argsStr
         append ctx ") => {\n"
-        withIndent ctx (fun c -> generateBlock c Return body)
+        withIndent ctx (fun c ->
+            let isTail = hasTailCall body
+            let c2 = if isTail then { c with TailCallArgs = Some (args |> List.map sanitizeIdent) } else c
+            if isTail then
+                indent c2; appendLine c2 "while (true) {"
+                withIndent c2 (fun c3 -> generateBlock c3 Return body)
+                indent c2; appendLine c2 "}"
+            else
+                generateBlock c2 Return body
+        )
         indent ctx; append ctx "}"
     | TIf (cond, t, f) ->
         let isVoid = typeToString expr.Type = "void"
@@ -370,6 +401,15 @@ let rec generateExpr (ctx: CodegenContext) (expr: TypedExpr) : unit =
 
 and generateBlock (ctx: CodegenContext) (target: BlockTarget) (expr: TypedExpr) : unit =
     match expr.Node with
+    | TApply (_, args, _, true) when ctx.TailCallArgs.IsSome ->
+        let tArgs = ctx.TailCallArgs.Value
+        for i, arg in List.indexed args do
+            indent ctx; append ctx $"var _tailArg{i} = "
+            generateExpr ctx arg
+            appendLine ctx ";"
+        for i in 0 .. args.Length - 1 do
+            indent ctx; appendLine ctx $"{tArgs.[i]} = _tailArg{i};"
+        indent ctx; appendLine ctx "continue;"
     | TLet (name, isFun, args, value, body) ->
         if isFun then
             match value.Node with
@@ -527,11 +567,24 @@ let rec generateDecl (ctx: CodegenContext) (decl: TDecl) : unit =
             append ctx $"params %s{typeToString restElemType}[] %s{sanitizeIdent restName}"
         | None -> ()
         append ctx ") {\n"
-        withIndent ctx (fun ctx ->
-            generateBlock ctx Return body
+        withIndent ctx (fun c ->
+            let isTail = hasTailCall body
+            let c2 = 
+                if isTail then 
+                    let mandatoryNames = args |> List.map fst
+                    let kwNames = kwArgs |> List.map (fun (n, _, _) -> n)
+                    let restNameOpt = match restArg with Some(n, _) -> [n] | None -> []
+                    let allArgs = mandatoryNames @ kwNames @ restNameOpt |> List.map sanitizeIdent
+                    { c with TailCallArgs = Some allArgs }
+                else c
+            if isTail then
+                indent c2; appendLine c2 "while (true) {"
+                withIndent c2 (fun c3 -> generateBlock c3 Return body)
+                indent c2; appendLine c2 "}"
+            else
+                generateBlock c2 Return body
         )
-        indent ctx
-        appendLine ctx "}"
+        indent ctx; appendLine ctx "}"
 
     | TDef (name, value, t, _) ->
         indent ctx
@@ -759,7 +812,7 @@ let generateProgram (exportMetadata: string) (dllDeps: string list) (decls: TDec
             )
         collect decls |> Map.ofList
 
-    let ctx = { Builder = StringBuilder(); IndentLevel = 0; UnionCases = unionCases; GlobalBindings = globalBindings }
+    let ctx = { Builder = StringBuilder(); IndentLevel = 0; UnionCases = unionCases; GlobalBindings = globalBindings; TailCallArgs = None }
     appendLine ctx "using System;"
     appendLine ctx "using static BjolangRuntime;"
     

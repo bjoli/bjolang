@@ -1,9 +1,12 @@
+(import (std core))
 (defun (main args)
-    (def result
-        (let loop ((count 5) (acc 1))
-            (if (= count 0)
+    (def (: result uint) 
+        (let loop ((count 100000000u) (acc 1u))
+            (if (= count (cast uint 0))
                 acc
-                (loop (- count 1) (* acc count)))))
+                (loop (- count (cast uint 1)) (* acc count)))))
     
-    (displayln (int->string result))
+    (println (cast int result))
     0)
+
+
