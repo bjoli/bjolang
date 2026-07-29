@@ -1,7 +1,7 @@
 module Bjolang.Prelude
 
-open Bjolang.TypeChecker.TypeConstants
-open Bjolang.TypeChecker
+open Bjolang.TypedAST.TypeConstants
+open Bjolang.TypedAST
 
 // Helper for function types
 let makeFunType args ret = TFun (args, ret)

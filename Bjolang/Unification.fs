@@ -1,0 +1,158 @@
+module Bjolang.Unification
+
+open Bjolang.TypedAST
+
+// --- UNIFICATION ENGINE ---
+let mutable nextMetaId = 0
+let freshMeta () = 
+    let id = nextMetaId
+    nextMetaId <- nextMetaId + 1
+    TMeta { Id = id; Value = None }
+
+let lookup (env: Env) (name: string) : Binding =
+    match Map.tryFind name env.Bindings with
+    | Some scheme -> scheme
+    | None -> failwithf $"Unbound variable: %s{name}"
+
+let addBinding (name: string) (binding: Binding) (env: Env) : Env =
+    { env with
+        Bindings = Map.add name binding env.Bindings }
+
+let rec prune (registry: TraitRegistry) (t: HMType) : HMType =
+    match t with
+    | TMeta m ->
+        match m.Value with
+        | Some innerT ->
+            let pruned = prune registry innerT
+            m.Value <- Some pruned
+            pruned
+        | None -> t
+    | TCon(name, args) -> TCon(name, List.map (prune registry) args)
+    | TFun(args, ret) -> TFun(List.map (prune registry) args, prune registry ret)
+    | TTuple args -> TTuple(List.map (prune registry) args)
+    | TAssoc(traitName, assocName, implementor) ->
+        let prunedImpl = prune registry implementor
+
+        match prunedImpl with
+        // If the implementor is concrete, attempt resolution
+        | TCon _
+        | TTuple _
+        | TFun _ ->
+            match registry.ResolveAssociatedType traitName assocName prunedImpl with
+            | Some resolved -> prune registry resolved
+            | None -> failwithf $"Missing implementation of %s{traitName} for %A{prunedImpl}"
+        // If still generic, keep deferred
+        | _ -> TAssoc(traitName, assocName, prunedImpl)
+    | _ -> t
+
+let instantiate
+    (registry: TraitRegistry)
+    (Scheme(boundVars, constraints, t))
+    : HMType * HMType list * TraitConstraint list =
+    let boundSubst =
+        boundVars |> List.map (fun name -> name, freshMeta ()) |> Map.ofList
+
+    let boundFreshTypes = boundSubst |> Map.toList |> List.map snd
+    let mutable unboundSubst = Map.empty
+    let mutable unboundFreshTypes = []
+
+    let rec walk node =
+        match prune registry node with
+        | TVar name ->
+            match Map.tryFind name boundSubst with
+            | Some fresh -> fresh
+            | None -> node
+        | TFun(args, ret) -> TFun(List.map walk args, walk ret)
+        | TCon(name, args) -> TCon(name, List.map walk args)
+        | TTuple args -> TTuple(List.map walk args)
+        | TAssoc(tName, aName, impl) -> TAssoc(tName, aName, walk impl)
+        | _ -> node
+
+    let instantiatedType = walk t
+
+    let instantiatedConstraints =
+        constraints
+        |> List.map (fun c ->
+            { c with
+                TargetType = walk c.TargetType })
+
+    instantiatedType, boundFreshTypes @ unboundFreshTypes, instantiatedConstraints
+
+let rec occurs (registry: TraitRegistry) (m: MetaVar) (t: HMType) : bool =
+    match prune registry t with
+    | TMeta m2 -> m.Id = m2.Id
+    | TCon(_, args) -> List.exists (occurs registry m) args
+    | TFun(args, ret) -> List.exists (occurs registry m) args || occurs registry m ret
+    | TTuple args -> List.exists (occurs registry m) args
+    | TAssoc(_, _, impl) -> occurs registry m impl
+    | TVar _ -> false
+
+let bindMeta (registry: TraitRegistry) (m: MetaVar) (t: HMType) =
+    match t with
+    | TMeta m2 when m.Id = m2.Id -> ()
+    | _ ->
+        if occurs registry m t then
+            failwith "Type error: Infinite type (occurs check failed)"
+        else
+            m.Value <- Some t
+
+let rec unify (registry: TraitRegistry) (t1: HMType) (t2: HMType) =
+    let t1, t2 = prune registry t1, prune registry t2
+
+    match t1, t2 with
+    | _ when t1 = t2 -> ()
+    | TMeta m, _ -> bindMeta registry m t2
+    | _, TMeta m -> bindMeta registry m t1
+    | TCon(name1, args1), TCon(name2, args2) when name1 = name2 && args1.Length = args2.Length ->
+        List.iter2 (unify registry) args1 args2
+    | TFun(args1, ret1), TFun(args2, ret2) when args1.Length = args2.Length ->
+        List.iter2 (unify registry) args1 args2
+        unify registry ret1 ret2
+    | TTuple args1, TTuple args2 when args1.Length = args2.Length -> List.iter2 (unify registry) args1 args2
+    | TAssoc(tn1, an1, impl1), TAssoc(tn2, an2, impl2) when tn1 = tn2 && an1 = an2 -> unify registry impl1 impl2
+    | _ -> failwithf $"Type error: Cannot unify %A{t1} with %A{t2}"
+
+let rec freeVars (registry: TraitRegistry) (t: HMType) : MetaVar list =
+    match prune registry t with
+    | TMeta m -> [ m ]
+    | TCon(_, args) -> List.collect (freeVars registry) args
+    | TFun(args, ret) -> (List.collect (freeVars registry) args) @ (freeVars registry ret)
+    | TTuple args -> List.collect (freeVars registry) args
+    | TAssoc(_, _, impl) -> freeVars registry impl
+    | TVar _ -> []
+
+let envFreeVars (env: Env) : Set<MetaVar> =
+    env.Bindings
+    |> Map.toList
+    |> List.collect (fun (_, b) ->
+        match b.Scheme with
+        | Scheme(_, _, t) -> freeVars env.Registry t)
+    |> Set.ofList
+
+let rec freeTVars (registry: TraitRegistry) (t: HMType) : string list =
+    match prune registry t with
+    | TVar name -> [ name ]
+    | TMeta _ -> []
+    | TCon(_, args) -> List.collect (freeTVars registry) args
+    | TFun(args, ret) -> (List.collect (freeTVars registry) args) @ (freeTVars registry ret)
+    | TTuple args -> List.collect (freeTVars registry) args
+    | TAssoc(_, _, impl) -> freeTVars registry impl
+
+let generalize (env: Env) (t: HMType) : Scheme =
+    let envFv = envFreeVars env
+    let tFv = freeVars env.Registry t |> List.distinct
+    let generalizable = tFv |> List.filter (fun m -> not (Set.contains m envFv))
+    
+    // Find all explicitly named TVars that are already in the type
+    let explicitTVars = freeTVars env.Registry t |> List.distinct
+    
+    // Generate new names for the generalizable MetaVars, avoiding existing ones
+    // We'll just append them.
+    let generatedNames = generalizable |> List.mapi (fun i _ -> "'" + string (char (97 + i)))
+    
+    List.iter2 (fun (m: MetaVar) name -> m.Value <- Some(TVar name)) generalizable generatedNames
+
+    let allVars = (explicitTVars @ generatedNames) |> List.distinct
+
+    // Default to empty constraints for now; gathering happens during inference
+    Scheme(allVars, [], t)

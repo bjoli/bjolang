@@ -212,9 +212,10 @@ let parseTypeDef (s: SExpr) : TypeDef =
     let r = getRange s
 
     match s with
+    // `Struct` is an accepted synonym for `Record`.
     | SList([ SAtom { Token = Colon }
               head
-              SList(SAtom { Token = Symbol "Record" } :: fields, _) ],
+              SList(SAtom { Token = Symbol("Record" | "Struct") } :: fields, _) ],
             _) ->
         let name, typeArgs = parseTypeDefHead head
         { Name = name
@@ -427,32 +428,37 @@ let rec parseExpr (s: SExpr) : Expr =
                     EMatch(target, parsedClauses, r)
                 | _ -> failwithf $"Invalid match syntax at line %d{r.Start.Line}"
 
-            | "record" ->
+            // `struct*` forms are accepted synonyms for the `record*` forms.
+            | "record" | "struct" ->
                 let fields =
                     args
-                    |> List.choose (function
-                        | SList([ Ident k; v ], _) -> Some(k, parseExpr v)
-                        | _ -> None)
+                    |> List.map (function
+                        | SList([ Ident k; v ], _) -> (k, parseExpr v)
+                        | bad ->
+                            failwithf
+                                $"Invalid %s{sym} field at line %d{(getRange bad).Start.Line}: expected (field-name value)")
 
                 ERecord(fields, r)
 
-            | "record-set" ->
+            | "record-set" | "struct-set" ->
                 match args with
                 | Ident baseRec :: fields ->
                     let parsedFields =
                         fields
                         |> List.map (function
                             | SList([ Ident k; v ], _) -> (k, parseExpr v)
-                            | _ -> failwith "Invalid record-set field")
+                            | bad ->
+                                failwithf
+                                    $"Invalid %s{sym} field at line %d{(getRange bad).Start.Line}: expected (field-name value)")
 
                     ERecordUpdate(baseRec, parsedFields, r)
-                | _ -> failwith "Invalid record-set syntax"
+                | _ -> failwithf $"Invalid %s{sym} syntax at line %d{r.Start.Line}: expected (%s{sym} target (field value) ...)"
             
-            | "record-get" ->
+            | "record-get" | "struct-get" ->
                 match args with
                 | [ target; Ident field ] ->
                     EGetField(parseExpr target, field, r)
-                | _ -> failwith "Invalid record-get syntax"
+                | _ -> failwithf $"Invalid %s{sym} syntax at line %d{r.Start.Line}: expected (%s{sym} target field-name)"
 
             | "Tuple" -> ETuple(processArgs args, listRange)
 

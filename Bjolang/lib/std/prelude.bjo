@@ -6,4 +6,6 @@
     (std list)
     (std iter))
 
+;; Placeholder so the aggregate module has a body.
+(: noop (-> int))
 (defun (noop) 0)

@@ -2,7 +2,7 @@ module Bjolang.Codegen
 
 open System
 open System.Text
-open Bjolang.TypeChecker
+open Bjolang.TypedAST
 open Bjolang.Parser
 
 type UnionCaseInfo = {
@@ -144,6 +144,72 @@ let rec hasTailCall (expr: TypedExpr) =
     | TLetRec (_, b) -> hasTailCall b
     | TMatch (_, clauses) -> clauses |> List.exists (fun c -> hasTailCall c.Body)
     | _ -> false
+
+let escapeStringLiteral (s: string) =
+    s.Replace("\"", "\\\"").Replace("\n", "\\n")
+
+/// A clause that matches unconditionally; anything after it is dead code.
+let private isIrrefutable (c: TMatchClause) =
+    c.Guard.IsNone
+    && (match c.Pattern.Node with
+        | TPWildcard
+        | TPIdent _ -> true
+        | _ -> false)
+
+/// Bjolang matches are first-match-wins. C# rejects arms it can prove are
+/// unreachable (CS8510), so drop everything following the first irrefutable clause.
+let private liveClauses (clauses: TMatchClause list) =
+    let rec take acc remaining =
+        match remaining with
+        | [] -> List.rev acc
+        | c :: rest -> if isIrrefutable c then List.rev (c :: acc) else take (c :: acc) rest
+    take [] clauses
+
+let private matchTempCounter = ref 0
+
+let private freshMatchTemp () =
+    matchTempCounter.Value <- matchTempCounter.Value + 1
+    $"__match{matchTempCounter.Value}"
+
+/// Translates a typed pattern into C# pattern syntax.
+let rec generatePattern (ctx: CodegenContext) (pat: TypedPattern) : unit =
+    match pat.Node with
+    | TPWildcard -> append ctx "_"
+    | TPIdent name -> append ctx $"var {sanitizeIdent name}"
+    | TPInt value -> append ctx value
+    | TPString value -> append ctx $"\"%s{escapeStringLiteral value}\""
+    | TPConstruct (name, args) ->
+        let caseTypeStr =
+            match Map.tryFind name ctx.UnionCases with
+            | Some info -> $"{getUnionTypeString pat.Type info.ParentTypeName}.{sanitizeIdent name}"
+            | None -> $"{typeToString pat.Type}.{sanitizeIdent name}"
+        append ctx caseTypeStr
+        // A positional record with an empty parameter list gets no Deconstruct
+        // method, so nullary cases must be emitted as a bare type pattern.
+        if not args.IsEmpty then
+            append ctx "("
+            for i, argPat in List.indexed args do
+                if i > 0 then append ctx ", "
+                generatePattern ctx argPat
+            append ctx ")"
+    | TPList (items, tailOpt) ->
+        // Lists are the ordinary Cons/Nil union rather than a C# collection type,
+        // so desugar into nested constructor patterns.
+        let rec desugar elements : TypedPattern =
+            match elements with
+            | [] ->
+                match tailOpt with
+                | Some t -> t
+                | None -> { Type = pat.Type; Range = pat.Range; Node = TPConstruct("Nil", []) }
+            | head :: rest ->
+                { Type = pat.Type
+                  Range = pat.Range
+                  Node = TPConstruct("Cons", [ head; desugar rest ]) }
+        generatePattern ctx (desugar items)
+    | TPAs _ ->
+        failwithf $"'as' patterns have no C# equivalent (line %d{pat.Range.Start.Line})"
+    | TPApp _ ->
+        failwithf $"Applied patterns are not supported by the C# backend (line %d{pat.Range.Start.Line})"
 
 let rec generateExpr (ctx: CodegenContext) (expr: TypedExpr) : unit =
     match expr.Node with
@@ -316,14 +382,21 @@ let rec generateExpr (ctx: CodegenContext) (expr: TypedExpr) : unit =
             generateExpr ctx v
         append ctx ")"
     | TRecordUpdate (name, fields) ->
-        append ctx (sanitizeIdent name)
+        // `with` binds loosely, so parenthesize: `(r with { .. }).field` must not
+        // parse as `r with { .. field }`.
+        let targetName =
+            match Map.tryFind name ctx.GlobalBindings with
+            | Some modName -> $"%s{sanitizeIdent modName}_Module.%s{sanitizeIdent name}"
+            | None -> sanitizeIdent name
+        append ctx "("
+        append ctx targetName
         append ctx " with { "
         for i, (k, v) in List.indexed fields do
             if i > 0 then append ctx ", "
             append ctx (sanitizeIdent k)
             append ctx " = "
             generateExpr ctx v
-        append ctx " }"
+        append ctx " })"
     | TIsInst (target, t) ->
         append ctx "("
         generateExpr ctx target
@@ -396,6 +469,45 @@ let rec generateExpr (ctx: CodegenContext) (expr: TypedExpr) : unit =
             indent c; appendLine c "return __b.ToImmutable();"
         )
         indent ctx; append ctx "}))()"
+    | TMatch (matchTarget, clauses) ->
+        let live = liveClauses clauses
+        let isVoid = typeToString expr.Type = "void"
+        let hasTail = live |> List.exists (fun c -> hasTailCall c.Body)
+
+        if isVoid || hasTail then
+            // A switch *expression* cannot yield void, and it cannot contain the
+            // `continue` a tail call compiles to. Fall back to the statement form.
+            // TailCallArgs is cleared: a `continue` would bind to the lambda, not
+            // to the enclosing function's trampoline.
+            let inner = { ctx with TailCallArgs = None }
+            if isVoid then
+                append ctx "new Action(() => {\n"
+                withIndent inner (fun c -> generateBlock c Discard expr)
+                indent ctx; append ctx "})()"
+            else
+                append ctx $"new Func<{typeToString expr.Type}>(() => {{\n"
+                withIndent inner (fun c -> generateBlock c Return expr)
+                indent ctx; append ctx "})()"
+        else
+            generateExpr ctx matchTarget
+            appendLine ctx " switch {"
+            withIndent ctx (fun c ->
+                for clause in live do
+                    indent c
+                    generatePattern c clause.Pattern
+                    match clause.Guard with
+                    | Some guard ->
+                        append c " when "
+                        generateExpr c guard
+                    | None -> ()
+                    append c " => "
+                    generateExpr c clause.Body
+                    appendLine c ","
+                if not (live |> List.exists isIrrefutable) then
+                    indent c
+                    appendLine c $"_ => throw new Exception(\"Match failure at line %d{expr.Range.Start.Line}\")"
+            )
+            indent ctx; append ctx "}"
     | _ ->
         append ctx "/* Unimplemented expression node */"
 
@@ -495,6 +607,93 @@ and generateBlock (ctx: CodegenContext) (target: BlockTarget) (expr: TypedExpr) 
         indent ctx; append ctx "throw new Exception("
         generateExpr ctx msgExpr
         appendLine ctx ");"
+
+    | TMatch (matchTarget, clauses) ->
+        // Emitted as a switch *statement* so that arms may contain statements,
+        // produce void, or `continue` into the enclosing tail-call trampoline.
+        let live = liveClauses clauses
+
+        // C# only treats a switch statement as exhaustive when it has a `default`
+        // section, and `case _:` is not legal syntax, so a trailing irrefutable
+        // clause is emitted as the default section instead of a case.
+        let irrefutableTail, cases =
+            match List.rev live with
+            | last :: revRest when isIrrefutable last -> Some last, List.rev revRest
+            | _ -> None, live
+
+        // `default:` carries no pattern, so an irrefutable `TPIdent` clause needs
+        // the scrutinee hoisted into a local that it can alias.
+        let needsTemp =
+            match irrefutableTail with
+            | Some c ->
+                match c.Pattern.Node with
+                | TPIdent _ -> true
+                | _ -> false
+            | None -> false
+
+        let scrutinee =
+            if needsTemp then
+                let tmp = freshMatchTemp ()
+                indent ctx; append ctx $"var %s{tmp} = "
+                generateExpr ctx matchTarget
+                appendLine ctx ";"
+                Some tmp
+            else
+                None
+
+        let emitSwitch (armTarget: BlockTarget) =
+            // A `Return` target always terminates the section itself
+            // (return / continue / throw), so a break would be unreachable.
+            let emitBreak cb =
+                match armTarget with
+                | Return -> ()
+                | _ -> indent cb; appendLine cb "break;"
+
+            indent ctx; append ctx "switch ("
+            (match scrutinee with
+             | Some tmp -> append ctx tmp
+             | None -> generateExpr ctx matchTarget)
+            appendLine ctx ") {"
+            withIndent ctx (fun c ->
+                for clause in cases do
+                    indent c
+                    append c "case "
+                    generatePattern c clause.Pattern
+                    match clause.Guard with
+                    | Some guard ->
+                        append c " when "
+                        generateExpr c guard
+                    | None -> ()
+                    // Each section gets its own block so locals declared by
+                    // different arms cannot collide in the shared switch scope.
+                    appendLine c ": {"
+                    withIndent c (fun cb ->
+                        generateBlock cb armTarget clause.Body
+                        emitBreak cb)
+                    indent c; appendLine c "}"
+
+                indent c
+                match irrefutableTail with
+                | Some clause ->
+                    appendLine c "default: {"
+                    withIndent c (fun cb ->
+                        match clause.Pattern.Node, scrutinee with
+                        | TPIdent name, Some tmp ->
+                            indent cb; appendLine cb $"var %s{sanitizeIdent name} = %s{tmp};"
+                        | _ -> ()
+                        generateBlock cb armTarget clause.Body
+                        emitBreak cb)
+                    indent c; appendLine c "}"
+                | None ->
+                    appendLine c $"default: throw new Exception(\"Match failure at line %d{expr.Range.Start.Line}\");"
+            )
+            indent ctx; appendLine ctx "}"
+
+        match target with
+        | DeclareAndAssign (varType, varName) ->
+            indent ctx; appendLine ctx $"{varType} {varName};"
+            emitSwitch (Assign varName)
+        | _ -> emitSwitch target
 
     | _ ->
         let isVoid = typeToString expr.Type = "void"
@@ -608,7 +807,7 @@ let rec generateDecl (ctx: CodegenContext) (decl: TDecl) : unit =
                 append ctx $"public record %s{sanitizeIdent td.Name}%s{tyArgsStr}("
                 for i, f in List.indexed fields do
                     if i > 0 then append ctx ", "
-                    append ctx (typeToString (TypeChecker.resolveTypeAnnotation Prelude.emptyRegistry f.Type)) // Hack: we need HMType, but TypeDef has FType
+                    append ctx (typeToString (Inference.resolveTypeAnnotation Prelude.emptyRegistry f.Type)) // Hack: we need HMType, but TypeDef has FType
                     // Actually, TType doesn't have the fully resolved types.
                     // Wait, we need the resolved types for record fields! 
                     append ctx " "
@@ -629,7 +828,7 @@ let rec generateDecl (ctx: CodegenContext) (decl: TDecl) : unit =
                             append ctx $"public sealed record %s{sanitizeIdent n}("
                             for i, ft in List.indexed ftypes do
                                 if i > 0 then append ctx ", "
-                                append ctx (typeToString (TypeChecker.resolveTypeAnnotation Prelude.emptyRegistry ft)) // FIXME: registry
+                                append ctx (typeToString (Inference.resolveTypeAnnotation Prelude.emptyRegistry ft)) // FIXME: registry
                                 append ctx $" Item%d{i+1}"
                             appendLine ctx $") : %s{sanitizeIdent td.Name}%s{tyArgsStr};"
                 )
@@ -763,7 +962,7 @@ let rec generateDecl (ctx: CodegenContext) (decl: TDecl) : unit =
                                     append ctx $"public static %s{sanitizeIdent td.Name}%s{tyArgsStr} %s{sanitizeIdent n}%s{tyArgsStr}("
                                     for i, ft in List.indexed ftypes do
                                         if i > 0 then append ctx ", "
-                                        append ctx (typeToString (TypeChecker.resolveTypeAnnotation Prelude.emptyRegistry ft)) // Need empty registry because it's just for typeToString
+                                        append ctx (typeToString (Inference.resolveTypeAnnotation Prelude.emptyRegistry ft)) // Need empty registry because it's just for typeToString
                                         append ctx $" arg{i}"
                                     let argsListStr = String.concat ", " [for i in 0 .. ftypes.Length - 1 -> $"arg{i}"]
                                     appendLine ctx $") => new %s{sanitizeIdent td.Name}%s{tyArgsStr}.%s{sanitizeIdent n}(%s{argsListStr});"

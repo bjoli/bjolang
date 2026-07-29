@@ -1,93 +1,91 @@
 module Bjolang.TailRecursion
 
-open Bjolang.TypeChecker
+open Bjolang.TypedAST
 
+/// Marks self-recursive calls that sit in tail position so that codegen can
+/// turn them into a loop instead of a stack frame.
+///
+/// Only the nodes that actually *propagate* tail position are handled
+/// explicitly here; a node's tail-ness cannot be expressed by a plain map, so
+/// everything else (where no child is in tail position) is delegated to
+/// `TypeVisitor.mapChildren`.
 let rec analyzeExpr (inTailPosition: bool) (currentFuncName: string option) (expr: TypedExpr) : TypedExpr =
-    let mapNode node =
-        match node with
-        | TInt _ | TString _ | TKeyword _ | TSymbol _ | TIdent _ -> node
+    /// Analyze a sub-expression that is *not* in tail position.
+    let notTail e = analyzeExpr false currentFuncName e
+    /// Analyze a sub-expression that inherits the current tail position.
+    let inherits e = analyzeExpr inTailPosition currentFuncName e
 
-        | TApply (t, args, kwArgs, _) ->
-            let isSelfRecursive =
-                match currentFuncName, t.Node with
-                | Some cName, TIdent(tName, _) when cName = tName -> true
-                | _ -> false
+    match expr.Node with
+    | TApply(t, args, kwArgs, _) ->
+        let isSelfRecursive =
+            match currentFuncName, t.Node with
+            | Some cName, TIdent(tName, _) when cName = tName -> true
+            | _ -> false
 
-            let newArgs = args |> List.map (analyzeExpr false currentFuncName)
-            let newKwArgs = kwArgs |> List.map (fun (n, e) -> n, analyzeExpr false currentFuncName e)
+        let newArgs = args |> List.map notTail
+        let newKwArgs = kwArgs |> List.map (fun (n, e) -> n, notTail e)
 
-            if isSelfRecursive && inTailPosition then
-                TApply (analyzeExpr false currentFuncName t, newArgs, newKwArgs, true)
-            else
-                TApply (analyzeExpr false currentFuncName t, newArgs, newKwArgs, false)
+        { expr with
+            Node = TApply(notTail t, newArgs, newKwArgs, isSelfRecursive && inTailPosition) }
 
-        | TInterfaceCall (i, m, d, args) ->
-            TInterfaceCall (i, m, analyzeExpr false currentFuncName d, args |> List.map (analyzeExpr false currentFuncName))
+    | TIf(c, t, f) ->
+        { expr with
+            Node = TIf(notTail c, inherits t, inherits f) }
 
-        | TIf (c, t, f) ->
-            TIf (analyzeExpr false currentFuncName c, analyzeExpr inTailPosition currentFuncName t, analyzeExpr inTailPosition currentFuncName f)
+    | TLet(n, isFun, args, v, b) ->
+        let newFuncName = if isFun then Some n else currentFuncName
+        let vTail = isFun
 
-        | TLet (n, isFun, args, v, b) ->
-            let newFuncName = if isFun then Some n else currentFuncName
-            let vTail = if isFun then true else false
-            TLet (n, isFun, args, analyzeExpr vTail newFuncName v, analyzeExpr inTailPosition currentFuncName b)
+        { expr with
+            Node = TLet(n, isFun, args, analyzeExpr vTail newFuncName v, inherits b) }
 
-        | TLetRec (bindings, b) ->
-            let newBindings =
-                bindings |> List.map (fun (n, isFun, args, v) ->
-                    n, isFun, args, analyzeExpr true (Some n) v
-                )
-            TLetRec (newBindings, analyzeExpr inTailPosition currentFuncName b)
+    | TLetRec(bindings, b) ->
+        let newBindings =
+            bindings
+            |> List.map (fun (n, isFun, args, v) -> n, isFun, args, analyzeExpr true (Some n) v)
 
-        | TLetMutable (n, v, b) ->
-            TLetMutable (n, analyzeExpr false currentFuncName v, analyzeExpr inTailPosition currentFuncName b)
+        { expr with
+            Node = TLetRec(newBindings, inherits b) }
 
-        | TLetTuple (names, v, b) ->
-            TLetTuple (names, analyzeExpr false currentFuncName v, analyzeExpr inTailPosition currentFuncName b)
+    | TLetMutable(n, v, b) ->
+        { expr with
+            Node = TLetMutable(n, notTail v, inherits b) }
 
-        | TMatch (e, clauses) ->
-            let newClauses =
-                clauses |> List.map (fun c ->
-                    { c with Guard = Option.map (analyzeExpr false currentFuncName) c.Guard
-                             Body = analyzeExpr inTailPosition currentFuncName c.Body }
-                )
-            TMatch (analyzeExpr false currentFuncName e, newClauses)
+    | TLetTuple(names, v, b) ->
+        { expr with
+            Node = TLetTuple(names, notTail v, inherits b) }
 
-        | TTryFinally (b, c) ->
-            TTryFinally (analyzeExpr false currentFuncName b, analyzeExpr false currentFuncName c)
+    | TMatch(e, clauses) ->
+        let newClauses =
+            clauses
+            |> List.map (fun c ->
+                { c with
+                    Guard = Option.map notTail c.Guard
+                    Body = inherits c.Body })
 
-        | TTupleMake exprs -> TTupleMake (List.map (analyzeExpr false currentFuncName) exprs)
-        | TListMake exprs -> TListMake (List.map (analyzeExpr false currentFuncName) exprs)
-        | TVecMake exprs -> TVecMake (List.map (analyzeExpr false currentFuncName) exprs)
-        | TRecordMake fields -> TRecordMake (fields |> List.map (fun (k, v) -> k, analyzeExpr false currentFuncName v))
-        | TRecordUpdate (n, fields) -> TRecordUpdate (n, fields |> List.map (fun (k, v) -> k, analyzeExpr false currentFuncName v))
+        { expr with
+            Node = TMatch(notTail e, newClauses) }
 
-        | TLambda (args, b) ->
-            TLambda (args, analyzeExpr true currentFuncName b)
+    | TLambda(args, b) ->
+        { expr with
+            Node = TLambda(args, analyzeExpr true currentFuncName b) }
 
-        | TSet (n, v) -> TSet (n, analyzeExpr false currentFuncName v)
-        | TGetField (e, f) -> TGetField (analyzeExpr false currentFuncName e, f)
-        | TIsInst (e, t) -> TIsInst (analyzeExpr false currentFuncName e, t)
-        | TIsInstCase (e, t, caseName) -> TIsInstCase (analyzeExpr false currentFuncName e, t, caseName)
-        | TCast (e, t) -> TCast (analyzeExpr false currentFuncName e, t)
-        | TCaseCast (e, t, caseName) -> TCaseCast (analyzeExpr false currentFuncName e, t, caseName)
-        | TTypeEq (e1, e2) -> TTypeEq (analyzeExpr false currentFuncName e1, analyzeExpr false currentFuncName e2)
-        | TThrow e -> TThrow (analyzeExpr false currentFuncName e)
-
-    { expr with Node = mapNode expr.Node }
+    // No child of any remaining node is in tail position.
+    | _ -> TypeVisitor.mapChildren notTail expr
 
 let rec analyzeDecl (decl: TDecl) : TDecl =
     match decl with
-    | TModule (n, decls, r) -> TModule (n, List.map analyzeDecl decls, r)
-    | TDef (n, e, t, r) -> TDef (n, analyzeExpr false None e, t, r)
-    | TDefTuple (names, e, t, r) -> TDefTuple (names, analyzeExpr false None e, t, r)
-    | TDefMutable (n, e, t, r) -> TDefMutable (n, analyzeExpr false None e, t, r)
-    | TDefun (n, tyArgs, args, kwArgs, restArg, retType, body, r) ->
-        let analyzedKwArgs = kwArgs |> List.map (fun (kn, kt, ke) -> kn, kt, analyzeExpr false None ke)
-        TDefun (n, tyArgs, args, analyzedKwArgs, restArg, retType, analyzeExpr true (Some n) body, r)
-    | TImpl (traitName, targetType, assocBindings, methods, r) ->
-        TImpl (traitName, targetType, assocBindings, List.map analyzeDecl methods, r)
+    | TModule(n, decls, r) -> TModule(n, List.map analyzeDecl decls, r)
+    | TDef(n, e, t, r) -> TDef(n, analyzeExpr false None e, t, r)
+    | TDefTuple(names, e, t, r) -> TDefTuple(names, analyzeExpr false None e, t, r)
+    | TDefMutable(n, e, t, r) -> TDefMutable(n, analyzeExpr false None e, t, r)
+    | TDefun(n, tyArgs, args, kwArgs, restArg, retType, body, r) ->
+        let analyzedKwArgs =
+            kwArgs |> List.map (fun (kn, kt, ke) -> kn, kt, analyzeExpr false None ke)
+
+        TDefun(n, tyArgs, args, analyzedKwArgs, restArg, retType, analyzeExpr true (Some n) body, r)
+    | TImpl(traitName, targetType, assocBindings, methods, r) ->
+        TImpl(traitName, targetType, assocBindings, List.map analyzeDecl methods, r)
     | _ -> decl
 
-let analyzeProgram (decls: TDecl list) : TDecl list =
-    List.map analyzeDecl decls
+let analyzeProgram (decls: TDecl list) : TDecl list = List.map analyzeDecl decls

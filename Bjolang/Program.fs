@@ -65,7 +65,7 @@ let main argv =
 
         // 4. (Placeholder) Run your pipeline!
         // let ast = Parser.parseFile inputFilePath
-        // let env, _, typedAst = TypeChecker.checkProgram resolutionCtx ast
+        // let env, _, typedAst = TypedAST.checkProgram resolutionCtx ast
         // let loweredDecls = ClosureConversion.convertProgram typedAst
 
         // 5. Pass the isLibrary flag to the Emitter
@@ -76,19 +76,19 @@ let main argv =
         | Some (env, typedAst, dllDeps) ->
             printfn "Compilation succeeded. %d declarations." typedAst.Length
             
-            let rec extractExports (decls: TypeChecker.TDecl list) =
+            let rec extractExports (decls: TypedAST.TDecl list) =
                 decls |> List.choose (function 
-                    | TypeChecker.TExport(names, _) -> Some names 
-                    | TypeChecker.TModule(_, innerDecls, _) -> Some (extractExports innerDecls |> List.concat)
+                    | TypedAST.TExport(names, _) -> Some names 
+                    | TypedAST.TModule(_, innerDecls, _) -> Some (extractExports innerDecls |> List.concat)
                     | _ -> None)
             
             let exports = extractExports typedAst |> List.concat
             
-            let rec extractTypes (decls: TypeChecker.TDecl list) =
+            let rec extractTypes (decls: TypedAST.TDecl list) =
                 decls |> List.choose (function
-                    | TypeChecker.TType(defs, _) -> Some (defs |> List.map (fun d -> d, false))
-                    | TypeChecker.TTypeRec(defs, _) -> Some (defs |> List.map (fun d -> d, true))
-                    | TypeChecker.TModule(_, innerDecls, _) -> Some (extractTypes innerDecls |> List.concat)
+                    | TypedAST.TType(defs, _) -> Some (defs |> List.map (fun d -> d, false))
+                    | TypedAST.TTypeRec(defs, _) -> Some (defs |> List.map (fun d -> d, true))
+                    | TypedAST.TModule(_, innerDecls, _) -> Some (extractTypes innerDecls |> List.concat)
                     | _ -> None)
             
             let typesToExport = extractTypes typedAst |> List.concat
@@ -98,7 +98,7 @@ let main argv =
                     let serializeExport name =
                         match Map.tryFind name env.Bindings with
                         | Some b ->
-                            let (TypeChecker.Scheme(_, constraints, t)) = b.Scheme
+                            let (TypedAST.Scheme(_, constraints, t)) = b.Scheme
                             let typeStr = $"(: %s{name} %s{Codegen.serializeHMType t})"
                             if constraints.IsEmpty then typeStr
                             else
@@ -148,11 +148,11 @@ let main argv =
             let mainArgKind =
                 match Map.tryFind "main" env.Bindings with
                 | Some b ->
-                    let (TypeChecker.Scheme(_, _, t)) = b.Scheme
+                    let (TypedAST.Scheme(_, _, t)) = b.Scheme
                     match t with
-                    | TypeChecker.TFun([TypeChecker.TCon("List", [TypeChecker.TCon("System.String", [])])], _) -> "list_string"
-                    | TypeChecker.TFun([], _) -> "no_args"
-                    | TypeChecker.TFun(_, _) -> "other"
+                    | TypedAST.TFun([TypedAST.TCon("List", [TypedAST.TCon("System.String", [])])], _) -> "list_string"
+                    | TypedAST.TFun([], _) -> "no_args"
+                    | TypedAST.TFun(_, _) -> "other"
                     | _ -> "no_args" // Not a function, treat as no-args
                 | None -> "other"
 

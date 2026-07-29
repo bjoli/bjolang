@@ -236,10 +236,13 @@ let runFullFrontendPipeline (mainFilePath: string) =
         let letrecifiedDecls = letrecifyModule parsedModuleDecls
 
         printfn "=== Step 2: Type Checking ==="
-        let env, typedAst = TypeChecker.checkProgram Prelude.prelude letrecifiedDecls
-        
-        printfn "=== Step 3: Tail Recursion Analysis ==="
-        let tailAnalyzedAst = TailRecursion.analyzeProgram typedAst
+        let env, typedAst = Inference.checkProgram Prelude.prelude letrecifiedDecls
+
+        printfn "=== Step 3: Dictionary Lowering ==="
+        let loweredAst = Lowering.lowerProgram env typedAst
+
+        printfn "=== Step 4: Tail Recursion Analysis ==="
+        let tailAnalyzedAst = TailRecursion.analyzeProgram loweredAst
         
         printfn "=== Frontend pipeline complete ==="
         Some (env, tailAnalyzedAst, dllDeps)
