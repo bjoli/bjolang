@@ -890,7 +890,7 @@ let rec checkDecl (env: Env) (sigs: Map<string, HMType * FType option * (string 
             { bound with FunMetas = Map.add name funMeta bound.FunMetas }
 
         // Bind mandatory args
-        let bodyEnv =
+        let envWithMandatory =
             mandatoryTypes
             |> List.fold
                 (fun acc (n, t) ->
@@ -903,7 +903,7 @@ let rec checkDecl (env: Env) (sigs: Map<string, HMType * FType option * (string 
             |> List.fold
                 (fun acc (n, t) ->
                     addBinding n { Scheme = Scheme([], [], t); IsMutable = false } acc)
-                bodyEnv
+                envWithMandatory
 
         // Bind rest arg as Array type
         let bodyEnv =
@@ -916,12 +916,14 @@ let rec checkDecl (env: Env) (sigs: Map<string, HMType * FType option * (string 
         unify env.Registry bodyType expectedRetType
 
         // Type-check keyword default expressions
-        let typedKeywordArgs =
+        let typedKeywordArgs, _ =
             List.zip keywordArgDefs keywordTypes
-            |> List.map (fun ((kwName, defaultExpr), (_, kwType)) ->
-                let defaultType, typedDefault = infer env defaultExpr
+            |> List.fold (fun (typedArgs, currentEnv) ((kwName, defaultExpr), (_, kwType)) ->
+                let defaultType, typedDefault = infer currentEnv defaultExpr
                 unify env.Registry defaultType kwType
-                kwName, kwType, typedDefault)
+                let nextEnv = addBinding kwName { Scheme = Scheme([], [], kwType); IsMutable = false } currentEnv
+                (typedArgs @ [kwName, kwType, typedDefault], nextEnv)
+            ) ([], envWithMandatory)
 
         let scheme = generalize env funType
         let (Scheme(vars, _, schemeType)) = scheme

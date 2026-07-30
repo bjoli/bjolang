@@ -166,4 +166,12 @@ public static class BjolangRuntime {
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static int arraysublength<T>(T[] arr) => arr.Length;
+
+    public struct Option<T> {
+        public readonly bool IsSome;
+        public readonly T Value;
+        public Option(T value) { IsSome = true; Value = value; }
+        public static implicit operator Option<T>(T value) => new Option<T>(value);
+    }
 }
+

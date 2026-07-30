@@ -1,33 +1,42 @@
 using System;
 using static BjolangRuntime;
-using static trait_rec_Module;
+using static _13_naughty_kwarg_Module;
 
-public interface Countdown<T_a> {
-    int runsubdown(T_a arg0, int arg1);
-}
-public sealed class Countdown_System_Int32 : Countdown<int> {
-    public static readonly Countdown_System_Int32 Instance = new();
-    public int runsubdown(int x, int acc) {
-        while (true) {
-            var _x__1 = x;
-            var _acc__2 = acc;
-            if ((_x__1 == 0)) {
-                return _acc__2;
-            } else {
-                var __next1 = (_x__1 - 1);
-                var __next2 = (_acc__2 + 1);
-                x = __next1;
-                acc = __next2;
-                continue;
+public static class _13_naughty_kwarg_Module {
+    public static int f(int n, BjolangRuntime.Option<int> __kw_acc = default, BjolangRuntime.Option<int> __kw_other = default) {
+        int acc;
+        if (__kw_acc.IsSome) {
+            acc = __kw_acc.Value;
+        } else {
+            int loop__1(int _i__2, int _a__3) {
+                while (true) {
+                    var i = _i__2;
+                    var a = _a__3;
+                    if ((i == 0)) {
+                        return a;
+                    } else {
+                        var __next1 = (i - 1);
+                        var __next2 = (a + 1);
+                        _i__2 = __next1;
+                        _a__3 = __next2;
+                        continue;
+                    }
+                }
             }
+            acc = loop__1(3, 0);
         }
+        int other;
+        if (__kw_other.IsSome) {
+            other = __kw_other.Value;
+        } else {
+            other = (acc + 100);
+        }
+        return ((n + acc) + other);
     }
-}
-public static class trait_rec_Module {
     public static void main() {
-        displayln(intsubgtstring(Countdown_System_Int32.Instance.runsubdown(100000, 0)));
+        displayln(intsubgtstring(_13_naughty_kwarg_Module.f(1)));
         return;
     }
 }
 
-public static class BjolangEntryPoint { public static void Main(string[] args) { trait_rec_Module.main(); } }
+public static class BjolangEntryPoint { public static void Main(string[] args) { _13_naughty_kwarg_Module.main(); } }

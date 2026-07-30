@@ -1307,22 +1307,6 @@ and private generateLocalFunction
 // Declarations
 // ---------------------------------------------------------------------------
 
-/// Emits an optional parameter's default. C# requires these to be compile-time
-/// constants, so there is nowhere to put statements.
-let private generateKeywordDefault
-    (ctx: CodegenContext)
-    (ownerName: string)
-    (kwName: string)
-    (defaultExpr: TypedExpr)
-    : unit =
-
-    if containsHoist defaultExpr then
-        codegenError
-            defaultExpr.Range.Start.Line
-            $"the default for keyword parameter '#:%s{kwName}' of '%s{ownerName}' needs statements to evaluate, but C# requires an optional parameter's default to be a compile-time constant"
-
-    generateExpr { ctx with Prelude = None } defaultExpr
-
 /// Emits a parameter list shared by module functions and trait-`impl` methods.
 let private generateParameterList
     (ctx: CodegenContext)
@@ -1343,11 +1327,9 @@ let private generateParameterList
 
     for (kwName, kwType, kwDefault) in kwArgs do
         if paramIdx > 0 then append ctx ", "
-        append ctx (typeToString kwType)
-        append ctx " "
-        append ctx (sanitizeIdent kwName)
-        append ctx " = "
-        generateKeywordDefault ctx ownerName kwName kwDefault
+        append ctx $"BjolangRuntime.Option<{typeToString kwType}> "
+        append ctx $"__kw_{sanitizeIdent kwName}"
+        append ctx " = default"
         paramIdx <- paramIdx + 1
 
     match restArg with
@@ -1372,7 +1354,25 @@ let rec generateDecl (ctx: CodegenContext) (decl: TDecl) : unit =
         append ctx "("
         generateParameterList ctx name args kwArgs restArg
         append ctx ") {\n"
-        withIndent ctx (fun c -> generateFunctionBody c body)
+        withIndent ctx (fun c ->
+            for (kwName, kwType, kwDefault) in kwArgs do
+                let c_type = typeToString kwType
+                let s_name = sanitizeIdent kwName
+                indent c
+                appendLine c $"{c_type} {s_name};"
+                indent c
+                appendLine c $"if (__kw_{s_name}.IsSome) {{"
+                withIndent c (fun c2 ->
+                    indent c2; appendLine c2 $"{s_name} = __kw_{s_name}.Value;"
+                )
+                indent c
+                appendLine c "} else {"
+                withIndent c (fun c2 ->
+                    generateBlock c2 (Assign(s_name)) kwDefault
+                )
+                indent c
+                appendLine c "}"
+            generateFunctionBody c body)
         indent ctx; appendLine ctx "}"
 
     | TType (defs, _) 
@@ -1487,7 +1487,25 @@ let rec generateDecl (ctx: CodegenContext) (decl: TDecl) : unit =
                     append ctx "("
                     generateParameterList ctx n args kwArgs restArg
                     append ctx ") {\n"
-                    withIndent ctx (fun c -> generateFunctionBody c body)
+                    withIndent ctx (fun c ->
+                        for (kwName, kwType, kwDefault) in kwArgs do
+                            let c_type = typeToString kwType
+                            let s_name = sanitizeIdent kwName
+                            indent c
+                            appendLine c $"{c_type} {s_name};"
+                            indent c
+                            appendLine c $"if (__kw_{s_name}.IsSome) {{"
+                            withIndent c (fun c2 ->
+                                indent c2; appendLine c2 $"{s_name} = __kw_{s_name}.Value;"
+                            )
+                            indent c
+                            appendLine c "} else {"
+                            withIndent c (fun c2 ->
+                                generateBlock c2 (Assign(s_name)) kwDefault
+                            )
+                            indent c
+                            appendLine c "}"
+                        generateFunctionBody c body)
                     indent ctx
                     appendLine ctx "}"
                 | _ -> ()

@@ -543,6 +543,8 @@ let rec parseNewDefunArgs (args: SExpr list) : DefunArg list =
         if not rest.IsEmpty then
             failwithf $"Rest argument must be the last argument at line %d{(getRange (List.head rest)).Start.Line}"
         [RestArg name]
+    | SAtom { Token = Keyword name } :: defaultExpr :: rest ->
+        KeywordArg(name, parseExpr defaultExpr) :: parseNewDefunArgs rest
     | bad :: _ -> failwithf $"Invalid defun argument at line %d{(getRange bad).Start.Line}"
 
 let rec parseDecl (s: SExpr) : Decl =
