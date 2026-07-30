@@ -76,6 +76,10 @@ let mapChildren (f: TypedExpr -> TypedExpr) (expr: TypedExpr) : TypedExpr =
         | TCaseCast(tgt, t, caseName) -> TCaseCast(f tgt, t, caseName)
         | TGetField(tgt, name) -> TGetField(f tgt, name)
         | TTypeEq(a, b) -> TTypeEq(f a, f b)
+        | TArrayMake items -> TArrayMake(List.map f items)
+        | TLoop(members, bodyOpt) ->
+            TLoop(members |> List.map (fun m -> { m with Body = f m.Body }), Option.map f bodyOpt)
+        | TRecur(index, args) -> TRecur(index, List.map f args)
 
     { expr with Node = node }
 

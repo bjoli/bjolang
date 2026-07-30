@@ -124,6 +124,34 @@ and TExprNode =
     | TCaseCast of TypedExpr * HMType * string
     | TGetField of TypedExpr * string
     | TTypeEq of TypedExpr * TypedExpr
+    /// A `params`-style array. Produced by `LoopLowering` when a `TRecur`
+    /// argument vector has to re-pack a rest parameter.
+    | TArrayMake of TypedExpr list
+    /// A group of loops produced by `LoopLowering`. Every member is a single
+    /// strongly-connected component's worth of tail recursion.
+    ///
+    /// `TLoop (members, None)` *is* an enclosing function's body: the loop is
+    /// emitted directly into that function and `Slots` name its parameters.
+    ///
+    /// `TLoop (members, Some body)` binds the members as local functions that
+    /// are in scope in `body`.
+    | TLoop of TLoopMember list * TypedExpr option
+    /// A jump back to the top of member `index` of the innermost enclosing
+    /// `TLoop`, carrying a *complete* argument vector aligned with that
+    /// member's `Slots`.
+    | TRecur of int * TypedExpr list
+
+and TLoopMember =
+    { LoopName: string
+      /// Mutable parameter slots. A `TRecur` argument vector is positionally
+      /// aligned with this list.
+      Slots: (string * HMType) list
+      /// Per-iteration copies of `Slots`, parallel by index. `Body` reads these
+      /// rather than the slots so that a closure escaping one iteration cannot
+      /// observe the next iteration's values.
+      Locals: string list
+      RetType: HMType
+      Body: TypedExpr }
 
 and TMatchClause =
     { Pattern: TypedPattern

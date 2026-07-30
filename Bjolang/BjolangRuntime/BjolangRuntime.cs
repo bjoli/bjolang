@@ -13,12 +13,36 @@ public static class BjolangRuntime {
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static string readsubline() => Console.ReadLine();
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static void newline() => Console.WriteLine();
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static string stringsubappend(string a, string b) => a + b;
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static int stringsublength(string s) => s.Length;
+
+    // `number->string` is declared over `int` in the prelude, so it is the same
+    // operation as `int->string`.
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static string numbersubgtstring(int i) => i.ToString();
     
     public static bool @true = true;
     public static bool @false = false;
     
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static bool eq<T>(T a, T b) => EqualityComparer<T>.Default.Equals(a, b);
+
+    // `equal?` is structural equality; `eq?` is identity. Identity on a value
+    // type would box both operands and always answer false, so it falls back to
+    // structural equality there — the JIT specializes the test away per T.
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static bool equal_QMARK<T>(T a, T b) => EqualityComparer<T>.Default.Equals(a, b);
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static bool eq_QMARK<T>(T a, T b) =>
+        typeof(T).IsValueType ? EqualityComparer<T>.Default.Equals(a, b) : ReferenceEquals(a, b);
     
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static int sub(int a, int b) => a - b;

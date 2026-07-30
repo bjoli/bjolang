@@ -868,12 +868,26 @@ let rec checkDecl (env: Env) (sigs: Map<string, HMType * FType option * (string 
         | Some st -> unify env.Registry funType st
         | None -> ()
 
+        // Keyword/rest metadata has to exist *before* the body is inferred, or a
+        // recursive call that passes a keyword argument, or omits an optional
+        // one, has no metadata to resolve against: the keyword-application rule
+        // would reject it and the flat `funType` would refuse to unify with the
+        // shorter argument list.
+        let funMeta = {
+            MandatoryCount = mandatoryTypes.Length
+            KeywordParams = keywordTypes
+            RestParam = restArgType
+        }
+
         let recEnv =
-            addBinding
-                name
-                { Scheme = Scheme([], [], funType)
-                  IsMutable = false }
-                env
+            let bound =
+                addBinding
+                    name
+                    { Scheme = Scheme([], [], funType)
+                      IsMutable = false }
+                    env
+
+            { bound with FunMetas = Map.add name funMeta bound.FunMetas }
 
         // Bind mandatory args
         let bodyEnv =
@@ -920,13 +934,6 @@ let rec checkDecl (env: Env) (sigs: Map<string, HMType * FType option * (string 
                 let key = (c.TraitName, match c.TargetType with TVar v -> v | _ -> "")
                 if seen.Add(key) then yield c ]
         let schemeWithConstraints = Scheme(vars, allConstraints, schemeType)
-
-        // Build FunMeta for call-site keyword/rest handling
-        let funMeta = {
-            MandatoryCount = mandatoryTypes.Length
-            KeywordParams = keywordTypes
-            RestParam = restArgType
-        }
 
         let finalEnv =
             addBinding

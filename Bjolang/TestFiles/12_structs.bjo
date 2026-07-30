@@ -1,0 +1,39 @@
+;; `Struct` and `Record` are interchangeable spellings of the same feature.
+(type
+  (: Point (Struct (: x int) (: y int))))
+
+(type
+  (: Size (Record (: w int) (: h int))))
+
+;; Module-level struct: struct-set must qualify the module and parenthesize `with`.
+(: origin Point)
+(def origin (struct (x 0) (y 0)))
+
+(: shift-x (-> Point int Point))
+(defun (shift-x p d)
+  (struct-set p (x (+ (struct-get p x) d))))
+
+(defun (main args)
+  (def p (struct (x 1) (y 2)))
+  (def s (record (w 30) (h 40)))
+
+  ;; field access
+  (displayln (int->string (struct-get p x)))
+  (displayln (int->string (record-get s w)))
+
+  ;; functional update returning a new value, then immediately projected
+  (displayln (int->string (record-get (record-set s (h 99)) h)))
+  (displayln (int->string (record-get (record-set s (h 99)) w)))
+
+  ;; update through a function
+  (displayln (int->string (struct-get (shift-x p 5) x)))
+  (displayln (int->string (struct-get (shift-x p 5) y)))
+
+  ;; update of a module-level binding
+  (displayln (int->string (struct-get (struct-set origin (x 42)) x)))
+  (displayln (int->string (struct-get origin x)))
+
+  ;; multi-field update
+  (displayln (int->string (struct-get (struct-set p (x 7) (y 8)) x)))
+  (displayln (int->string (struct-get (struct-set p (x 7) (y 8)) y)))
+  0)

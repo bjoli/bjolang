@@ -11,6 +11,12 @@ open Bjolang.Unification
 ///
 /// `TMatch` nodes are passed through untouched - pattern matching is emitted
 /// directly as C# patterns by the code generator.
+/// The name a devirtualized trait method call is emitted under. `Codegen`
+/// rewrites `::` to `.`, so this names the singleton's instance method.
+let implInstanceMethod (traitName: string) (targetTypeName: string) (methodName: string) =
+    let targetTypeSanitized = targetTypeName.Replace(".", "_")
+    $"%s{traitName}_%s{targetTypeSanitized}.Instance::%s{methodName}"
+
 module DictionaryLowering =
 
     let rec lowerExpr (env: Env) (activeDicts: Map<string, string>) (expr: TypedExpr) : TypedExpr =
@@ -39,13 +45,12 @@ module DictionaryLowering =
 
                     match prune env.Registry targetObj.Type with
                     | TCon(targetTypeName, _) ->
-                        // STATIC DISPATCH: Direct devirtualization
-                        let targetTypeSanitized = targetTypeName.Replace(".", "_")
-                        let implClassName = $"%s{traitName}_%s{targetTypeSanitized}"
-
+                        // STATIC DISPATCH: Direct devirtualization.
+                        // The methods live on the impl *class* as instance methods,
+                        // so the call has to go through its singleton.
                         let staticDirectTarget =
                             { target with
-                                Node = TIdent($"%s{implClassName}::%s{methodName}", []) }
+                                Node = TIdent(implInstanceMethod traitName targetTypeName methodName, []) }
 
                         TApply(staticDirectTarget, loweredArgs, [], isTail)
 

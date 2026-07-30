@@ -1,29 +1,33 @@
 using System;
 using static BjolangRuntime;
-using static core_Module;
-using static _07_named_let_Module;
-using static core_Module;
+using static trait_rec_Module;
 
-public static class _07_named_let_Module {
-    public static int main<T_a>(T_a args) {
-        Func<uint, uint, uint> loop = default!;
-        loop = (count, acc) => {
-            while (true) {
-                if ((count == ((uint)(0)))) {
-                    return acc;
-                } else {
-                    var _tailArg0 = (count - ((uint)(1)));
-                    var _tailArg1 = (acc * count);
-                    count = _tailArg0;
-                    acc = _tailArg1;
-                    continue;
-                }
+public interface Countdown<T_a> {
+    int runsubdown(T_a arg0, int arg1);
+}
+public sealed class Countdown_System_Int32 : Countdown<int> {
+    public static readonly Countdown_System_Int32 Instance = new();
+    public int runsubdown(int x, int acc) {
+        while (true) {
+            var _x__1 = x;
+            var _acc__2 = acc;
+            if ((_x__1 == 0)) {
+                return _acc__2;
+            } else {
+                var __next1 = (_x__1 - 1);
+                var __next2 = (_acc__2 + 1);
+                x = __next1;
+                acc = __next2;
+                continue;
             }
-        };
-        uint result = loop(100000000u, 1u);
-        println(subgtstr_System_Int32.Instance, ((int)(result)));
-        return 0;
+        }
+    }
+}
+public static class trait_rec_Module {
+    public static void main() {
+        displayln(intsubgtstring(Countdown_System_Int32.Instance.runsubdown(100000, 0)));
+        return;
     }
 }
 
-public static class BjolangEntryPoint { public static void Main(string[] args) { _07_named_let_Module.main(0); } }
+public static class BjolangEntryPoint { public static void Main(string[] args) { trait_rec_Module.main(); } }

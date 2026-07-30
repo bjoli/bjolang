@@ -33,16 +33,19 @@ let rec analyzeExpr (inTailPosition: bool) (currentFuncName: string option) (exp
             Node = TIf(notTail c, inherits t, inherits f) }
 
     | TLet(n, isFun, args, v, b) ->
-        let newFuncName = if isFun then Some n else currentFuncName
-        let vTail = isFun
+        let newValue =
+            if isFun then
+                analyzeBinding n v
+            else
+                analyzeExpr false currentFuncName v
 
         { expr with
-            Node = TLet(n, isFun, args, analyzeExpr vTail newFuncName v, inherits b) }
+            Node = TLet(n, isFun, args, newValue, inherits b) }
 
     | TLetRec(bindings, b) ->
         let newBindings =
             bindings
-            |> List.map (fun (n, isFun, args, v) -> n, isFun, args, analyzeExpr true (Some n) v)
+            |> List.map (fun (n, isFun, args, v) -> n, isFun, args, analyzeBinding n v)
 
         { expr with
             Node = TLetRec(newBindings, inherits b) }
@@ -66,12 +69,27 @@ let rec analyzeExpr (inTailPosition: bool) (currentFuncName: string option) (exp
         { expr with
             Node = TMatch(notTail e, newClauses) }
 
+    // A lambda is a *new* function scope. Its body's tail positions belong to the
+    // lambda, not to the enclosing function, so a call to the enclosing function
+    // from here is an ordinary call: flagging it would make codegen assign the
+    // lambda's parameters and jump to the enclosing function's loop.
     | TLambda(args, b) ->
         { expr with
-            Node = TLambda(args, analyzeExpr true currentFuncName b) }
+            Node = TLambda(args, analyzeExpr true None b) }
 
     // No child of any remaining node is in tail position.
     | _ -> TypeVisitor.mapChildren notTail expr
+
+/// Analyzes the value of a function-shaped `let` binding. The binding's own name
+/// becomes the current function, and the immediate `TLambda` wrapper inference
+/// produces for such a binding is looked *through* — it is the binding's own
+/// function scope, not a nested one.
+and analyzeBinding (name: string) (value: TypedExpr) : TypedExpr =
+    match value.Node with
+    | TLambda(args, body) ->
+        { value with
+            Node = TLambda(args, analyzeExpr true (Some name) body) }
+    | _ -> analyzeExpr true (Some name) value
 
 let rec analyzeDecl (decl: TDecl) : TDecl =
     match decl with

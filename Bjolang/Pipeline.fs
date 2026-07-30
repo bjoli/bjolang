@@ -243,9 +243,12 @@ let runFullFrontendPipeline (mainFilePath: string) =
 
         printfn "=== Step 4: Tail Recursion Analysis ==="
         let tailAnalyzedAst = TailRecursion.analyzeProgram loweredAst
-        
+
+        printfn "=== Step 5: Loop Lowering ==="
+        let loopLoweredAst = LoopLowering.lowerProgram tailAnalyzedAst
+
         printfn "=== Frontend pipeline complete ==="
-        Some (env, tailAnalyzedAst, dllDeps)
+        Some (env, loopLoweredAst, dllDeps)
     with ex ->
         printfn $"Compilation Panicked: %s{ex.Message}"
         printfn $"Stack Trace: %s{ex.StackTrace}"

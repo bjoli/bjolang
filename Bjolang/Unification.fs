@@ -138,6 +138,10 @@ let rec freeTVars (registry: TraitRegistry) (t: HMType) : string list =
     | TTuple args -> List.collect (freeTVars registry) args
     | TAssoc(_, _, impl) -> freeTVars registry impl
 
+/// Counts every type variable this module has invented, so that no two of them
+/// can share a name.
+let mutable private nextGeneratedTypeVar = 0
+
 let generalize (env: Env) (t: HMType) : Scheme =
     let envFv = envFreeVars env
     let tFv = freeVars env.Registry t |> List.distinct
@@ -146,9 +150,17 @@ let generalize (env: Env) (t: HMType) : Scheme =
     // Find all explicitly named TVars that are already in the type
     let explicitTVars = freeTVars env.Registry t |> List.distinct
     
-    // Generate new names for the generalizable MetaVars, avoiding existing ones
-    // We'll just append them.
-    let generatedNames = generalizable |> List.mapi (fun i _ -> "'" + string (char (97 + i)))
+    // Generated names have to be unique across the *whole* program, not just
+    // within this type. The code generator maps `'a` to `T_a`, so two
+    // independent generalizations that both chose `'a` would produce a nested
+    // `T_a` that shadows the enclosing one instead of referring to it — and a
+    // value typed at the outer parameter is not assignable to the inner one.
+    let generatedNames =
+        generalizable
+        |> List.map (fun _ ->
+            let name = $"'t%d{nextGeneratedTypeVar}"
+            nextGeneratedTypeVar <- nextGeneratedTypeVar + 1
+            name)
     
     List.iter2 (fun (m: MetaVar) name -> m.Value <- Some(TVar name)) generalizable generatedNames
 

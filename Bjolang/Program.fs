@@ -54,14 +54,10 @@ let main argv =
         printfn $"Error: Source file '%s{inputFilePath}' not found."
         exit 1
 
-    // Determine output path (e.g., file.bjo -> file.dll or file.exe)
-    let extension = if options.IsLibrary then ".dll" else ".exe"
-    let outputFilePath = Path.ChangeExtension(inputFilePath, extension)
-
     try
 
 
-        printfn $"Compiling %s{inputFilePath} -> %s{outputFilePath}"
+        printfn $"Compiling %s{inputFilePath}"
 
         // 4. (Placeholder) Run your pipeline!
         // let ast = Parser.parseFile inputFilePath
@@ -74,6 +70,13 @@ let main argv =
         let result = Pipeline.compile inputFilePath "out.exe" options.IsLibrary
         match result with
         | Some (env, typedAst, dllDeps) ->
+            // A source file with no `main` is a library whether or not `--lib`
+            // was passed: an entry point would call a method that does not
+            // exist, and a C# `Exe` without a `Main` does not link at all.
+            let isLibrary = options.IsLibrary || not (Map.containsKey "main" env.Bindings)
+            let extension = if isLibrary then ".dll" else ".exe"
+            let outputFilePath = Path.ChangeExtension(inputFilePath, extension)
+
             printfn "Compilation succeeded. %d declarations." typedAst.Length
             
             let rec extractExports (decls: TypedAST.TDecl list) =
@@ -94,7 +97,7 @@ let main argv =
             let typesToExport = extractTypes typedAst |> List.concat
             
             let exportMetadata =
-                if options.IsLibrary && (not exports.IsEmpty || not typesToExport.IsEmpty) then
+                if isLibrary && (not exports.IsEmpty || not typesToExport.IsEmpty) then
                     let serializeExport name =
                         match Map.tryFind name env.Bindings with
                         | Some b ->
@@ -140,7 +143,7 @@ let main argv =
                     typesStr + "\n" + sigsStr
                 else ""
 
-            let csCode = Codegen.generateProgram exportMetadata (if options.IsLibrary then dllDeps else []) typedAst
+            let csCode = Codegen.generateProgram exportMetadata (if isLibrary then dllDeps else []) typedAst
             
             // DEBUG: Dump the AST to a file so we can inspect it
             File.WriteAllText("ast_dump.txt", sprintf "%A" typedAst)
@@ -156,9 +159,9 @@ let main argv =
                     | _ -> "no_args" // Not a function, treat as no-args
                 | None -> "other"
 
-            let mainModuleName = Path.GetFileNameWithoutExtension(inputFilePath) |> Codegen.sanitizeIdent
+            let mainModuleClass = Path.GetFileNameWithoutExtension(inputFilePath) |> Codegen.moduleClassName
             let entryPointCode = 
-                if options.IsLibrary then ""
+                if isLibrary then ""
                 elif mainArgKind = "list_string" then
                     $"\npublic static class BjolangEntryPoint {{\n" +
                     $"    public static void Main(string[] args) {{\n" +
@@ -166,19 +169,19 @@ let main argv =
                     $"        for (int i = args.Length - 1; i >= 0; i--) {{\n" +
                     $"            bjoArgs = new List<string>.Cons(args[i], bjoArgs);\n" +
                     $"        }}\n" +
-                    $"        %s{mainModuleName}_Module.main(bjoArgs);\n" +
+                    $"        %s{mainModuleClass}.main(bjoArgs);\n" +
                     $"    }}\n" +
                     $"}}\n"
                 elif mainArgKind = "no_args" then
-                    $"\npublic static class BjolangEntryPoint {{ public static void Main(string[] args) {{ %s{mainModuleName}_Module.main(); }} }}\n"
+                    $"\npublic static class BjolangEntryPoint {{ public static void Main(string[] args) {{ %s{mainModuleClass}.main(); }} }}\n"
                 else
-                    $"\npublic static class BjolangEntryPoint {{ public static void Main(string[] args) {{ %s{mainModuleName}_Module.main(0); }} }}\n"
+                    $"\npublic static class BjolangEntryPoint {{ public static void Main(string[] args) {{ %s{mainModuleClass}.main(0); }} }}\n"
             let fullCode = csCode + entryPointCode
 
             let tmpDir = Path.Combine(Path.GetTempPath(), "Bjolang_" + System.Guid.NewGuid().ToString("N"))
             Directory.CreateDirectory(tmpDir) |> ignore
             
-            let projType = if options.IsLibrary then "Library" else "Exe"
+            let projType = if isLibrary then "Library" else "Exe"
             let runtimeDllPath = Path.GetFullPath("BjolangRuntime/bin/Release/net10.0/BjolangRuntime.dll")
             let collectionsDllPath = Path.GetFullPath("BjolangRuntime/bin/Release/net10.0/Collections.dll")
             

@@ -10,12 +10,33 @@ type UnionCaseInfo = {
     IsDataCase: bool
 }
 
+/// The loop a `TRecur` may jump to.
+type LoopScope = {
+    Members: TLoopMember list
+    /// Set when the group was merged into a single switch-dispatched local
+    /// function because its members tail-call each other.
+    Merged: bool
+    /// The state discriminant of a merged group.
+    StateVar: string
+    /// `switch` statements entered since the group's own dispatch switch. A
+    /// `goto case` binds to the *nearest* enclosing switch, so a jump from
+    /// inside a nested one has to go through the discriminant instead.
+    NestedSwitches: int
+}
+
 type CodegenContext = {
     Builder: StringBuilder
     IndentLevel: int
     UnionCases: Map<string, UnionCaseInfo>
     GlobalBindings: Map<string, string>
-    TailCallArgs: string list option
+    /// Where `generateExpr` may hoist statement-shaped operands to. `None` in
+    /// the three contexts C# gives no statement position: optional-parameter
+    /// defaults, `case ... when` guards, and switch-expression arms.
+    Prelude: ResizeArray<string> option
+    /// The innermost loop in scope.
+    Loop: LoopScope option
+    /// Type parameters the enclosing method or class already introduced.
+    TypeParams: Set<string>
 }
 
 let inline append (ctx: CodegenContext) (s: string) =
@@ -29,6 +50,17 @@ let inline indent (ctx: CodegenContext) =
 
 let withIndent (ctx: CodegenContext) (f: CodegenContext -> unit) =
     f { ctx with IndentLevel = ctx.IndentLevel + 1 }
+
+/// A user-facing code generation failure. A loud error at compile time beats
+/// invalid generated C#, a silent wrong answer, or a stack overflow at run time.
+let codegenError (line: int) (message: string) : 'a =
+    failwithf $"Codegen Error at line %d{line}: %s{message}"
+
+let private nameCounter = ref 0
+
+let private freshName (prefix: string) =
+    nameCounter.Value <- nameCounter.Value + 1
+    $"%s{prefix}%d{nameCounter.Value}"
 
 let mapPrimitiveType (name: string) =
     match name with
@@ -55,6 +87,23 @@ let sanitizeIdent (s: string) =
     | "class" | "struct" | "public" | "private" | "protected" | "internal" | "static" | "readonly" | "var" | "ref" | "out" | "in" | "params" | "new" | "return" | "if" | "else" | "while" | "for" | "foreach" | "do" | "switch" | "case" | "default" | "break" | "continue" | "goto" | "try" | "catch" | "finally" | "throw" | "lock" | "typeof" | "sizeof" | "is" | "as" | "true" | "false" | "null" | "void" | "object" | "string" | "int" | "bool" -> "@" + s
     | _ -> s
 
+/// The C# class a module's declarations are emitted into.
+///
+/// A module is named after its source file, so the name can hold characters no
+/// C# identifier may hold — or start with a digit, as `06_lib.bjo` does. Every
+/// site that spells this class has to agree on the answer: the class definition,
+/// the `using static` for it, a qualified reference to one of its bindings, and
+/// the generated entry point.
+let moduleClassName (moduleName: string) =
+    sanitizeIdent (moduleName.Replace(".", "_").Replace("-", "_")) + "_Module"
+
+/// The C# spelling of a Bjolang type parameter.
+let typeParamName (name: string) = "T_" + name.TrimStart('\'')
+
+/// The canonical key a type parameter is tracked under, independent of whether
+/// the source wrote it quoted.
+let typeParamKey (name: string) = name.TrimStart('\'')
+
 let rec typeToString (hm: HMType) : string =
     match hm with
     | TCon ("Array", [elemType]) ->
@@ -66,9 +115,7 @@ let rec typeToString (hm: HMType) : string =
         else
             let argsStr = args |> List.map typeToString |> String.concat ", "
             $"%s{baseName}<%s{argsStr}>"
-    | TVar name -> 
-        if name.StartsWith("'") then "T_" + name.Substring(1)
-        else "T_" + name
+    | TVar name -> typeParamName name
     | TFun (args, ret) ->
         let argsStr = args |> List.map typeToString |> String.concat ", "
         if typeToString ret = "void" then
@@ -84,6 +131,22 @@ let rec typeToString (hm: HMType) : string =
         | None -> "object /* unresolved meta */"
     | TAssoc (traitName, assocName, implType) ->
         "object /* unresolved assoc */"
+
+let private isVoidType (t: HMType) = typeToString t = "void"
+
+/// Every type variable mentioned by `t`, in source spelling.
+let rec collectTypeVars (t: HMType) : string list =
+    match t with
+    | TVar name -> [ name ]
+    | TFun (args, ret) -> (args |> List.collect collectTypeVars) @ collectTypeVars ret
+    | TCon (_, args) -> args |> List.collect collectTypeVars
+    | TTuple types -> types |> List.collect collectTypeVars
+    | TMeta m ->
+        match m.Value with
+        | Some t' -> collectTypeVars t'
+        | None -> []
+    | TAssoc (_, _, implType) -> collectTypeVars implType
+
 type BlockTarget =
     | Return
     | Assign of string
@@ -136,15 +199,6 @@ let getUnionTypeString (hm: HMType) (parentName: string) : string =
     | None ->
         sanitizeIdent parentName
 
-let rec hasTailCall (expr: TypedExpr) =
-    match expr.Node with
-    | TApply (_, _, _, true) -> true
-    | TIf (_, t, f) -> hasTailCall t || hasTailCall f
-    | TLet (_, _, _, _, b) | TLetMutable (_, _, b) | TLetTuple (_, _, b) -> hasTailCall b
-    | TLetRec (_, b) -> hasTailCall b
-    | TMatch (_, clauses) -> clauses |> List.exists (fun c -> hasTailCall c.Body)
-    | _ -> false
-
 let escapeStringLiteral (s: string) =
     s.Replace("\"", "\\\"").Replace("\n", "\\n")
 
@@ -165,11 +219,59 @@ let private liveClauses (clauses: TMatchClause list) =
         | c :: rest -> if isIrrefutable c then List.rev (c :: acc) else take (c :: acc) rest
     take [] clauses
 
-let private matchTempCounter = ref 0
+// ---------------------------------------------------------------------------
+// Statement shape
+// ---------------------------------------------------------------------------
 
-let private freshMatchTemp () =
-    matchTempCounter.Value <- matchTempCounter.Value + 1
-    $"__match{matchTempCounter.Value}"
+/// True when *this node* has no C# expression form and `generateExpr` therefore
+/// has to hoist it into a preceding statement.
+///
+/// A node whose operands merely *contain* something statement-shaped is not
+/// itself statement-shaped: those operands are hoisted individually, which keeps
+/// the node an expression.
+let rec isStatementShaped (expr: TypedExpr) : bool =
+    match expr.Node with
+    | TLet _
+    | TLetRec _
+    | TLetTuple _
+    | TLetMutable _
+    | TSet _
+    | TThrow _
+    | TTryFinally _
+    | TVecMake _
+    | TLoop _
+    | TRecur _ -> true
+
+    // A conditional stays `c ? t : f` as long as it yields a value and neither
+    // arm needs statements. Hoisting out of an arm would evaluate it
+    // unconditionally, so an arm that needs a statement forces the whole node
+    // into an `if`. The condition is evaluated unconditionally, so whatever it
+    // hoists can safely go ahead of the conditional.
+    | TIf (_, t, f) -> isVoidType expr.Type || containsHoist t || containsHoist f
+
+    // A `switch` expression cannot yield void, cannot contain the `continue` or
+    // `goto` a jump compiles to, and gives its arms and guards no statement
+    // position of their own.
+    | TMatch (_, clauses) ->
+        isVoidType expr.Type
+        || liveClauses clauses
+           |> List.exists (fun c ->
+               containsHoist c.Body
+               || (c.Guard |> Option.map containsHoist |> Option.defaultValue false))
+
+    | _ -> false
+
+/// True when evaluating `expr` will hoist statements into the enclosing
+/// statement position — which moves that work earlier than the expression it
+/// came from.
+///
+/// A lambda body is a block of its own, so nothing inside one can need a
+/// statement position out here.
+and containsHoist (expr: TypedExpr) : bool =
+    isStatementShaped expr
+    || match expr.Node with
+       | TLambda _ -> false
+       | _ -> TypeVisitor.children expr |> List.exists containsHoist
 
 /// Translates a typed pattern into C# pattern syntax.
 let rec generatePattern (ctx: CodegenContext) (pat: TypedPattern) : unit =
@@ -211,12 +313,22 @@ let rec generatePattern (ctx: CodegenContext) (pat: TypedPattern) : unit =
     | TPApp _ ->
         failwithf $"Applied patterns are not supported by the C# backend (line %d{pat.Range.Start.Line})"
 
+// ---------------------------------------------------------------------------
+// Expressions and statements
+// ---------------------------------------------------------------------------
+
 let rec generateExpr (ctx: CodegenContext) (expr: TypedExpr) : unit =
+    match ctx.Prelude with
+    | Some prelude when isStatementShaped expr -> append ctx (hoistToTemp ctx prelude expr)
+    | None when containsHoist expr ->
+        codegenError
+            expr.Range.Start.Line
+            "this expression needs statements to evaluate, but it appears where C# has no statement position"
+    | _ ->
+
     match expr.Node with
     | TInt i -> append ctx i
-    | TString s -> 
-        let escaped = s.Replace("\"", "\\\"").Replace("\n", "\\n")
-        append ctx $"\"%s{escaped}\""
+    | TString s -> append ctx $"\"%s{escapeStringLiteral s}\""
     | TKeyword k -> append ctx $"\"%s{k}\""
     | TSymbol s -> append ctx $"\"%s{s}\""
     | TIdent (name, _) ->
@@ -226,6 +338,8 @@ let rec generateExpr (ctx: CodegenContext) (expr: TypedExpr) : unit =
             if info.IsDataCase then
                 match expr.Type with
                 | TFun (argTypes, _) ->
+                    // A genuine first-class function value. Roslyn caches
+                    // no-capture lambdas, so this allocates once per program.
                     let argsList = [for i in 0 .. argTypes.Length - 1 -> $"arg{i}"]
                     let argsStr = String.concat ", " argsList
                     append ctx $"({argsStr}) => new {typeStr}.{sanitizeIdent name}({argsStr})"
@@ -234,582 +348,1046 @@ let rec generateExpr (ctx: CodegenContext) (expr: TypedExpr) : unit =
             else
                 append ctx $"new {typeStr}.{sanitizeIdent name}()"
         | None ->
-            let targetName =
-                match Map.tryFind name ctx.GlobalBindings with
-                | Some modName -> $"%s{sanitizeIdent modName}_Module.%s{sanitizeIdent name}"
-                | None -> sanitizeIdent name
+            let targetName = qualifiedName ctx name
             match expr.Type with
             | TFun _ ->
+                // A delegate-typed cast of a value or method group; Roslyn caches
+                // method-group conversions too.
                 append ctx $"(({typeToString expr.Type})({targetName}))"
             | _ ->
                 append ctx targetName
+
     | TApply (target, args, kwArgs, _) ->
-        match target.Node with
-        | TIdent (name, _) when Map.containsKey name ctx.UnionCases ->
-            let info = Map.find name ctx.UnionCases
-            let typeStr = getUnionTypeString expr.Type info.ParentTypeName
-            append ctx $"new {typeStr}.{sanitizeIdent name}("
-            for i, arg in List.indexed args do
-                if i > 0 then append ctx ", "
-                generateExpr ctx arg
-            append ctx ")"
-        | TIdent (name, _) when List.contains name ["+"; "-"; "*"; "/"; "%"; "<"; ">"; "<="; ">="] && args.Length = 2 && kwArgs.IsEmpty ->
-            append ctx "("
-            generateExpr ctx args.[0]
-            append ctx $" {name} "
-            generateExpr ctx args.[1]
-            append ctx ")"
-        | TIdent ("=", _) when args.Length = 2 && kwArgs.IsEmpty ->
-            append ctx "("
-            generateExpr ctx args.[0]
-            append ctx " == "
-            generateExpr ctx args.[1]
-            append ctx ")"
-        | _ ->
-            match target.Node with
-            | TIdent (name, tArgs) ->
-                let targetName =
-                    match Map.tryFind name ctx.GlobalBindings with
-                    | Some modName -> $"%s{sanitizeIdent modName}_Module.%s{sanitizeIdent name}"
-                    | None -> sanitizeIdent name
-                append ctx targetName
-                if not tArgs.IsEmpty && args.IsEmpty && kwArgs.IsEmpty then
-                    let tyArgsStr = tArgs |> List.map (fun t -> typeToString t) |> String.concat ", "
-                    append ctx $"<%s{tyArgsStr}>"
-            | _ ->
-                generateExpr ctx target
-            append ctx "("
-            if kwArgs.IsEmpty then
-                // Simple case: no keyword args, just emit all positional args
-                for i, arg in List.indexed args do
-                    if i > 0 then append ctx ", "
-                    generateExpr ctx arg
-            else
-                // We have keyword args. Determine how many mandatory args there are.
-                // Function type is TFun([mandatoryTypes..., keywordTypes..., optionalArrayType], retType)
-                // positionalArgs = mandatoryArgs ++ restArgs
-                // kwArgs = keyword values
-                let funArgCount =
-                    match target.Type with
-                    | TFun(argTypes, _) -> argTypes.Length
-                    | _ -> args.Length + kwArgs.Length
+        generateApply ctx expr target args kwArgs
 
-                // Check if last param is a rest/params array
-                let hasRest =
-                    match target.Type with
-                    | TFun(argTypes, _) when not argTypes.IsEmpty ->
-                        match List.last argTypes with
-                        | TCon("Array", _) -> true
-                        | _ -> false
-                    | _ -> false
-
-                let mandatoryCount = funArgCount - kwArgs.Length - (if hasRest then 1 else 0)
-                let mandatoryArgs = args |> List.take (min args.Length mandatoryCount)
-                let restArgs = args |> List.skip (min args.Length mandatoryCount)
-
-                let mutable argIdx = 0
-                // 1. Emit mandatory positional args
-                for arg in mandatoryArgs do
-                    if argIdx > 0 then append ctx ", "
-                    generateExpr ctx arg
-                    argIdx <- argIdx + 1
-                // 2. Emit keyword args
-                if hasRest then
-                    // Emit positionally (can't mix named + params in C#)
-                    for (_, kwExpr) in kwArgs do
-                        if argIdx > 0 then append ctx ", "
-                        generateExpr ctx kwExpr
-                        argIdx <- argIdx + 1
-                else
-                    // Emit as C# named arguments
-                    for (kwName, kwExpr) in kwArgs do
-                        if argIdx > 0 then append ctx ", "
-                        append ctx $"%s{sanitizeIdent kwName}: "
-                        generateExpr ctx kwExpr
-                        argIdx <- argIdx + 1
-                // 3. Emit rest args
-                for arg in restArgs do
-                    if argIdx > 0 then append ctx ", "
-                    generateExpr ctx arg
-                    argIdx <- argIdx + 1
-            append ctx ")"
     | TInterfaceCall (iType, mName, dict, args) ->
-        generateExpr ctx dict
+        let emitters = prepareOperands ctx (dict :: args)
+        emitters.Head ctx
         append ctx "."
         append ctx (sanitizeIdent mName)
         append ctx "("
-        for i, arg in List.indexed args do
+        for i, emit in List.indexed emitters.Tail do
             if i > 0 then append ctx ", "
-            generateExpr ctx arg
+            emit ctx
         append ctx ")"
+
     | TLambda (args, body) ->
         append ctx "("
-        let argsStr = args |> List.map sanitizeIdent |> String.concat ", "
-        append ctx argsStr
+        append ctx (args |> List.map sanitizeIdent |> String.concat ", ")
         append ctx ") => {\n"
-        withIndent ctx (fun c ->
-            let isTail = hasTailCall body
-            let c2 = if isTail then { c with TailCallArgs = Some (args |> List.map sanitizeIdent) } else c
-            if isTail then
-                indent c2; appendLine c2 "while (true) {"
-                withIndent c2 (fun c3 -> generateBlock c3 Return body)
-                indent c2; appendLine c2 "}"
-            else
-                generateBlock c2 Return body
-        )
+        // A lambda is its own function scope: it has no access to the enclosing
+        // loop's slots, and a `continue` inside it would bind to nothing.
+        let inner = { ctx with Prelude = None; Loop = None }
+        withIndent inner (fun c -> generateBlock c Return body)
         indent ctx; append ctx "}"
+
     | TIf (cond, t, f) ->
-        let isVoid = typeToString expr.Type = "void"
-        if isVoid then
-            append ctx "new Action(() => {\n"
-            withIndent ctx (fun c -> generateBlock c Discard expr)
-            indent ctx; append ctx "})()"
-        else
-            append ctx $"new Func<{typeToString expr.Type}>(() => {{\n"
-            withIndent ctx (fun c -> generateBlock c Return expr)
-            indent ctx; append ctx "})()"
+        // Reached only when nothing inside needs a statement position. Both arms
+        // are cast to the conditional's own type: C#'s "best common type" rule
+        // rejects arms typed at different subclasses of a union (CS0173).
+        let resultType = typeToString expr.Type
+        append ctx "("
+        generateExpr ctx cond
+        append ctx $" ? (%s{resultType})("
+        generateExpr ctx t
+        append ctx $") : (%s{resultType})("
+        generateExpr ctx f
+        append ctx "))"
+
     | TTupleMake args ->
         append ctx "("
-        for i, arg in List.indexed args do
+        for i, emit in List.indexed (prepareOperands ctx args) do
             if i > 0 then append ctx ", "
-            generateExpr ctx arg
+            emit ctx
         append ctx ")"
+
     | TRecordMake fields ->
-        let recTypeName = typeToString expr.Type
-        append ctx $"new %s{recTypeName}("
-        for i, (k, v) in List.indexed fields do
+        append ctx $"new %s{typeToString expr.Type}("
+        for i, emit in List.indexed (prepareOperands ctx (fields |> List.map snd)) do
             if i > 0 then append ctx ", "
-            generateExpr ctx v
+            emit ctx
         append ctx ")"
+
     | TRecordUpdate (name, fields) ->
         // `with` binds loosely, so parenthesize: `(r with { .. }).field` must not
         // parse as `r with { .. field }`.
-        let targetName =
-            match Map.tryFind name ctx.GlobalBindings with
-            | Some modName -> $"%s{sanitizeIdent modName}_Module.%s{sanitizeIdent name}"
-            | None -> sanitizeIdent name
+        let emitters = prepareOperands ctx (fields |> List.map snd)
         append ctx "("
-        append ctx targetName
+        append ctx (qualifiedName ctx name)
         append ctx " with { "
-        for i, (k, v) in List.indexed fields do
+        for i, ((k, _), emit) in List.indexed (List.zip fields emitters) do
             if i > 0 then append ctx ", "
             append ctx (sanitizeIdent k)
             append ctx " = "
-            generateExpr ctx v
+            emit ctx
         append ctx " })"
+
     | TIsInst (target, t) ->
         append ctx "("
         generateExpr ctx target
         append ctx " is "
         append ctx (typeToString t)
         append ctx ")"
+
     | TIsInstCase (target, t, caseName) ->
         append ctx "("
         generateExpr ctx target
         append ctx $" is {typeToString t}.{sanitizeIdent caseName}"
         append ctx ")"
+
     | TGetField (target, field) ->
         generateExpr ctx target
         append ctx "."
         append ctx (sanitizeIdent field)
+
     | TCast (target, t) ->
         append ctx "(("
         append ctx (typeToString t)
         append ctx ")("
         generateExpr ctx target
         append ctx "))"
+
     | TCaseCast (target, t, caseName) ->
         append ctx "(("
         append ctx $"{typeToString t}.{sanitizeIdent caseName}"
         append ctx ")("
         generateExpr ctx target
         append ctx "))"
-    | TLet _ | TLetRec _ | TThrow _ as node ->
-        let isVoid = typeToString expr.Type = "void"
-        if isVoid then
-            append ctx "new Action(() => {\n"
-            withIndent ctx (fun c -> generateBlock c Discard expr)
-            indent ctx; append ctx "})()"
-        else
-            append ctx $"new Func<{typeToString expr.Type}>(() => {{\n"
-            withIndent ctx (fun c -> generateBlock c Return expr)
-            indent ctx; append ctx "})()"
+
     | TListMake items ->
-        // Desugar to nested Cons calls: new List<T>.Cons(e1, new List<T>.Cons(e2, new List<T>.Nil()))
+        // Desugar to nested Cons calls.
         let listTypeStr = typeToString expr.Type
+        let emitters = prepareOperands ctx items
         let rec emitCons remaining =
             match remaining with
-            | [] ->
-                append ctx $"new {listTypeStr}.Nil()"
-            | item :: rest ->
+            | [] -> append ctx $"new {listTypeStr}.Nil()"
+            | emit :: rest ->
                 append ctx $"new {listTypeStr}.Cons("
-                generateExpr ctx item
+                emit ctx
                 append ctx ", "
                 emitCons rest
                 append ctx ")"
-        emitCons items
-    | TVecMake items ->
-        // Emit builder pattern:
-        // ((Func<Collections.RrbList<T>>)(() => {
-        //     var b = new Collections.RrbBuilder<T>();
-        //     b.Add(e1); b.Add(e2); ...
-        //     return b.ToImmutable();
-        // }))()
-        let vecTypeStr = typeToString expr.Type
+        emitCons emitters
+
+    | TArrayMake items ->
         let elementTypeStr =
             match expr.Type with
-            | TCon(_, [elemT]) -> typeToString elemT
+            | TCon ("Array", [ elemT ]) -> typeToString elemT
             | _ -> "object"
-        let builderTypeStr = $"Collections.RrbBuilder<{elementTypeStr}>"
-        append ctx $"((Func<{vecTypeStr}>)(() => {{\n"
-        withIndent ctx (fun c ->
-            indent c; appendLine c $"var __b = new {builderTypeStr}();"
-            for item in items do
-                indent c; append c "__b.Add("; generateExpr c item; appendLine c ");"
-            indent c; appendLine c "return __b.ToImmutable();"
-        )
-        indent ctx; append ctx "}))()"
-    | TMatch (matchTarget, clauses) ->
-        let live = liveClauses clauses
-        let isVoid = typeToString expr.Type = "void"
-        let hasTail = live |> List.exists (fun c -> hasTailCall c.Body)
+        append ctx $"new %s{elementTypeStr}[] {{ "
+        for i, emit in List.indexed (prepareOperands ctx items) do
+            if i > 0 then append ctx ", "
+            emit ctx
+        append ctx " }"
 
-        if isVoid || hasTail then
-            // A switch *expression* cannot yield void, and it cannot contain the
-            // `continue` a tail call compiles to. Fall back to the statement form.
-            // TailCallArgs is cleared: a `continue` would bind to the lambda, not
-            // to the enclosing function's trampoline.
-            let inner = { ctx with TailCallArgs = None }
-            if isVoid then
-                append ctx "new Action(() => {\n"
-                withIndent inner (fun c -> generateBlock c Discard expr)
-                indent ctx; append ctx "})()"
+    | TMatch (matchTarget, clauses) ->
+        // Reached only when every live arm and guard is expression-shaped.
+        let live = liveClauses clauses
+        generateExpr ctx matchTarget
+        appendLine ctx " switch {"
+        withIndent ctx (fun c ->
+            // Arms have no statement position of their own.
+            let armCtx = { c with Prelude = None }
+            for clause in live do
+                indent armCtx
+                generatePattern armCtx clause.Pattern
+                match clause.Guard with
+                | Some guard ->
+                    append armCtx " when "
+                    generateExpr armCtx guard
+                | None -> ()
+                append armCtx " => "
+                generateExpr armCtx clause.Body
+                appendLine armCtx ","
+            if not (live |> List.exists isIrrefutable) then
+                indent armCtx
+                appendLine armCtx $"_ => throw new Exception(\"Match failure at line %d{expr.Range.Start.Line}\")"
+        )
+        indent ctx; append ctx "}"
+
+    | TTypeEq _ ->
+        codegenError expr.Range.Start.Line "type equality tests are not supported by the C# backend"
+
+    | TThrow _
+    | TVecMake _
+    | TLet _
+    | TLetRec _
+    | TLetTuple _
+    | TLetMutable _
+    | TSet _
+    | TTryFinally _
+    | TLoop _
+    | TRecur _ ->
+        // Statement-shaped: `needsHoist` has already routed these away.
+        codegenError expr.Range.Start.Line "internal error: statement-shaped node reached expression emission"
+
+/// Fully qualifies a module-level binding.
+and private qualifiedName (ctx: CodegenContext) (name: string) =
+    match Map.tryFind name ctx.GlobalBindings with
+    | Some modName -> $"%s{moduleClassName modName}.%s{sanitizeIdent name}"
+    | None -> sanitizeIdent name
+
+/// Evaluates a statement-shaped node into a temporary in the enclosing statement
+/// position and yields the temporary's name.
+and private hoistToTemp (ctx: CodegenContext) (prelude: ResizeArray<string>) (expr: TypedExpr) : string =
+    let tmp = freshName "__hoist"
+    let scratch = StringBuilder()
+    let inner = { ctx with Builder = scratch; Prelude = None }
+
+    if isVoidType expr.Type then
+        generateBlock inner Discard expr
+    else
+        generateBlock inner (DeclareAndAssign(typeToString expr.Type, tmp)) expr
+
+    // Anything the node hoisted in turn is already inside `scratch`, ahead of the
+    // node's own statements, so appending as one unit preserves the order.
+    prelude.Add(scratch.ToString())
+    tmp
+
+/// Emits the operands of a single construct, preserving left-to-right evaluation.
+///
+/// Hoisting a node out of the middle of an operand list moves its evaluation
+/// earlier, so every operand up to and including the last hoisted one is pulled
+/// into a temporary too. There is no purity information in the typed AST, so no
+/// operand is exempted.
+///
+/// The list must be given in *source* order; the returned emitters may be used
+/// in any order, which is what `TApply`'s keyword branch needs.
+and private prepareOperands (ctx: CodegenContext) (operands: TypedExpr list) : (CodegenContext -> unit) list =
+    let hoisted =
+        match ctx.Prelude with
+        | Some prelude when operands |> List.exists containsHoist ->
+            let lastHoisted =
+                operands
+                |> List.mapi (fun i e -> i, containsHoist e)
+                |> List.filter snd
+                |> List.map fst
+                |> List.max
+
+            Some(prelude, lastHoisted)
+        | _ -> None
+
+    match hoisted with
+    | None -> operands |> List.map (fun operand -> fun (c: CodegenContext) -> generateExpr c operand)
+    | Some(prelude, lastHoisted) ->
+        operands
+        |> List.mapi (fun i operand ->
+            if i <= lastHoisted then
+                let tmp = hoistToTemp ctx prelude operand
+                fun (c: CodegenContext) -> append c tmp
             else
-                append ctx $"new Func<{typeToString expr.Type}>(() => {{\n"
-                withIndent inner (fun c -> generateBlock c Return expr)
-                indent ctx; append ctx "})()"
-        else
-            generateExpr ctx matchTarget
-            appendLine ctx " switch {"
-            withIndent ctx (fun c ->
-                for clause in live do
-                    indent c
-                    generatePattern c clause.Pattern
-                    match clause.Guard with
-                    | Some guard ->
-                        append c " when "
-                        generateExpr c guard
-                    | None -> ()
-                    append c " => "
-                    generateExpr c clause.Body
-                    appendLine c ","
-                if not (live |> List.exists isIrrefutable) then
-                    indent c
-                    appendLine c $"_ => throw new Exception(\"Match failure at line %d{expr.Range.Start.Line}\")"
-            )
-            indent ctx; append ctx "}"
+                fun (c: CodegenContext) -> generateExpr c operand)
+
+and private generateApply
+    (ctx: CodegenContext)
+    (expr: TypedExpr)
+    (target: TypedExpr)
+    (args: TypedExpr list)
+    (kwArgs: (string * TypedExpr) list)
+    : unit =
+
+    match target.Node with
+    | TIdent (name, _) when Map.containsKey name ctx.UnionCases ->
+        let info = Map.find name ctx.UnionCases
+        let typeStr = getUnionTypeString expr.Type info.ParentTypeName
+        append ctx $"new {typeStr}.{sanitizeIdent name}("
+        for i, emit in List.indexed (prepareOperands ctx args) do
+            if i > 0 then append ctx ", "
+            emit ctx
+        append ctx ")"
+
+    | TIdent (name, _) when List.contains name ["+"; "-"; "*"; "/"; "%"; "<"; ">"; "<="; ">="] && args.Length = 2 && kwArgs.IsEmpty ->
+        let emitters = prepareOperands ctx args
+        append ctx "("
+        emitters[0] ctx
+        append ctx $" {name} "
+        emitters[1] ctx
+        append ctx ")"
+
+    | TIdent ("=", _) when args.Length = 2 && kwArgs.IsEmpty ->
+        let emitters = prepareOperands ctx args
+        append ctx "("
+        emitters[0] ctx
+        append ctx " == "
+        emitters[1] ctx
+        append ctx ")"
+
     | _ ->
-        append ctx "/* Unimplemented expression node */"
+        // The callee is evaluated first, so it joins the operand list in source
+        // order ahead of the arguments.
+        let calleeIsIdent =
+            match target.Node with
+            | TIdent _ -> true
+            | _ -> false
+
+        let sourceOperands =
+            (if calleeIsIdent then [] else [ target ]) @ args @ (kwArgs |> List.map snd)
+
+        let emitters = prepareOperands ctx sourceOperands
+
+        let calleeEmitters, argEmitters =
+            if calleeIsIdent then [], emitters else [ emitters.Head ], emitters.Tail
+
+        let positionalEmitters = argEmitters |> List.truncate args.Length
+        let keywordEmitters = argEmitters |> List.skip args.Length
+
+        match target.Node with
+        | TIdent (name, tArgs) ->
+            append ctx (qualifiedName ctx name)
+            if not tArgs.IsEmpty && args.IsEmpty && kwArgs.IsEmpty then
+                let tyArgsStr = tArgs |> List.map typeToString |> String.concat ", "
+                append ctx $"<%s{tyArgsStr}>"
+        | TLambda _ ->
+            // A lambda literal has no type of its own. C# infers one from an
+            // argument or assignment context, but a callee position gives it
+            // nothing to infer from and `(x) => { … }(a)` is rejected (CS0149),
+            // so the delegate type has to be written out.
+            append ctx $"(({typeToString target.Type})("
+            calleeEmitters.Head ctx
+            append ctx "))"
+        | _ -> calleeEmitters.Head ctx
+
+        append ctx "("
+        if kwArgs.IsEmpty then
+            for i, emit in List.indexed positionalEmitters do
+                if i > 0 then append ctx ", "
+                emit ctx
+        else
+            // Function type is TFun([mandatory..., keyword..., rest?], ret) and the
+            // positional arguments are mandatory ++ rest, so the split point is
+            // derived from the callee's arity rather than the call's shape.
+            let funArgCount =
+                match target.Type with
+                | TFun (argTypes, _) -> argTypes.Length
+                | _ -> args.Length + kwArgs.Length
+
+            let hasRest =
+                match target.Type with
+                | TFun (argTypes, _) when not argTypes.IsEmpty ->
+                    match List.last argTypes with
+                    | TCon ("Array", _) -> true
+                    | _ -> false
+                | _ -> false
+
+            let mandatoryCount = funArgCount - kwArgs.Length - (if hasRest then 1 else 0)
+            let split = min positionalEmitters.Length mandatoryCount
+            let mandatoryEmitters = positionalEmitters |> List.truncate split
+            let restEmitters = positionalEmitters |> List.skip split
+
+            let mutable argIdx = 0
+
+            for emit in mandatoryEmitters do
+                if argIdx > 0 then append ctx ", "
+                emit ctx
+                argIdx <- argIdx + 1
+
+            if hasRest then
+                // C# forbids mixing named arguments with a `params` expansion.
+                for emit in keywordEmitters do
+                    if argIdx > 0 then append ctx ", "
+                    emit ctx
+                    argIdx <- argIdx + 1
+            else
+                for (kwName, _), emit in List.zip kwArgs keywordEmitters do
+                    if argIdx > 0 then append ctx ", "
+                    append ctx $"%s{sanitizeIdent kwName}: "
+                    emit ctx
+                    argIdx <- argIdx + 1
+
+            for emit in restEmitters do
+                if argIdx > 0 then append ctx ", "
+                emit ctx
+                argIdx <- argIdx + 1
+        append ctx ")"
+
+/// Emits one statement, giving `generateExpr` somewhere to hoist statement-shaped
+/// operands to. The statement is built into a scratch buffer first so that the
+/// hoisted statements can be written ahead of it — including ahead of its indent.
+and private emitStatement (ctx: CodegenContext) (build: CodegenContext -> unit) : unit =
+    let prelude = ResizeArray<string>()
+    let scratch = StringBuilder()
+
+    build { ctx with Builder = scratch; Prelude = Some prelude }
+
+    for stmt in prelude do
+        ctx.Builder.Append(stmt) |> ignore
+
+    ctx.Builder.Append(scratch) |> ignore
 
 and generateBlock (ctx: CodegenContext) (target: BlockTarget) (expr: TypedExpr) : unit =
     match expr.Node with
-    | TApply (_, args, _, true) when ctx.TailCallArgs.IsSome ->
-        let tArgs = ctx.TailCallArgs.Value
-        for i, arg in List.indexed args do
-            indent ctx; append ctx $"var _tailArg{i} = "
-            generateExpr ctx arg
-            appendLine ctx ";"
-        for i in 0 .. args.Length - 1 do
-            indent ctx; appendLine ctx $"{tArgs.[i]} = _tailArg{i};"
-        indent ctx; appendLine ctx "continue;"
-    | TLet (name, isFun, args, value, body) ->
-        if isFun then
-            match value.Node with
-            | TLambda (lambdaArgs, lambdaBody) ->
-                match value.Type with
-                | TFun (argTypes, retType) ->
-                    let rec collectTVars t =
-                        match t with
-                        | TVar name -> [name]
-                        | TFun(args, ret) -> (args |> List.collect collectTVars) @ collectTVars ret
-                        | TCon(_, args) -> args |> List.collect collectTVars
-                        | TTuple types -> types |> List.collect collectTVars
-                        | TMeta m ->
-                            match m.Value with
-                            | Some t' -> collectTVars t'
-                            | None -> []
-                        | _ -> []
-                    let typeParams = collectTVars value.Type |> List.distinct
-                    let tyParamsStr =
-                        if typeParams.IsEmpty then ""
-                        else "<" + (typeParams |> List.map (fun t -> if t.StartsWith("'") then "T_" + t.Substring(1) else "T_" + t) |> String.concat ", ") + ">"
-                    
-                    indent ctx
-                    append ctx (typeToString retType)
-                    append ctx " "
-                    append ctx (sanitizeIdent name)
-                    append ctx tyParamsStr
-                    append ctx "("
-                    for i, (argName, argType) in List.indexed (List.zip lambdaArgs argTypes) do
-                        if i > 0 then append ctx ", "
-                        append ctx (typeToString argType)
-                        append ctx " "
-                        append ctx (sanitizeIdent argName)
-                    appendLine ctx ") {"
-                    withIndent ctx (fun c ->
-                        generateBlock c Return lambdaBody
-                    )
-                    indent ctx
-                    appendLine ctx "}"
-                    generateBlock ctx target body
-                | _ ->
-                    generateBlock ctx (DeclareAndAssign (typeToString value.Type, sanitizeIdent name)) value
-                    generateBlock ctx target body
-            | _ ->
-                generateBlock ctx (DeclareAndAssign (typeToString value.Type, sanitizeIdent name)) value
-                generateBlock ctx target body
-        else
-            if typeToString value.Type = "void" then
+    | TRecur (index, args) -> generateRecur ctx target expr index args
+
+    | TLoop (members, bodyOpt) ->
+        match bodyOpt with
+        | Some body ->
+            generateLoopGroup ctx members body
+            generateBlock ctx target body
+        | None ->
+            codegenError
+                expr.Range.Start.Line
+                "internal error: a function-body loop was emitted outside of a function body"
+
+    | TApply (callTarget, _, _, true) ->
+        let name =
+            match callTarget.Node with
+            | TIdent (n, _) -> $"'%s{n}'"
+            | _ -> "this call"
+
+        codegenError
+            expr.Range.Start.Line
+            $"the tail call to %s{name} survived loop lowering and cannot be turned into a jump"
+
+    | TLet (name, isFun, _, value, body) ->
+        // `LetRecify` only emits `ELet` for a singleton component with no
+        // self-edge, so a function-shaped binding here is always a
+        // *non-recursive* local function and needs no loop.
+        let asLocalFunction =
+            if isFun then
+                match value.Node, value.Type with
+                | TLambda (lambdaArgs, lambdaBody), TFun (argTypes, retType) ->
+                    Some(lambdaArgs, argTypes, retType, lambdaBody)
+                | _ -> None
+            else
+                None
+
+        match asLocalFunction with
+        | Some (lambdaArgs, argTypes, retType, lambdaBody) ->
+            generateLocalFunction ctx name lambdaArgs argTypes retType lambdaBody value.Type
+        | None ->
+            if isVoidType value.Type then
                 generateBlock ctx Discard value
             else
-                generateBlock ctx (DeclareAndAssign (typeToString value.Type, sanitizeIdent name)) value
-            generateBlock ctx target body
-    
+                generateBlock ctx (DeclareAndAssign(typeToString value.Type, sanitizeIdent name)) value
+
+        generateBlock ctx target body
+
     | TLetRec (bindings, body) ->
+        // A group `LoopLowering` declined to turn into a loop: bindings that are
+        // not functions and so have nothing to jump to.
         for (name, _, _, value) in bindings do
             indent ctx
             appendLine ctx $"{typeToString value.Type} {sanitizeIdent name} = default!;"
         for (name, _, _, value) in bindings do
-            generateBlock ctx (Assign (sanitizeIdent name)) value
+            generateBlock { ctx with Loop = None } (Assign(sanitizeIdent name)) value
         generateBlock ctx target body
-        
-    | TIf (cond, t, f) ->
+
+    | TLetMutable (name, value, body) ->
+        generateBlock ctx (DeclareAndAssign(typeToString value.Type, sanitizeIdent name)) value
+        generateBlock ctx target body
+
+    | TSet (name, value) ->
+        generateBlock ctx (Assign(sanitizeIdent name)) value
+        // `set!` itself yields void, so the enclosing target still has to be
+        // discharged.
         match target with
-        | DeclareAndAssign (varType, varName) ->
-            indent ctx; appendLine ctx $"{varType} {varName};"
-            indent ctx; append ctx "if ("
-            generateExpr ctx cond
-            appendLine ctx ") {"
-            withIndent ctx (fun c -> generateBlock c (Assign varName) t)
-            indent ctx; appendLine ctx "} else {"
-            withIndent ctx (fun c -> generateBlock c (Assign varName) f)
-            indent ctx; appendLine ctx "}"
-        | _ ->
-            indent ctx; append ctx "if ("
-            generateExpr ctx cond
-            appendLine ctx ") {"
-            withIndent ctx (fun c -> generateBlock c target t)
-            indent ctx; appendLine ctx "} else {"
-            withIndent ctx (fun c -> generateBlock c target f)
-            indent ctx; appendLine ctx "}"
+        | Return -> indent ctx; appendLine ctx "return;"
+        | Assign _
+        | DeclareAndAssign _
+        | Discard -> ()
+
+    | TLetTuple (names, value, body) ->
+        let tmp = freshName "__tuple"
+        generateBlock ctx (DeclareAndAssign(typeToString value.Type, tmp)) value
+        for i, name in List.indexed names do
+            indent ctx
+            appendLine ctx $"var %s{sanitizeIdent name} = %s{tmp}.Item%d{i + 1};"
+        generateBlock ctx target body
+
+    | TTryFinally (body, cleanup) ->
+        // The declaration has to live outside the `try` or the assignment would
+        // not be visible to anything following it.
+        let bodyTarget =
+            match target with
+            | DeclareAndAssign (varType, varName) ->
+                indent ctx; appendLine ctx $"%s{varType} %s{varName};"
+                Assign varName
+            | other -> other
+
+        indent ctx; appendLine ctx "try {"
+        withIndent ctx (fun c -> generateBlock c bodyTarget body)
+        indent ctx; appendLine ctx "} finally {"
+        withIndent ctx (fun c -> generateBlock c Discard cleanup)
+        indent ctx; appendLine ctx "}"
+
+    | TVecMake items ->
+        let elementTypeStr =
+            match expr.Type with
+            | TCon (_, [ elemT ]) -> typeToString elemT
+            | _ -> "object"
+
+        let builder = freshName "__vec"
+        indent ctx; appendLine ctx $"var %s{builder} = new Collections.RrbBuilder<%s{elementTypeStr}>();"
+        for item in items do
+            emitStatement ctx (fun c ->
+                indent c
+                append c $"%s{builder}.Add("
+                generateExpr c item
+                appendLine c ");")
+        emitTerminal ctx target expr.Type (fun c -> append c $"%s{builder}.ToImmutable()")
+
+    | TIf (cond, t, f) ->
+        let armTarget =
+            match target with
+            | DeclareAndAssign (varType, varName) ->
+                indent ctx; appendLine ctx $"{varType} {varName};"
+                Assign varName
+            | other -> other
+
+        emitStatement ctx (fun c ->
+            indent c
+            append c "if ("
+            generateExpr c cond
+            appendLine c ") {")
+        withIndent ctx (fun c -> generateBlock c armTarget t)
+        indent ctx; appendLine ctx "} else {"
+        withIndent ctx (fun c -> generateBlock c armTarget f)
+        indent ctx; appendLine ctx "}"
 
     | TThrow msgExpr ->
-        indent ctx; append ctx "throw new Exception("
-        generateExpr ctx msgExpr
-        appendLine ctx ");"
+        // A `throw` never reaches the declaration's use, but C# still wants the
+        // variable to exist for the statements that follow.
+        match target with
+        | DeclareAndAssign (varType, varName) ->
+            indent ctx; appendLine ctx $"%s{varType} %s{varName} = default!;"
+        | _ -> ()
 
-    | TMatch (matchTarget, clauses) ->
-        // Emitted as a switch *statement* so that arms may contain statements,
-        // produce void, or `continue` into the enclosing tail-call trampoline.
-        let live = liveClauses clauses
+        emitStatement ctx (fun c ->
+            indent c
+            append c "throw new Exception("
+            generateExpr c msgExpr
+            appendLine c ");")
 
-        // C# only treats a switch statement as exhaustive when it has a `default`
-        // section, and `case _:` is not legal syntax, so a trailing irrefutable
-        // clause is emitted as the default section instead of a case.
-        let irrefutableTail, cases =
-            match List.rev live with
-            | last :: revRest when isIrrefutable last -> Some last, List.rev revRest
-            | _ -> None, live
+    | TMatch (matchTarget, clauses) -> generateMatch ctx target expr matchTarget clauses
 
-        // `default:` carries no pattern, so an irrefutable `TPIdent` clause needs
-        // the scrutinee hoisted into a local that it can alias.
-        let needsTemp =
-            match irrefutableTail with
-            | Some c ->
-                match c.Pattern.Node with
-                | TPIdent _ -> true
-                | _ -> false
-            | None -> false
+    | _ ->
+        let isVoid = isVoidType expr.Type
+        emitStatement ctx (fun c ->
+            indent c
+            match target with
+            | Return ->
+                if isVoid then
+                    generateExpr c expr
+                    appendLine c ";"
+                    indent c; appendLine c "return;"
+                else
+                    append c "return "
+                    generateExpr c expr
+                    appendLine c ";"
+            | Assign name ->
+                if isVoid then
+                    generateExpr c expr
+                    appendLine c ";"
+                else
+                    append c $"{name} = "
+                    generateExpr c expr
+                    appendLine c ";"
+            | DeclareAndAssign (varType, varName) ->
+                if isVoid then
+                    generateExpr c expr
+                    appendLine c ";"
+                else
+                    append c $"{varType} {varName} = "
+                    generateExpr c expr
+                    appendLine c ";"
+            | Discard ->
+                generateExpr c expr
+                appendLine c ";")
 
-        let scrutinee =
-            if needsTemp then
-                let tmp = freshMatchTemp ()
-                indent ctx; append ctx $"var %s{tmp} = "
-                generateExpr ctx matchTarget
-                appendLine ctx ";"
-                Some tmp
-            else
-                None
+/// Discharges `target` with an already-formed C# expression fragment.
+and private emitTerminal (ctx: CodegenContext) (target: BlockTarget) (valueType: HMType) (emit: CodegenContext -> unit) : unit =
+    indent ctx
+    match target with
+    | Return ->
+        if isVoidType valueType then
+            emit ctx; appendLine ctx ";"
+            indent ctx; appendLine ctx "return;"
+        else
+            append ctx "return "; emit ctx; appendLine ctx ";"
+    | Assign name -> append ctx $"%s{name} = "; emit ctx; appendLine ctx ";"
+    | DeclareAndAssign (varType, varName) ->
+        append ctx $"%s{varType} %s{varName} = "; emit ctx; appendLine ctx ";"
+    | Discard -> emit ctx; appendLine ctx ";"
 
-        let emitSwitch (armTarget: BlockTarget) =
-            // A `Return` target always terminates the section itself
-            // (return / continue / throw), so a break would be unreachable.
-            let emitBreak cb =
-                match armTarget with
-                | Return -> ()
-                | _ -> indent cb; appendLine cb "break;"
+and private generateMatch
+    (ctx: CodegenContext)
+    (target: BlockTarget)
+    (expr: TypedExpr)
+    (matchTarget: TypedExpr)
+    (clauses: TMatchClause list)
+    : unit =
 
-            indent ctx; append ctx "switch ("
-            (match scrutinee with
-             | Some tmp -> append ctx tmp
-             | None -> generateExpr ctx matchTarget)
-            appendLine ctx ") {"
-            withIndent ctx (fun c ->
-                for clause in cases do
-                    indent c
-                    append c "case "
-                    generatePattern c clause.Pattern
-                    match clause.Guard with
-                    | Some guard ->
-                        append c " when "
-                        generateExpr c guard
-                    | None -> ()
-                    // Each section gets its own block so locals declared by
-                    // different arms cannot collide in the shared switch scope.
-                    appendLine c ": {"
-                    withIndent c (fun cb ->
-                        generateBlock cb armTarget clause.Body
-                        emitBreak cb)
-                    indent c; appendLine c "}"
+    // Emitted as a switch *statement* so that arms may contain statements,
+    // produce void, or jump into the enclosing loop.
+    let live = liveClauses clauses
 
+    // C# only treats a switch statement as exhaustive when it has a `default`
+    // section, and `case _:` is not legal syntax, so a trailing irrefutable
+    // clause is emitted as the default section instead of a case.
+    let irrefutableTail, cases =
+        match List.rev live with
+        | last :: revRest when isIrrefutable last -> Some last, List.rev revRest
+        | _ -> None, live
+
+    // `default:` carries no pattern, so an irrefutable `TPIdent` clause needs the
+    // scrutinee hoisted into a local that it can alias.
+    let needsTemp =
+        match irrefutableTail with
+        | Some c ->
+            match c.Pattern.Node with
+            | TPIdent _ -> true
+            | _ -> false
+        | None -> false
+
+    let scrutinee =
+        if needsTemp then
+            let tmp = freshName "__match"
+            emitStatement ctx (fun c ->
                 indent c
-                match irrefutableTail with
-                | Some clause ->
-                    appendLine c "default: {"
-                    withIndent c (fun cb ->
-                        match clause.Pattern.Node, scrutinee with
-                        | TPIdent name, Some tmp ->
-                            indent cb; appendLine cb $"var %s{sanitizeIdent name} = %s{tmp};"
-                        | _ -> ()
-                        generateBlock cb armTarget clause.Body
-                        emitBreak cb)
-                    indent c; appendLine c "}"
-                | None ->
-                    appendLine c $"default: throw new Exception(\"Match failure at line %d{expr.Range.Start.Line}\");"
-            )
-            indent ctx; appendLine ctx "}"
+                append c $"var %s{tmp} = "
+                generateExpr c matchTarget
+                appendLine c ";")
+            Some tmp
+        else
+            None
 
-        match target with
-        | DeclareAndAssign (varType, varName) ->
-            indent ctx; appendLine ctx $"{varType} {varName};"
-            emitSwitch (Assign varName)
-        | _ -> emitSwitch target
+    // A `goto case` binds to the nearest enclosing switch, so a jump from inside
+    // this one has to route through the loop's discriminant instead.
+    let inner =
+        { ctx with
+            Loop = ctx.Loop |> Option.map (fun l -> { l with NestedSwitches = l.NestedSwitches + 1 }) }
 
+    let generateGuard (c: CodegenContext) (guard: TypedExpr) =
+        if containsHoist guard then
+            codegenError
+                guard.Range.Start.Line
+                "this `match` guard needs statements to evaluate, but C# gives `case ... when` no statement position; move the test into the arm body"
+
+        append c " when "
+        generateExpr { c with Prelude = None } guard
+
+    let emitSwitch (armTarget: BlockTarget) =
+        // A `Return` target always terminates the section itself
+        // (return / continue / goto / throw), so a break would be unreachable.
+        let emitBreak cb =
+            match armTarget with
+            | Return -> ()
+            | _ -> indent cb; appendLine cb "break;"
+
+        emitStatement ctx (fun c ->
+            indent c
+            append c "switch ("
+            (match scrutinee with
+             | Some tmp -> append c tmp
+             | None -> generateExpr c matchTarget)
+            appendLine c ") {")
+
+        withIndent inner (fun c ->
+            for clause in cases do
+                indent c
+                append c "case "
+                generatePattern c clause.Pattern
+                clause.Guard |> Option.iter (generateGuard c)
+                // Each section gets its own block so locals declared by different
+                // arms cannot collide in the shared switch scope.
+                appendLine c ": {"
+                withIndent c (fun cb ->
+                    generateBlock cb armTarget clause.Body
+                    emitBreak cb)
+                indent c; appendLine c "}"
+
+            indent c
+            match irrefutableTail with
+            | Some clause ->
+                appendLine c "default: {"
+                withIndent c (fun cb ->
+                    match clause.Pattern.Node, scrutinee with
+                    | TPIdent name, Some tmp ->
+                        indent cb; appendLine cb $"var %s{sanitizeIdent name} = %s{tmp};"
+                    | _ -> ()
+                    generateBlock cb armTarget clause.Body
+                    emitBreak cb)
+                indent c; appendLine c "}"
+            | None ->
+                appendLine c $"default: throw new Exception(\"Match failure at line %d{expr.Range.Start.Line}\");")
+
+        indent ctx; appendLine ctx "}"
+
+    match target with
+    | DeclareAndAssign (varType, varName) ->
+        indent ctx; appendLine ctx $"{varType} {varName};"
+        emitSwitch (Assign varName)
+    | _ -> emitSwitch target
+
+// ---------------------------------------------------------------------------
+// Loops
+// ---------------------------------------------------------------------------
+
+and private generateRecur
+    (ctx: CodegenContext)
+    (target: BlockTarget)
+    (expr: TypedExpr)
+    (index: int)
+    (args: TypedExpr list)
+    : unit =
+
+    let loop =
+        match ctx.Loop with
+        | Some l -> l
+        | None ->
+            codegenError expr.Range.Start.Line "internal error: a loop jump was emitted with no loop in scope"
+
+    // A jump discards the enclosing function's remaining work, so it is only
+    // meaningful where that function's value is produced. Under `Assign` the
+    // variable would be left unset and the following `break` unreachable.
+    match target with
+    | Return -> ()
     | _ ->
-        let isVoid = typeToString expr.Type = "void"
+        codegenError
+            expr.Range.Start.Line
+            "this jump is not in the value position of its loop, so the loop's result would be left unset"
+
+    let member_ = loop.Members[index]
+    let slots = member_.Slots |> List.map (fst >> sanitizeIdent)
+
+    if slots.Length <> args.Length then
+        codegenError
+            expr.Range.Start.Line
+            $"internal error: jump to '%s{member_.LoopName}' carries %d{args.Length} arguments for %d{slots.Length} slots"
+
+    // The whole vector is evaluated before any slot is written: an argument may
+    // read a slot that an earlier assignment would already have overwritten.
+    let temps = args |> List.map (fun _ -> freshName "__next")
+
+    for arg, tmp in List.zip args temps do
+        emitStatement ctx (fun c ->
+            indent c
+            append c $"var %s{tmp} = "
+            generateExpr c arg
+            appendLine c ";")
+
+    for slot, tmp in List.zip slots temps do
+        indent ctx; appendLine ctx $"%s{slot} = %s{tmp};"
+
+    if loop.Merged then
+        // `goto case` is a direct jump to another switch section rather than a
+        // re-dispatch through the discriminant, so prefer it where it is legal.
+        if loop.NestedSwitches = 0 then
+            indent ctx; appendLine ctx $"goto case %d{index};"
+        else
+            indent ctx; appendLine ctx $"%s{loop.StateVar} = %d{index};"
+            indent ctx; appendLine ctx "continue;"
+    else
+        indent ctx; appendLine ctx "continue;"
+
+/// Copies each slot into a fresh per-iteration local. Done unconditionally: the
+/// JIT elides the copy when nothing captures it, whereas an escape analysis
+/// would be a correctness liability to maintain.
+and private emitIterationCopies (ctx: CodegenContext) (member_: TLoopMember) : unit =
+    for (slot, _), local in List.zip member_.Slots member_.Locals do
         indent ctx
-        match target with
-        | Return ->
-            if isVoid then
-                generateExpr ctx expr
-                appendLine ctx ";"
-                indent ctx; appendLine ctx "return;"
-            else
-                append ctx "return "
-                generateExpr ctx expr
-                appendLine ctx ";"
-        | Assign name ->
-            if isVoid then
-                generateExpr ctx expr
-                appendLine ctx ";"
-            else
-                append ctx $"{name} = "
-                generateExpr ctx expr
-                appendLine ctx ";"
-        | DeclareAndAssign (varType, varName) ->
-            if isVoid then
-                generateExpr ctx expr
-                appendLine ctx ";"
-            else
-                append ctx $"{varType} {varName} = "
-                generateExpr ctx expr
-                appendLine ctx ";"
-        | Discard ->
-            generateExpr ctx expr
-            appendLine ctx ";"
-    | _ ->
-        append ctx "/* Unimplemented expression node */"
+        appendLine ctx $"var %s{sanitizeIdent local} = %s{sanitizeIdent slot};"
+
+/// Emits `TLoop (_, None)`: the loop *is* this function's body, so the
+/// `while (true)` lives in the function's own block and its slots are the
+/// function's own parameters.
+and private generateFunctionBody (ctx: CodegenContext) (body: TypedExpr) : unit =
+    match body.Node with
+    | TLoop ([ member_ ], None) ->
+        indent ctx; appendLine ctx "while (true) {"
+        withIndent ctx (fun c ->
+            let inner =
+                { c with
+                    Loop = Some { Members = [ member_ ]; Merged = false; StateVar = ""; NestedSwitches = 0 } }
+
+            emitIterationCopies inner member_
+            generateBlock inner Return member_.Body)
+        indent ctx; appendLine ctx "}"
+    | _ -> generateBlock ctx Return body
+
+/// Emits a `letrec` group as C# local functions.
+and private generateLoopGroup (ctx: CodegenContext) (members: TLoopMember list) (body: TypedExpr) : unit =
+    let targetsOf (m: TLoopMember) = LoopLowering.recurTargetsIn m.Body
+
+    let jumpedTo =
+        members |> List.fold (fun acc m -> Set.union acc (targetsOf m)) Set.empty
+
+    // A jump between members is not a call, so a member the group's body never
+    // names is only *entered* by its siblings — it needs no callable form. The
+    // fixpoint drops members reachable solely from other unreachable ones.
+    let called =
+        let allNames = members |> List.map (fun m -> m.LoopName)
+
+        let rec fix (live: Set<string>) =
+            let referenced =
+                members
+                |> List.filter (fun m -> Set.contains m.LoopName live)
+                |> List.fold
+                    (fun acc m -> Set.union acc (LoopLowering.referencedNames m.Body))
+                    (LoopLowering.referencedNames body)
+
+            let next = allNames |> List.filter referenced.Contains |> Set.ofList
+            if next = live then live else fix next
+
+        fix (Set.ofList allNames)
+
+    let hasCrossMemberJump =
+        members
+        |> List.mapi (fun i m -> targetsOf m |> Set.exists (fun j -> j <> i))
+        |> List.exists id
+
+    if members.Length > 1 && hasCrossMemberJump then
+        generateMergedLoop ctx members called
+    else
+        for i, member_ in List.indexed members do
+            // Nothing enters this member: emitting it would be dead code, and a
+            // C# local function that is never used is a warning.
+            if Set.contains member_.LoopName called then
+                generateSingleLoop ctx members member_ (jumpedTo.Contains i)
+
+and private generateSingleLoop
+    (ctx: CodegenContext)
+    (members: TLoopMember list)
+    (member_: TLoopMember)
+    (loops: bool)
+    : unit =
+
+    // Nothing jumps here, so the slot/local split has no purpose: the parameters
+    // can simply carry the source's names.
+    let paramNames = if loops then member_.Slots |> List.map fst else member_.Locals
+
+    // A local loop introduces no type parameters of its own; it inherits the
+    // enclosing method's. That also makes polymorphic recursion unrepresentable
+    // rather than something to detect and reject.
+    indent ctx
+    append ctx (typeToString member_.RetType)
+    append ctx " "
+    append ctx (sanitizeIdent member_.LoopName)
+    append ctx "("
+    for i, ((_, slotType), paramName) in List.indexed (List.zip member_.Slots paramNames) do
+        if i > 0 then append ctx ", "
+        append ctx (typeToString slotType)
+        append ctx " "
+        append ctx (sanitizeIdent paramName)
+    appendLine ctx ") {"
+
+    withIndent ctx (fun c ->
+        let inner =
+            { c with
+                Loop = Some { Members = members; Merged = false; StateVar = ""; NestedSwitches = 0 } }
+
+        if loops then
+            indent inner; appendLine inner "while (true) {"
+            withIndent inner (fun c2 ->
+                emitIterationCopies c2 member_
+                generateBlock c2 Return member_.Body)
+            indent inner; appendLine inner "}"
+        else
+            generateBlock inner Return member_.Body)
+
+    indent ctx; appendLine ctx "}"
+
+/// Emits a mutually recursive group as one local function whose parameters are
+/// the union of the members' slots plus a state discriminant.
+///
+/// Switch sections are the right jump target: C# forbids jumping *into* a
+/// lexical block, so plain labels would force every member's body into one flat
+/// scope and require alpha-renaming all their locals to avoid collisions.
+and private generateMergedLoop (ctx: CodegenContext) (members: TLoopMember list) (called: Set<string>) : unit =
+    let first = List.head members
+    let retStr = typeToString first.RetType
+
+    // Only return types can disagree. Members cannot differ in type parameters:
+    // a local binding is never generalized, so a loop introduces none of its own
+    // (`TestFiles/probe/generic_local_rec.bjo`), and every member of a group
+    // inherits the same enclosing method's set.
+    for m in members do
+        if typeToString m.RetType <> retStr then
+            codegenError
+                m.Body.Range.Start.Line
+                $"'%s{first.LoopName}' and '%s{m.LoopName}' tail-call each other but return %s{retStr} and %s{typeToString m.RetType}; a merged loop has one return type, so split the group so that they do not tail-call each other"
+
+    let groupName = freshName "__group"
+    let stateVar = freshName "__state"
+    let allSlots = members |> List.collect (fun m -> m.Slots)
+
+    indent ctx
+    append ctx retStr
+    append ctx $" %s{groupName}(int %s{stateVar}"
+    for (slotName, slotType) in allSlots do
+        append ctx ", "
+        append ctx (typeToString slotType)
+        append ctx " "
+        append ctx (sanitizeIdent slotName)
+    appendLine ctx ") {"
+
+    withIndent ctx (fun c ->
+        indent c; appendLine c $"while (true) switch (%s{stateVar}) {{"
+        withIndent c (fun cs ->
+            for i, member_ in List.indexed members do
+                indent cs; appendLine cs $"case %d{i}: {{"
+                withIndent cs (fun cb ->
+                    let inner =
+                        { cb with
+                            Loop = Some { Members = members; Merged = true; StateVar = stateVar; NestedSwitches = 0 } }
+
+                    emitIterationCopies inner member_
+                    generateBlock inner Return member_.Body)
+                indent cs; appendLine cs "}"
+
+            indent cs
+            appendLine cs "default: throw new Exception(\"Unreachable loop state\");")
+        indent c; appendLine c "}")
+
+    indent ctx; appendLine ctx "}"
+
+    // Entry wrappers keep each member callable — and passable as a value — from
+    // outside the group. A member its siblings only ever *jump* to is reached
+    // through the discriminant instead, and needs none.
+    for i, member_ in List.indexed members do
+        if Set.contains member_.LoopName called then
+            let owned = member_.Slots |> List.map fst |> Set.ofList
+
+            indent ctx
+            append ctx retStr
+            append ctx $" %s{sanitizeIdent member_.LoopName}("
+            for j, (slotName, slotType) in List.indexed member_.Slots do
+                if j > 0 then append ctx ", "
+                append ctx (typeToString slotType)
+                append ctx " "
+                append ctx (sanitizeIdent slotName)
+            append ctx $") => %s{groupName}(%d{i}"
+            for (slotName, _) in allSlots do
+                append ctx ", "
+                append ctx (if owned.Contains slotName then sanitizeIdent slotName else "default!")
+            appendLine ctx ");"
+
+/// Emits a non-recursive local function.
+and private generateLocalFunction
+    (ctx: CodegenContext)
+    (name: string)
+    (lambdaArgs: string list)
+    (argTypes: HMType list)
+    (retType: HMType)
+    (lambdaBody: TypedExpr)
+    (funType: HMType)
+    : unit =
+
+    // `collectTypeVars` knows nothing about what is already in scope, so a local
+    // function over `Vec<'a>` inside a method generic in `'a` would emit
+    // `void f<T_a>(...)`, shadowing rather than unifying with the enclosing one.
+    let typeParams =
+        collectTypeVars funType
+        |> List.distinct
+        |> List.filter (fun v -> not (Set.contains (typeParamKey v) ctx.TypeParams))
+
+    let tyParamsStr =
+        if typeParams.IsEmpty then ""
+        else "<" + (typeParams |> List.map typeParamName |> String.concat ", ") + ">"
+
+    indent ctx
+    append ctx (typeToString retType)
+    append ctx " "
+    append ctx (sanitizeIdent name)
+    append ctx tyParamsStr
+    append ctx "("
+    for i, (argName, argType) in List.indexed (List.zip lambdaArgs argTypes) do
+        if i > 0 then append ctx ", "
+        append ctx (typeToString argType)
+        append ctx " "
+        append ctx (sanitizeIdent argName)
+    appendLine ctx ") {"
+    // A local function is a new function scope: it cannot jump into the
+    // enclosing loop.
+    withIndent { ctx with Loop = None } (fun c -> generateBlock c Return lambdaBody)
+    indent ctx
+    appendLine ctx "}"
+
+// ---------------------------------------------------------------------------
+// Declarations
+// ---------------------------------------------------------------------------
+
+/// Emits an optional parameter's default. C# requires these to be compile-time
+/// constants, so there is nowhere to put statements.
+let private generateKeywordDefault
+    (ctx: CodegenContext)
+    (ownerName: string)
+    (kwName: string)
+    (defaultExpr: TypedExpr)
+    : unit =
+
+    if containsHoist defaultExpr then
+        codegenError
+            defaultExpr.Range.Start.Line
+            $"the default for keyword parameter '#:%s{kwName}' of '%s{ownerName}' needs statements to evaluate, but C# requires an optional parameter's default to be a compile-time constant"
+
+    generateExpr { ctx with Prelude = None } defaultExpr
+
+/// Emits a parameter list shared by module functions and trait-`impl` methods.
+let private generateParameterList
+    (ctx: CodegenContext)
+    (ownerName: string)
+    (args: (string * HMType) list)
+    (kwArgs: (string * HMType * TypedExpr) list)
+    (restArg: (string * HMType) option)
+    : unit =
+
+    let mutable paramIdx = 0
+
+    for (argName, argType) in args do
+        if paramIdx > 0 then append ctx ", "
+        append ctx (typeToString argType)
+        append ctx " "
+        append ctx (sanitizeIdent argName)
+        paramIdx <- paramIdx + 1
+
+    for (kwName, kwType, kwDefault) in kwArgs do
+        if paramIdx > 0 then append ctx ", "
+        append ctx (typeToString kwType)
+        append ctx " "
+        append ctx (sanitizeIdent kwName)
+        append ctx " = "
+        generateKeywordDefault ctx ownerName kwName kwDefault
+        paramIdx <- paramIdx + 1
+
+    match restArg with
+    | Some (restName, restElemType) ->
+        if paramIdx > 0 then append ctx ", "
+        append ctx $"params %s{typeToString restElemType}[] %s{sanitizeIdent restName}"
+    | None -> ()
 
 let rec generateDecl (ctx: CodegenContext) (decl: TDecl) : unit =
     match decl with
     | TDefun (name, tyArgs, args, kwArgs, restArg, retType, body, _) ->
+        let ctx = { ctx with TypeParams = tyArgs |> List.map typeParamKey |> Set.ofList }
+
         indent ctx
         append ctx "public static "
         append ctx (typeToString retType)
         append ctx " "
         append ctx (sanitizeIdent name)
         if not tyArgs.IsEmpty then
-            let tyArgsStr = tyArgs |> List.map (fun t -> if t.StartsWith("'") then "T_" + t.Substring(1) else "T_" + t) |> String.concat ", "
+            let tyArgsStr = tyArgs |> List.map typeParamName |> String.concat ", "
             append ctx $"<%s{tyArgsStr}>"
         append ctx "("
-        let mutable paramIdx = 0
-        // Mandatory args
-        for (argName, argType) in args do
-            if paramIdx > 0 then append ctx ", "
-            append ctx (typeToString argType)
-            append ctx " "
-            append ctx (sanitizeIdent argName)
-            paramIdx <- paramIdx + 1
-        // Keyword args with defaults
-        for (kwName, kwType, kwDefault) in kwArgs do
-            if paramIdx > 0 then append ctx ", "
-            append ctx (typeToString kwType)
-            append ctx " "
-            append ctx (sanitizeIdent kwName)
-            append ctx " = "
-            generateExpr ctx kwDefault
-            paramIdx <- paramIdx + 1
-        // Rest arg (params)
-        match restArg with
-        | Some (restName, restElemType) ->
-            if paramIdx > 0 then append ctx ", "
-            append ctx $"params %s{typeToString restElemType}[] %s{sanitizeIdent restName}"
-        | None -> ()
+        generateParameterList ctx name args kwArgs restArg
         append ctx ") {\n"
-        withIndent ctx (fun c ->
-            let isTail = hasTailCall body
-            let c2 = 
-                if isTail then 
-                    let mandatoryNames = args |> List.map fst
-                    let kwNames = kwArgs |> List.map (fun (n, _, _) -> n)
-                    let restNameOpt = match restArg with Some(n, _) -> [n] | None -> []
-                    let allArgs = mandatoryNames @ kwNames @ restNameOpt |> List.map sanitizeIdent
-                    { c with TailCallArgs = Some allArgs }
-                else c
-            if isTail then
-                indent c2; appendLine c2 "while (true) {"
-                withIndent c2 (fun c3 -> generateBlock c3 Return body)
-                indent c2; appendLine c2 "}"
-            else
-                generateBlock c2 Return body
-        )
+        withIndent ctx (fun c -> generateFunctionBody c body)
         indent ctx; appendLine ctx "}"
-
-    | TDef (name, value, t, _) ->
-        indent ctx
-        append ctx "public static "
-        append ctx (typeToString t)
-        append ctx " "
-        append ctx (sanitizeIdent name)
-        append ctx " = "
-        generateExpr ctx value
-        appendLine ctx ";"
 
     | TType (defs, _) 
     | TTypeRec (defs, _) ->
         for td in defs do
             let tyArgsStr = 
                 if td.TypeArgs.IsEmpty then "" 
-                else "<" + (td.TypeArgs |> List.map (fun a -> "T_" + a.TrimStart('\'')) |> String.concat ", ") + ">"
+                else "<" + (td.TypeArgs |> List.map typeParamName |> String.concat ", ") + ">"
             match td.Kind with
             | Record fields ->
                 indent ctx
                 append ctx $"public record %s{sanitizeIdent td.Name}%s{tyArgsStr}("
                 for i, f in List.indexed fields do
                     if i > 0 then append ctx ", "
-                    append ctx (typeToString (Inference.resolveTypeAnnotation Prelude.emptyRegistry f.Type)) // Hack: we need HMType, but TypeDef has FType
-                    // Actually, TType doesn't have the fully resolved types.
-                    // Wait, we need the resolved types for record fields! 
+                    append ctx (typeToString (Inference.resolveTypeAnnotation Prelude.emptyRegistry f.Type))
                     append ctx " "
                     append ctx (sanitizeIdent f.Name)
                 appendLine ctx ");"
@@ -828,7 +1406,7 @@ let rec generateDecl (ctx: CodegenContext) (decl: TDecl) : unit =
                             append ctx $"public sealed record %s{sanitizeIdent n}("
                             for i, ft in List.indexed ftypes do
                                 if i > 0 then append ctx ", "
-                                append ctx (typeToString (Inference.resolveTypeAnnotation Prelude.emptyRegistry ft)) // FIXME: registry
+                                append ctx (typeToString (Inference.resolveTypeAnnotation Prelude.emptyRegistry ft))
                                 append ctx $" Item%d{i+1}"
                             appendLine ctx $") : %s{sanitizeIdent td.Name}%s{tyArgsStr};"
                 )
@@ -838,7 +1416,7 @@ let rec generateDecl (ctx: CodegenContext) (decl: TDecl) : unit =
 
     | TTrait (name, targetVar, assocTypes, signatures, _) ->
         indent ctx
-        let tyParams = targetVar :: assocTypes |> List.map (fun t -> "T_" + t.TrimStart('\'')) |> String.concat ", "
+        let tyParams = targetVar :: assocTypes |> List.map typeParamName |> String.concat ", "
         appendLine ctx $"public interface %s{sanitizeIdent name}<%s{tyParams}> {{"
         withIndent ctx (fun ctx ->
             for kvp in signatures do
@@ -862,21 +1440,25 @@ let rec generateDecl (ctx: CodegenContext) (decl: TDecl) : unit =
         appendLine ctx "}"
 
     | TImpl (traitName, targetType, assocMap, methods, _) ->
-        // This is tricky: we need the target type's concrete name to form the class name.
         let targetTypeName =
             match targetType with
             | TCon(n, _) -> n.Replace(".", "_")
             | _ -> "Unknown"
         let sanitizedTraitName = sanitizeIdent traitName
         let className = $"%s{sanitizedTraitName}_%s{targetTypeName}"
-        
-        let typeParams =
+
+        let typeParamVars =
             match targetType with
             | TCon(_, args) ->
-                args |> List.choose (function TVar v -> Some ("T_" + v.TrimStart('\'')) | _ -> None) |> List.distinct
+                args |> List.choose (function TVar v -> Some v | _ -> None) |> List.distinct
             | _ -> []
-        let tyParamsStr = if typeParams.IsEmpty then "" else "<" + String.concat ", " typeParams + ">"
-        
+        let tyParamsStr =
+            if typeParamVars.IsEmpty then ""
+            else "<" + (typeParamVars |> List.map typeParamName |> String.concat ", ") + ">"
+
+        // The class's own type parameters are in scope in every method body.
+        let ctx = { ctx with TypeParams = typeParamVars |> List.map typeParamKey |> Set.ofList }
+
         let targetTypeStr = typeToString targetType
         let assocArgsStr =
             assocMap
@@ -891,6 +1473,11 @@ let rec generateDecl (ctx: CodegenContext) (decl: TDecl) : unit =
             appendLine ctx $"public static readonly %s{className}%s{tyParamsStr} Instance = new();"
             for m in methods do
                 match m with
+                // The method's own `tyArgs` are dropped: a trait signature may
+                // only mention the trait's target and associated variables — one
+                // naming a variable of its own is rejected during inference
+                // (`TestFiles/probe/generic_trait_method.bjo`) — so anything here
+                // is a class type parameter, already emitted above and in scope.
                 | TDefun (n, _, args, kwArgs, restArg, retType, body, _) ->
                     indent ctx
                     append ctx "public "
@@ -898,30 +1485,9 @@ let rec generateDecl (ctx: CodegenContext) (decl: TDecl) : unit =
                     append ctx " "
                     append ctx (sanitizeIdent n)
                     append ctx "("
-                    let mutable paramIdx = 0
-                    for (argName, argType) in args do
-                        if paramIdx > 0 then append ctx ", "
-                        append ctx (typeToString argType)
-                        append ctx " "
-                        append ctx (sanitizeIdent argName)
-                        paramIdx <- paramIdx + 1
-                    for (kwName, kwType, kwDefault) in kwArgs do
-                        if paramIdx > 0 then append ctx ", "
-                        append ctx (typeToString kwType)
-                        append ctx " "
-                        append ctx (sanitizeIdent kwName)
-                        append ctx " = "
-                        generateExpr ctx kwDefault
-                        paramIdx <- paramIdx + 1
-                    match restArg with
-                    | Some (restName, restElemType) ->
-                        if paramIdx > 0 then append ctx ", "
-                        append ctx $"params %s{typeToString restElemType}[] %s{sanitizeIdent restName}"
-                    | None -> ()
+                    generateParameterList ctx n args kwArgs restArg
                     append ctx ") {\n"
-                    withIndent ctx (fun ctx ->
-                        generateBlock ctx Return body
-                    )
+                    withIndent ctx (fun c -> generateFunctionBody c body)
                     indent ctx
                     appendLine ctx "}"
                 | _ -> ()
@@ -938,9 +1504,17 @@ let rec generateDecl (ctx: CodegenContext) (decl: TDecl) : unit =
             generateDecl ctx d
 
         let innerDecls = decls |> List.filter (not << isOuterDecl)
-        
+
+        // A static field initializer cannot contain statements, so module values
+        // become `static readonly` fields assigned by a static constructor. That
+        // is the last place an IIFE would otherwise still be required.
+        let valueDefs =
+            innerDecls |> List.choose (function TDef (n, v, t, r) -> Some(n, v, t, r) | _ -> None)
+
+        let className = moduleClassName name
+
         indent ctx
-        appendLine ctx $"public static class %s{sanitizeIdent name}_Module {{"
+        appendLine ctx $"public static class %s{className} {{"
         withIndent ctx (fun ctx ->
             // Emit factory methods for union cases
             for d in decls |> List.filter isOuterDecl do
@@ -949,7 +1523,7 @@ let rec generateDecl (ctx: CodegenContext) (decl: TDecl) : unit =
                     for td in defs do
                         let tyArgsStr = 
                             if td.TypeArgs.IsEmpty then "" 
-                            else "<" + (td.TypeArgs |> List.map (fun a -> "T_" + a.TrimStart('\'')) |> String.concat ", ") + ">"
+                            else "<" + (td.TypeArgs |> List.map typeParamName |> String.concat ", ") + ">"
                         match td.Kind with
                         | Union cases ->
                             for c in cases do
@@ -962,15 +1536,30 @@ let rec generateDecl (ctx: CodegenContext) (decl: TDecl) : unit =
                                     append ctx $"public static %s{sanitizeIdent td.Name}%s{tyArgsStr} %s{sanitizeIdent n}%s{tyArgsStr}("
                                     for i, ft in List.indexed ftypes do
                                         if i > 0 then append ctx ", "
-                                        append ctx (typeToString (Inference.resolveTypeAnnotation Prelude.emptyRegistry ft)) // Need empty registry because it's just for typeToString
+                                        append ctx (typeToString (Inference.resolveTypeAnnotation Prelude.emptyRegistry ft))
                                         append ctx $" arg{i}"
                                     let argsListStr = String.concat ", " [for i in 0 .. ftypes.Length - 1 -> $"arg{i}"]
                                     appendLine ctx $") => new %s{sanitizeIdent td.Name}%s{tyArgsStr}.%s{sanitizeIdent n}(%s{argsListStr});"
                         | _ -> ()
                 | _ -> ()
 
+            for (defName, _, defType, _) in valueDefs do
+                indent ctx
+                appendLine ctx $"public static readonly %s{typeToString defType} %s{sanitizeIdent defName};"
+
             for d in innerDecls do
-                generateDecl ctx d
+                match d with
+                | TDef _ -> ()
+                | _ -> generateDecl ctx d
+
+            if not valueDefs.IsEmpty then
+                indent ctx
+                appendLine ctx $"static %s{className}() {{"
+                withIndent ctx (fun c ->
+                    for (defName, defValue, _, _) in valueDefs do
+                        generateBlock c (Assign(sanitizeIdent defName)) defValue)
+                indent ctx
+                appendLine ctx "}"
         )
         indent ctx
         appendLine ctx "}"
@@ -1011,30 +1600,41 @@ let generateProgram (exportMetadata: string) (dllDeps: string list) (decls: TDec
             )
         collect decls |> Map.ofList
 
-    let ctx = { Builder = StringBuilder(); IndentLevel = 0; UnionCases = unionCases; GlobalBindings = globalBindings; TailCallArgs = None }
+    let ctx =
+        { Builder = StringBuilder()
+          IndentLevel = 0
+          UnionCases = unionCases
+          GlobalBindings = globalBindings
+          Prelude = None
+          Loop = None
+          TypeParams = Set.empty }
+
     appendLine ctx "using System;"
     appendLine ctx "using static BjolangRuntime;"
     
-    // Emit 'using static' for all modules to allow unqualified access
-    for decl in decls do
-        match decl with
-        | TModule (name, innerDecls, _) ->
-            let isOuterDecl = function
-                | TType _ | TTypeRec _ | TTrait _ | TImpl _ -> true
-                | _ -> false
-            let innerDeclsOnly = innerDecls |> List.filter (not << isOuterDecl)
-            appendLine ctx $"using static %s{sanitizeIdent name}_Module;"
-            for inner in innerDecls do
-                match inner with
-                | TImport (specs, _) ->
-                    for spec in specs do
-                        let moduleName =
+    // Emit 'using static' for all modules to allow unqualified access. A module
+    // reached both directly and through another module's import would otherwise
+    // be named twice, which C# warns about.
+    let moduleUsings =
+        [ for decl in decls do
+            match decl with
+            | TModule (name, innerDecls, _) ->
+                yield moduleClassName name
+                for inner in innerDecls do
+                    match inner with
+                    | TImport (specs, _) ->
+                        for spec in specs do
                             match spec with
-                            | RelativePath p -> System.IO.Path.GetFileNameWithoutExtension(p).Replace(".", "_").Replace("-", "_")
-                            | ModulePath parts -> List.last parts |> fun p -> p.Replace(".", "_").Replace("-", "_")
-                        appendLine ctx $"using static %s{moduleName}_Module;"
-                | _ -> ()
-        | _ -> ()
+                            | RelativePath p ->
+                                yield moduleClassName (System.IO.Path.GetFileNameWithoutExtension p)
+                            | ModulePath parts ->
+                                yield moduleClassName (List.last parts)
+                    | _ -> ()
+            | _ -> () ]
+        |> List.distinct
+
+    for className in moduleUsings do
+        appendLine ctx $"using static %s{className};"
         
     if not (String.IsNullOrWhiteSpace(exportMetadata)) then
         let escapedMeta = exportMetadata.Replace("\"", "\\\"").Replace("\n", "\\n").Replace("\r", "")

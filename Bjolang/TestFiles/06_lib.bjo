@@ -1,4 +1,6 @@
 (export poop-on-you)
+
+(: get-name (-> string))
 (defun (get-name)
   (displayln "What is your name? ")
   (def name (read-line))
