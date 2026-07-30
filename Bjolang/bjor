@@ -1,0 +1,96 @@
+#!/bin/bash
+
+# Find the directory where bjor is located (project root)
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_FILE="$SCRIPT_DIR/Bjolang.fsproj"
+COMPILER_DLL="$SCRIPT_DIR/bin/Release/net10.0/Bjolang.dll"
+
+if [ $# -eq 0 ]; then
+    echo "Usage: bjor [options] <source.bjo> [program arguments...]"
+    echo "Run 'bjor --help' for more information."
+    exit 1
+fi
+
+# Show help if requested
+if [ "$1" = "-h" ] || [ "$1" = "--help" ]; then
+    echo "bjor - Bjolang Compiler & Runner"
+    echo ""
+    echo "Usage:"
+    echo "  bjor <file.bjo> [args...]    Compile and execute a Bjolang source file"
+    echo "  bjor --lib <file.bjo>        Compile a Bjolang source file as a library"
+    echo "  bjor -h, --help              Show this help message"
+    exit 0
+fi
+
+# Parse compiler flags vs source file
+COMPILER_ARGS=()
+FILE=""
+PROGRAM_ARGS=()
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --lib)
+            COMPILER_ARGS+=("$1")
+            shift
+            ;;
+        *)
+            if [ -z "$FILE" ]; then
+                FILE="$1"
+                shift
+                # All remaining arguments belong to the compiled program
+                PROGRAM_ARGS=("$@")
+                break
+            fi
+            ;;
+    esac
+done
+
+if [ -z "$FILE" ]; then
+    echo "Error: No source file specified."
+    echo "Usage: bjor [options] <source.bjo> [program arguments...]"
+    exit 1
+fi
+
+# Prefer .bjo file extension if available
+if [[ "$FILE" != *.bjo ]] && [ -f "${FILE}.bjo" ]; then
+    FILE="${FILE}.bjo"
+fi
+
+if [ ! -f "$FILE" ]; then
+    echo "Error: Source file '$FILE' not found."
+    exit 1
+fi
+
+EXE_FILE="${FILE%.bjo}.exe"
+DLL_FILE="${FILE%.bjo}.dll"
+
+# Ensure F# Bjolang compiler binary is up-to-date
+NEEDS_BUILD=0
+if [ ! -f "$COMPILER_DLL" ]; then
+    NEEDS_BUILD=1
+else
+    # Check if any source F# file is newer than compiler binary
+    NEWER_COUNT=$(find "$SCRIPT_DIR" -maxdepth 1 -name "*.fs" -newer "$COMPILER_DLL" 2>/dev/null | wc -l)
+    if [ "$NEWER_COUNT" -gt 0 ]; then
+        NEEDS_BUILD=1
+    fi
+fi
+
+if [ $NEEDS_BUILD -eq 1 ]; then
+    echo "Building Bjolang compiler..."
+    dotnet build "$PROJECT_FILE" -c Release -v q --nologo
+fi
+
+# Compile the file using the fast Bjolang compiler binary directly
+if ! dotnet "$COMPILER_DLL" "${COMPILER_ARGS[@]}" "$FILE"; then
+    exit $?
+fi
+
+# Execute output if an executable was created
+if [ -f "$EXE_FILE" ]; then
+    dotnet "$EXE_FILE" "${PROGRAM_ARGS[@]}"
+elif [ -f "$DLL_FILE" ]; then
+    echo "Built library: $DLL_FILE"
+else
+    echo "Compilation succeeded, but output binary was not found."
+fi

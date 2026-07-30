@@ -4,3 +4,6 @@
 [submodule "Bjolang/BjolangRuntime/Map"]
 	path = Bjolang/BjolangRuntime/Map
 	url = https://github.com/bjoli/Map
+[submodule "Bjolang/BjolangRuntime/SchemeList"]
+	path = Bjolang/BjolangRuntime/SchemeList
+	url = https://github.com/bjoli/SchemeList

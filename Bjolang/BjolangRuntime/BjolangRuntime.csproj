@@ -7,10 +7,14 @@
   <ItemGroup>
     <Compile Remove="RrbList\**" />
     <Compile Remove="Map\**" />
+    <Compile Remove="SchemeList\**" />
     <EmbeddedResource Remove="RrbList\**" />
     <EmbeddedResource Remove="Map\**" />
+    <EmbeddedResource Remove="SchemeList\**" />
     <None Remove="RrbList\**" />
     <None Remove="Map\**" />
+    <None Remove="SchemeList\**" />
     <ProjectReference Include="RrbList/src/Collections/Collections.csproj" />
+    <ProjectReference Include="SchemeList/src/SchemeList/SchemeList.csproj" />
   </ItemGroup>
 </Project>

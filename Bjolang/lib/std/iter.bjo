@@ -22,9 +22,9 @@
 
 (def/impl (Iterator (List %a))
   (type %a %a)
-  (defun (done? lst) (empty? lst))
-  (defun (current lst) (head lst))
-  (defun (next lst) (tail lst)))
+  (defun (done? lst) (list-empty? lst))
+  (defun (current lst) (list-head lst))
+  (defun (next lst) (list-tail lst)))
 
 (def/impl (Iterable (List %a))
   (type %iter (List %a))

@@ -165,9 +165,9 @@ let main argv =
                 elif mainArgKind = "list_string" then
                     $"\npublic static class BjolangEntryPoint {{\n" +
                     $"    public static void Main(string[] args) {{\n" +
-                    $"        List<string> bjoArgs = new List<string>.Nil();\n" +
+                    $"        SchemeList.SchemeList<string> bjoArgs = SchemeList.SchemeList.Empty<string>();\n" +
                     $"        for (int i = args.Length - 1; i >= 0; i--) {{\n" +
-                    $"            bjoArgs = new List<string>.Cons(args[i], bjoArgs);\n" +
+                    $"            bjoArgs = SchemeList.SchemeList.Cons(args[i], bjoArgs);\n" +
                     $"        }}\n" +
                     $"        %s{mainModuleClass}.main(bjoArgs);\n" +
                     $"    }}\n" +
@@ -184,6 +184,7 @@ let main argv =
             let projType = if isLibrary then "Library" else "Exe"
             let runtimeDllPath = Path.GetFullPath("BjolangRuntime/bin/Release/net10.0/BjolangRuntime.dll")
             let collectionsDllPath = Path.GetFullPath("BjolangRuntime/bin/Release/net10.0/Collections.dll")
+            let schemeListDllPath = Path.GetFullPath("BjolangRuntime/bin/Release/net10.0/SchemeList.dll")
             
 
             let dllReferences =
@@ -207,6 +208,9 @@ let main argv =
     <Reference Include="Collections">
       <HintPath>{collectionsDllPath}</HintPath>
     </Reference>
+    <Reference Include="SchemeList">
+      <HintPath>{schemeListDllPath}</HintPath>
+    </Reference>
 {dllReferences}
   </ItemGroup>
 </Project>"""
@@ -218,35 +222,112 @@ let main argv =
             let assemblyName = Path.GetFileNameWithoutExtension(outputFilePath)
             
             printfn "Invoking C# Compiler..."
-            let projPath = Path.Combine(tmpDir, "Project.csproj")
-            let psi = new System.Diagnostics.ProcessStartInfo(
-                FileName = "dotnet",
-                Arguments = $"build \"%s{projPath}\" -c Release -o \"%s{outDir}\" /p:AssemblyName=%s{assemblyName}",
-                UseShellExecute = false
-            )
-            let p = System.Diagnostics.Process.Start(psi)
-            p.WaitForExit()
             
-            if p.ExitCode = 0 then
-                let generatedDll = Path.Combine(outDir, assemblyName + ".dll")
-                if System.IO.File.Exists(generatedDll) && Path.GetFullPath(generatedDll) <> Path.GetFullPath(outputFilePath) then
-                    if System.IO.File.Exists(outputFilePath) then System.IO.File.Delete(outputFilePath)
-                    System.IO.File.Move(generatedDll, outputFilePath)
-                
-                let genRuntimeConfig = Path.Combine(outDir, assemblyName + ".runtimeconfig.json")
-                let outRuntimeConfig = Path.ChangeExtension(outputFilePath, ".runtimeconfig.json")
-                if System.IO.File.Exists(genRuntimeConfig) && Path.GetFullPath(genRuntimeConfig) <> Path.GetFullPath(outRuntimeConfig) then
-                    if System.IO.File.Exists(outRuntimeConfig) then System.IO.File.Delete(outRuntimeConfig)
-                    System.IO.File.Move(genRuntimeConfig, outRuntimeConfig)
+            // This does a fast compilation using the C# dll instead of the dotnet exe.
+            let tryFastCompile () =
+                try
+                    let loc = typeof<obj>.Assembly.Location
+                    let dotnetRoot = Path.GetFullPath(Path.Combine(Path.GetDirectoryName(loc), "..", "..", ".."))
+                    let sdkDir = Path.Combine(dotnetRoot, "sdk")
+                    if not (Directory.Exists(sdkDir)) then None
+                    else
+                        let cscFiles = Directory.GetFiles(sdkDir, "csc.dll", SearchOption.AllDirectories)
+                        match cscFiles |> Array.tryHead with
+                        | None -> None
+                        | Some cscDll ->
+                            let target = if isLibrary then "library" else "exe"
+                            let runtimeDir = Path.GetDirectoryName(loc)
+                            let bclRefs =
+                                Directory.GetFiles(runtimeDir, "*.dll")
+                                |> Array.map (fun p -> $"\"-r:{p}\"")
+                                |> String.concat " "
+                            
+                            let userRefs =
+                                ([runtimeDllPath; collectionsDllPath; schemeListDllPath] @ dllDeps)
+                                |> List.filter File.Exists
+                                |> List.map (fun p -> $"\"-r:{Path.GetFullPath(p)}\"")
+                                |> String.concat " "
+                                
+                            let csFile = Path.Combine(tmpDir, "Program.cs")
+                            let targetPath = Path.GetFullPath(outputFilePath)
+                            let cscArgs = $"exec \"{cscDll}\" -noconfig -nullable:enable -target:{target} -out:\"{targetPath}\" \"{csFile}\" {userRefs} {bclRefs}"
+                            let psi = System.Diagnostics.ProcessStartInfo("dotnet", cscArgs)
+                            psi.UseShellExecute <- false
+                            psi.RedirectStandardOutput <- true
+                            psi.RedirectStandardError <- true
+                            let p = System.Diagnostics.Process.Start(psi)
+                            let stdout = p.StandardOutput.ReadToEnd()
+                            let stderr = p.StandardError.ReadToEnd()
+                            p.WaitForExit()
+                            if p.ExitCode = 0 then
+                                let outputDir = Path.GetDirectoryName(targetPath)
+                                let assemblyBaseName = Path.GetFileNameWithoutExtension(targetPath)
+                                if not isLibrary then
+                                    let runtimeConfigPath = Path.ChangeExtension(targetPath, ".runtimeconfig.json")
+                                    let runtimeConfigContent = "{\n  \"runtimeOptions\": {\n    \"tfm\": \"net10.0\",\n    \"framework\": {\n      \"name\": \"Microsoft.NETCore.App\",\n      \"version\": \"10.0.0\"\n    }\n  }\n}"
+                                    File.WriteAllText(runtimeConfigPath, runtimeConfigContent)
+                                // Build deps.json so .NET can resolve our runtime DLLs
+                                let allDeps = [runtimeDllPath; collectionsDllPath; schemeListDllPath] @ dllDeps |> List.filter File.Exists
+                                let depEntries =
+                                    allDeps |> List.map (fun dllPath ->
+                                        let name = Path.GetFileNameWithoutExtension(dllPath)
+                                        let ver = "1.0.0.0"
+                                        let fileName = Path.GetFileName(dllPath)
+                                        $"\"{name}/{ver}\": {{ \"runtime\": {{ \"{fileName}\": {{ \"assemblyVersion\": \"{ver}\", \"fileVersion\": \"{ver}\" }} }} }}")
+                                let depNames =
+                                    allDeps |> List.map (fun dllPath ->
+                                        let name = Path.GetFileNameWithoutExtension(dllPath)
+                                        $"\"{name}\": \"1.0.0.0\"")
+                                let libEntries =
+                                    allDeps |> List.map (fun dllPath ->
+                                        let name = Path.GetFileNameWithoutExtension(dllPath)
+                                        $"\"{name}/1.0.0.0\": {{ \"type\": \"reference\", \"serviceable\": false, \"sha512\": \"\" }}")
+                                let depsJson = "{\n  \"runtimeTarget\": { \"name\": \".NETCoreApp,Version=v10.0\", \"signature\": \"\" },\n  \"compilationOptions\": {},\n  \"targets\": {\n    \".NETCoreApp,Version=v10.0\": {\n      \"" + assemblyBaseName + "/1.0.0\": {\n        \"dependencies\": { " + (String.concat ", " depNames) + " },\n        \"runtime\": { \"" + assemblyBaseName + ".dll\": {} }\n      },\n      " + (String.concat ",\n      " depEntries) + "\n    }\n  },\n  \"libraries\": {\n    \"" + assemblyBaseName + "/1.0.0\": { \"type\": \"project\", \"serviceable\": false, \"sha512\": \"\" },\n    " + (String.concat ",\n    " libEntries) + "\n  }\n}"
+                                let depsJsonPath = Path.ChangeExtension(targetPath, ".deps.json")
+                                File.WriteAllText(depsJsonPath, depsJson)
+                                // Copy runtime DLLs next to the output so the exe can find them
+                                for dllPath in allDeps do
+                                    let destPath = Path.Combine(outputDir, Path.GetFileName(dllPath))
+                                    try File.Copy(dllPath, destPath, true) with | _ -> ()
+                                printfn $"Successfully built %s{outputFilePath}"
+                                try Directory.Delete(tmpDir, true) with | _ -> ()
+                                Some 0
+                            else
+                                None
+                with _ -> None
 
-                printfn $"Successfully built %s{outputFilePath}"
-                try Directory.Delete(tmpDir, true) with | _ -> ()
-                0
-            else
-                printfn "C# Compilation failed."
-                // Leave tmpDir for debugging
-                printfn $"Temp directory: %s{tmpDir}"
-                1
+            match tryFastCompile () with
+            | Some code -> code
+            | None ->
+                let projPath = Path.Combine(tmpDir, "Project.csproj")
+                let psi = new System.Diagnostics.ProcessStartInfo(
+                    FileName = "dotnet",
+                    Arguments = $"build \"%s{projPath}\" -c Release -o \"%s{outDir}\" /p:AssemblyName=%s{assemblyName}",
+                    UseShellExecute = false
+                )
+                let p = System.Diagnostics.Process.Start(psi)
+                p.WaitForExit()
+                
+                if p.ExitCode = 0 then
+                    let generatedDll = Path.Combine(outDir, assemblyName + ".dll")
+                    if System.IO.File.Exists(generatedDll) && Path.GetFullPath(generatedDll) <> Path.GetFullPath(outputFilePath) then
+                        if System.IO.File.Exists(outputFilePath) then System.IO.File.Delete(outputFilePath)
+                        System.IO.File.Move(generatedDll, outputFilePath)
+                    
+                    let genRuntimeConfig = Path.Combine(outDir, assemblyName + ".runtimeconfig.json")
+                    let outRuntimeConfig = Path.ChangeExtension(outputFilePath, ".runtimeconfig.json")
+                    if System.IO.File.Exists(genRuntimeConfig) && Path.GetFullPath(genRuntimeConfig) <> Path.GetFullPath(outRuntimeConfig) then
+                        if System.IO.File.Exists(outRuntimeConfig) then System.IO.File.Delete(outRuntimeConfig)
+                        System.IO.File.Move(genRuntimeConfig, outRuntimeConfig)
+
+                    printfn $"Successfully built %s{outputFilePath}"
+                    try Directory.Delete(tmpDir, true) with | _ -> ()
+                    0
+                else
+                    printfn "C# Compilation failed."
+                    // Leave tmpDir for debugging
+                    printfn $"Temp directory: %s{tmpDir}"
+                    1
         | None ->
             printfn "Compilation failed."
             1

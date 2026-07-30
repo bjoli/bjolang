@@ -8,6 +8,7 @@ let makeFunType args ret = TFun (args, ret)
 
 let makeVecType a = TCon("Vec", [a])
 let makeVecBuilderType a = TCon("VecBuilder", [a])
+let makeListType a = TCon("List", [a])
 
 let emptyRegistry : TraitRegistry =
     { LocalTraits = Set.empty
@@ -64,6 +65,26 @@ let prelude : Env =
         ("int->string", {Scheme = Scheme([], [], makeFunType [intType] stringType); IsMutable = false })
         ("string->int", {Scheme = Scheme([], [], makeFunType [stringType] intType); IsMutable = false })
         ("string->double", {Scheme = Scheme([], [], makeFunType [stringType] doubleType); IsMutable = false })
+
+        // List constructors (builtins backed by SchemeList)
+        ("Cons", {Scheme = Scheme(["a"], [], makeFunType [TVar "a"; makeListType (TVar "a")] (makeListType (TVar "a"))); IsMutable = false })
+        ("Nil", {Scheme = Scheme(["a"], [], makeListType (TVar "a")); IsMutable = false })
+        ("cons", {Scheme = Scheme(["a"], [], makeFunType [TVar "a"; makeListType (TVar "a")] (makeListType (TVar "a"))); IsMutable = false })
+
+        // List operations
+        ("list-empty", {Scheme = Scheme(["a"], [], makeFunType [] (makeListType (TVar "a"))); IsMutable = false })
+        ("list-head", {Scheme = Scheme(["a"], [], makeFunType [makeListType (TVar "a")] (TVar "a")); IsMutable = false })
+        ("list-tail", {Scheme = Scheme(["a"], [], makeFunType [makeListType (TVar "a")] (makeListType (TVar "a"))); IsMutable = false })
+        ("list-empty?", {Scheme = Scheme(["a"], [], makeFunType [makeListType (TVar "a")] boolType); IsMutable = false })
+        ("list-length", {Scheme = Scheme(["a"], [], makeFunType [makeListType (TVar "a")] intType); IsMutable = false })
+        ("list-reverse", {Scheme = Scheme(["a"], [], makeFunType [makeListType (TVar "a")] (makeListType (TVar "a"))); IsMutable = false })
+        ("list-map", {Scheme = Scheme(["a"; "b"], [], makeFunType [makeListType (TVar "a"); makeFunType [TVar "a"] (TVar "b")] (makeListType (TVar "b"))); IsMutable = false })
+        ("list-filter", {Scheme = Scheme(["a"], [], makeFunType [makeListType (TVar "a"); makeFunType [TVar "a"] boolType] (makeListType (TVar "a"))); IsMutable = false })
+        ("list-foldl", {Scheme = Scheme(["a"; "b"], [], makeFunType [makeListType (TVar "a"); TVar "b"; makeFunType [TVar "b"; TVar "a"] (TVar "b")] (TVar "b")); IsMutable = false })
+        ("list-foldr", {Scheme = Scheme(["a"; "b"], [], makeFunType [makeListType (TVar "a"); TVar "b"; makeFunType [TVar "a"; TVar "b"] (TVar "b")] (TVar "b")); IsMutable = false })
+        ("list-for-each", {Scheme = Scheme(["a"], [], makeFunType [makeListType (TVar "a"); makeFunType [TVar "a"] voidType] voidType); IsMutable = false })
+        ("list-ref", {Scheme = Scheme(["a"], [], makeFunType [makeListType (TVar "a"); intType] (TVar "a")); IsMutable = false })
+        ("list-count", {Scheme = Scheme(["a"], [], makeFunType [makeListType (TVar "a")] intType); IsMutable = false })
 
         // Vec operations
         ("vec-empty", {Scheme = Scheme(["a"], [], makeFunType [] (makeVecType (TVar "a"))); IsMutable = false })

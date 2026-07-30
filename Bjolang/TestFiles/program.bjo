@@ -11,6 +11,6 @@
 (defun (main args)
   (def lst (Cons "a" (Cons "b" Nil)))
   (defun (f x) x)
-  (def mapped (map f lst))
+  (def mapped (list-map lst f))
   (displayln (head mapped))
   0)

@@ -1,109 +1,29 @@
 {
-  "runtimeTarget": {
-    "name": ".NETCoreApp,Version=v10.0",
-    "signature": ""
-  },
+  "runtimeTarget": { "name": ".NETCoreApp,Version=v10.0", "signature": "" },
   "compilationOptions": {},
   "targets": {
     ".NETCoreApp,Version=v10.0": {
       "09_print/1.0.0": {
-        "dependencies": {
-          "BjolangRuntime": "1.0.0.0",
-          "Collections": "0.0.1.0",
-          "core": "1.0.0.0",
-          "iter": "1.0.0.0",
-          "list": "1.0.0.0",
-          "prelude": "1.0.0.0"
-        },
-        "runtime": {
-          "09_print.dll": {}
-        }
+        "dependencies": { "BjolangRuntime": "1.0.0.0", "Collections": "1.0.0.0", "SchemeList": "1.0.0.0", "prelude": "1.0.0.0", "core": "1.0.0.0", "list": "1.0.0.0", "iter": "1.0.0.0" },
+        "runtime": { "09_print.dll": {} }
       },
-      "BjolangRuntime/1.0.0.0": {
-        "runtime": {
-          "BjolangRuntime.dll": {
-            "assemblyVersion": "1.0.0.0",
-            "fileVersion": "1.0.0.0"
-          }
-        }
-      },
-      "Collections/0.0.1.0": {
-        "runtime": {
-          "Collections.dll": {
-            "assemblyVersion": "0.0.1.0",
-            "fileVersion": "0.0.1.0"
-          }
-        }
-      },
-      "core/1.0.0.0": {
-        "runtime": {
-          "core.dll": {
-            "assemblyVersion": "1.0.0.0",
-            "fileVersion": "1.0.0.0"
-          }
-        }
-      },
-      "iter/1.0.0.0": {
-        "runtime": {
-          "iter.dll": {
-            "assemblyVersion": "1.0.0.0",
-            "fileVersion": "1.0.0.0"
-          }
-        }
-      },
-      "list/1.0.0.0": {
-        "runtime": {
-          "list.dll": {
-            "assemblyVersion": "1.0.0.0",
-            "fileVersion": "1.0.0.0"
-          }
-        }
-      },
-      "prelude/1.0.0.0": {
-        "runtime": {
-          "prelude.dll": {
-            "assemblyVersion": "1.0.0.0",
-            "fileVersion": "1.0.0.0"
-          }
-        }
-      }
+      "BjolangRuntime/1.0.0.0": { "runtime": { "BjolangRuntime.dll": { "assemblyVersion": "1.0.0.0", "fileVersion": "1.0.0.0" } } },
+      "Collections/1.0.0.0": { "runtime": { "Collections.dll": { "assemblyVersion": "1.0.0.0", "fileVersion": "1.0.0.0" } } },
+      "SchemeList/1.0.0.0": { "runtime": { "SchemeList.dll": { "assemblyVersion": "1.0.0.0", "fileVersion": "1.0.0.0" } } },
+      "prelude/1.0.0.0": { "runtime": { "prelude.dll": { "assemblyVersion": "1.0.0.0", "fileVersion": "1.0.0.0" } } },
+      "core/1.0.0.0": { "runtime": { "core.dll": { "assemblyVersion": "1.0.0.0", "fileVersion": "1.0.0.0" } } },
+      "list/1.0.0.0": { "runtime": { "list.dll": { "assemblyVersion": "1.0.0.0", "fileVersion": "1.0.0.0" } } },
+      "iter/1.0.0.0": { "runtime": { "iter.dll": { "assemblyVersion": "1.0.0.0", "fileVersion": "1.0.0.0" } } }
     }
   },
   "libraries": {
-    "09_print/1.0.0": {
-      "type": "project",
-      "serviceable": false,
-      "sha512": ""
-    },
-    "BjolangRuntime/1.0.0.0": {
-      "type": "reference",
-      "serviceable": false,
-      "sha512": ""
-    },
-    "Collections/0.0.1.0": {
-      "type": "reference",
-      "serviceable": false,
-      "sha512": ""
-    },
-    "core/1.0.0.0": {
-      "type": "reference",
-      "serviceable": false,
-      "sha512": ""
-    },
-    "iter/1.0.0.0": {
-      "type": "reference",
-      "serviceable": false,
-      "sha512": ""
-    },
-    "list/1.0.0.0": {
-      "type": "reference",
-      "serviceable": false,
-      "sha512": ""
-    },
-    "prelude/1.0.0.0": {
-      "type": "reference",
-      "serviceable": false,
-      "sha512": ""
-    }
+    "09_print/1.0.0": { "type": "project", "serviceable": false, "sha512": "" },
+    "BjolangRuntime/1.0.0.0": { "type": "reference", "serviceable": false, "sha512": "" },
+    "Collections/1.0.0.0": { "type": "reference", "serviceable": false, "sha512": "" },
+    "SchemeList/1.0.0.0": { "type": "reference", "serviceable": false, "sha512": "" },
+    "prelude/1.0.0.0": { "type": "reference", "serviceable": false, "sha512": "" },
+    "core/1.0.0.0": { "type": "reference", "serviceable": false, "sha512": "" },
+    "list/1.0.0.0": { "type": "reference", "serviceable": false, "sha512": "" },
+    "iter/1.0.0.0": { "type": "reference", "serviceable": false, "sha512": "" }
   }
 }

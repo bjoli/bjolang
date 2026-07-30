@@ -78,6 +78,7 @@ let mapPrimitiveType (name: string) =
     | "System.Object" -> "object"
     | "Vec" -> "Collections.RrbList"
     | "VecBuilder" -> "Collections.RrbBuilder"
+    | "List" -> "SchemeList.SchemeList"
     | _ -> name
 
 let sanitizeIdent (s: string) =
@@ -281,10 +282,26 @@ let rec generatePattern (ctx: CodegenContext) (pat: TypedPattern) : unit =
     | TPInt value -> append ctx value
     | TPString value -> append ctx $"\"%s{escapeStringLiteral value}\""
     | TPConstruct (name, args) ->
+        // Cons/Nil are now builtins backed by SchemeList.Cons<T>/SchemeList.Nil<T>,
+        // not union cases, so they need special-case pattern generation.
         let caseTypeStr =
-            match Map.tryFind name ctx.UnionCases with
-            | Some info -> $"{getUnionTypeString pat.Type info.ParentTypeName}.{sanitizeIdent name}"
-            | None -> $"{typeToString pat.Type}.{sanitizeIdent name}"
+            match name with
+            | "Cons" ->
+                let elemTypeStr =
+                    match pat.Type with
+                    | TCon (_, [elemT]) -> typeToString elemT
+                    | _ -> "object"
+                $"SchemeList.Cons<%s{elemTypeStr}>"
+            | "Nil" ->
+                let elemTypeStr =
+                    match pat.Type with
+                    | TCon (_, [elemT]) -> typeToString elemT
+                    | _ -> "object"
+                $"SchemeList.Nil<%s{elemTypeStr}>"
+            | _ ->
+                match Map.tryFind name ctx.UnionCases with
+                | Some info -> $"{getUnionTypeString pat.Type info.ParentTypeName}.{sanitizeIdent name}"
+                | None -> $"{typeToString pat.Type}.{sanitizeIdent name}"
         append ctx caseTypeStr
         // A positional record with an empty parameter list gets no Deconstruct
         // method, so nullary cases must be emitted as a bare type pattern.
@@ -295,19 +312,26 @@ let rec generatePattern (ctx: CodegenContext) (pat: TypedPattern) : unit =
                 generatePattern ctx argPat
             append ctx ")"
     | TPList (items, tailOpt) ->
-        // Lists are the ordinary Cons/Nil union rather than a C# collection type,
-        // so desugar into nested constructor patterns.
-        let rec desugar elements : TypedPattern =
+        // Lists are backed by SchemeList.SchemeList<T>. Desugar into nested
+        // type patterns against the runtime Cons<T>/Nil<T> classes.
+        let elemTypeStr =
+            match pat.Type with
+            | TCon (_, [elemT]) -> typeToString elemT
+            | _ -> "object"
+        let listTypeStr = typeToString pat.Type
+        let rec desugar elements =
             match elements with
             | [] ->
                 match tailOpt with
-                | Some t -> t
-                | None -> { Type = pat.Type; Range = pat.Range; Node = TPConstruct("Nil", []) }
+                | Some t -> generatePattern ctx t
+                | None -> append ctx $"SchemeList.Nil<%s{elemTypeStr}>"
             | head :: rest ->
-                { Type = pat.Type
-                  Range = pat.Range
-                  Node = TPConstruct("Cons", [ head; desugar rest ]) }
-        generatePattern ctx (desugar items)
+                append ctx $"SchemeList.Cons<%s{elemTypeStr}>("
+                generatePattern ctx head
+                append ctx ", "
+                desugar rest
+                append ctx ")"
+        desugar items
     | TPAs _ ->
         failwithf $"'as' patterns have no C# equivalent (line %d{pat.Range.Start.Line})"
     | TPApp _ ->
@@ -332,6 +356,25 @@ let rec generateExpr (ctx: CodegenContext) (expr: TypedExpr) : unit =
     | TKeyword k -> append ctx $"\"%s{k}\""
     | TSymbol s -> append ctx $"\"%s{s}\""
     | TIdent (name, _) ->
+        // Cons/Nil are now builtins backed by SchemeList, not union cases.
+        match name with
+        | "Nil" ->
+            let elemTypeStr =
+                match expr.Type with
+                | TCon (_, [elemT]) -> typeToString elemT
+                | _ -> "object"
+            append ctx $"Nil<%s{elemTypeStr}>()"
+        | "Cons" ->
+            match expr.Type with
+            | TFun (argTypes, _) ->
+                // First-class function value: emit a lambda.
+                let argsList = [for i in 0 .. argTypes.Length - 1 -> $"arg{i}"]
+                let argsStr = String.concat ", " argsList
+                append ctx $"({argsStr}) => Cons({argsStr})"
+            | _ ->
+                // Should not happen (Cons always has function type), but safe fallback
+                append ctx "Cons"
+        | _ ->
         match Map.tryFind name ctx.UnionCases with
         | Some info ->
             let typeStr = getUnionTypeString expr.Type info.ParentTypeName
@@ -455,14 +498,17 @@ let rec generateExpr (ctx: CodegenContext) (expr: TypedExpr) : unit =
         append ctx "))"
 
     | TListMake items ->
-        // Desugar to nested Cons calls.
-        let listTypeStr = typeToString expr.Type
+        // Desugar to nested SchemeList.Cons / SchemeList.Empty calls.
+        let elemTypeStr =
+            match expr.Type with
+            | TCon (_, [elemT]) -> typeToString elemT
+            | _ -> "object"
         let emitters = prepareOperands ctx items
         let rec emitCons remaining =
             match remaining with
-            | [] -> append ctx $"new {listTypeStr}.Nil()"
+            | [] -> append ctx $"SchemeList.SchemeList.Empty<%s{elemTypeStr}>()"
             | emit :: rest ->
-                append ctx $"new {listTypeStr}.Cons("
+                append ctx "SchemeList.SchemeList.Cons("
                 emit ctx
                 append ctx ", "
                 emitCons rest

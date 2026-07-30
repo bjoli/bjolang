@@ -173,5 +173,55 @@ public static class BjolangRuntime {
         public Option(T value) { IsSome = true; Value = value; }
         public static implicit operator Option<T>(T value) => new Option<T>(value);
     }
+
+    // --- List (SchemeList) Wrappers ---
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static SchemeList.SchemeList<T> listsubempty<T>() => SchemeList.SchemeList.Empty<T>();
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static SchemeList.SchemeList<T> cons<T>(T car, SchemeList.SchemeList<T> cdr) => SchemeList.SchemeList.Cons(car, cdr);
+
+    // Capital-C aliases for backward compatibility with Bjolang's Cons/Nil constructors
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static SchemeList.SchemeList<T> Cons<T>(T car, SchemeList.SchemeList<T> cdr) => SchemeList.SchemeList.Cons(car, cdr);
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static SchemeList.SchemeList<T> Nil<T>() => SchemeList.SchemeList.Empty<T>();
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static T listsubhead<T>(SchemeList.SchemeList<T> list) => SchemeList.SchemeList.Head(list);
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static SchemeList.SchemeList<T> listsubtail<T>(SchemeList.SchemeList<T> list) => SchemeList.SchemeList.Tail(list);
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static bool listsubempty_QMARK<T>(SchemeList.SchemeList<T> list) => SchemeList.SchemeList.IsEmpty(list);
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static int listsublength<T>(SchemeList.SchemeList<T> list) => SchemeList.SchemeList.Length(list);
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static SchemeList.SchemeList<T> listsubreverse<T>(SchemeList.SchemeList<T> list) => SchemeList.SchemeList.Reverse(list);
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static SchemeList.SchemeList<U> listsubmap<T, U>(SchemeList.SchemeList<T> list, Func<T, U> selector) => SchemeList.SchemeList.Map(list, selector);
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static SchemeList.SchemeList<T> listsubfilter<T>(SchemeList.SchemeList<T> list, Func<T, bool> predicate) => SchemeList.SchemeList.Filter(list, predicate);
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static TState listsubfoldl<T, TState>(SchemeList.SchemeList<T> list, TState initial, Func<TState, T, TState> folder) => SchemeList.SchemeList.Fold(list, initial, folder);
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static TState listsubfoldr<T, TState>(SchemeList.SchemeList<T> list, TState initial, Func<T, TState, TState> folder) => SchemeList.SchemeList.FoldRight(list, initial, folder);
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static void listsubforsubeach<T>(SchemeList.SchemeList<T> list, Action<T> action) => SchemeList.SchemeList.ForEach(list, action);
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static T listsubref<T>(SchemeList.SchemeList<T> list, int index) => SchemeList.SchemeList.Item(list, index);
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static int listsubcount<T>(SchemeList.SchemeList<T> list) => SchemeList.SchemeList.Count(list);
 }
 
