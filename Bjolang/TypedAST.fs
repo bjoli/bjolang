@@ -90,6 +90,7 @@ and TPatternNode =
     | TPString of string
     | TPIdent of string
     | TPList of TypedPattern list * TypedPattern option
+    | TPVec of TypedPattern list * TypedPattern option
     | TPConstruct of string * TypedPattern list
     | TPApp of TypedExpr * TypedPattern
     | TPAs of TypedPattern * string

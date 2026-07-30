@@ -48,6 +48,7 @@ type Pattern =
     | PInt of string * Range
     | PString of string * Range
     | PList of Pattern list * Pattern option * Range // (items, optional tail, range)
+    | PVec of Pattern list * Pattern option * Range // (items, optional tail, range)
     | PConstruct of string * Pattern list * Range
 
 and Expr =
@@ -117,25 +118,37 @@ let rec parsePattern (s: SExpr) : Pattern =
     | SAtom { Token = NumberLit n } -> PInt(n, r)
     | SAtom { Token = StringLit str } -> PString(str, r)
 
-    // Special handling for List patterns and the spread operator
+    // Special handling for List/Vec patterns and the spread operator
     | SList(SAtom { Token = Symbol "List" } :: args, _) ->
-        let rec processListArgs acc items =
-            match items with
-            | [] -> (List.rev acc, None)
-            // Matches `c ...` at the end of the list
-            | [ tailItem; SAtom { Token = Spread } ] -> (List.rev acc, Some(parsePattern tailItem))
-            // Fails if spread is used incorrectly (e.g., in the middle of the list)
-            | SAtom { Token = Spread } :: _ -> failwithf $"Invalid use of spread operator at line %d{r.Start.Line}"
-            | head :: tail -> processListArgs (parsePattern head :: acc) tail
-
-        let elements, tail = processListArgs [] args
+        let elements, tail = parseSpreadArgs r args
         PList(elements, tail, r)
+
+    // `(Vec a b c ...)` and the bracket literal form `[a b c ...]`, which the
+    // reader rewrites to `(vec-literal a b c ...)`.
+    | SList(SAtom { Token = Symbol("Vec" | "vec-literal") } :: args, _) ->
+        let elements, tail = parseSpreadArgs r args
+        PVec(elements, tail, r)
 
     | SList(SAtom { Token = Symbol name } :: args, _) -> PConstruct(name, List.map parsePattern args, r)
 
     | SList([], _) -> PList([], None, r) // Empty list pattern
 
     | _ -> failwithf $"Invalid pattern at line %d{r.Start.Line}"
+
+/// Splits the arguments of a sequence pattern into its fixed leading elements
+/// plus an optional trailing rest pattern introduced by `...`.
+/// For example `a b c ...` yields ([a; b], Some c), binding `c` to the rest.
+and parseSpreadArgs (r: Range) (args: SExpr list) : Pattern list * Pattern option =
+    let rec go acc items =
+        match items with
+        | [] -> (List.rev acc, None)
+        // Matches `c ...` at the end of the sequence
+        | [ tailItem; SAtom { Token = Spread } ] -> (List.rev acc, Some(parsePattern tailItem))
+        // Fails if spread is used incorrectly (e.g., in the middle of the sequence)
+        | SAtom { Token = Spread } :: _ -> failwithf $"Invalid use of spread operator at line %d{r.Start.Line}"
+        | head :: tail -> go (parsePattern head :: acc) tail
+
+    go [] args
 
 let parseArrowType (items: SExpr list) (r: Range) : FType =
     if items.IsEmpty then failwithf $"Arrow type must have at least a return type at line %d{r.Start.Line}"

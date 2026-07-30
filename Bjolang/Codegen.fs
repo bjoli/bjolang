@@ -332,6 +332,21 @@ let rec generatePattern (ctx: CodegenContext) (pat: TypedPattern) : unit =
                 desugar rest
                 append ctx ")"
         desugar items
+    | TPVec (items, tailOpt) ->
+        // Vec is backed by Collections.RrbList<T>, which is countable, indexable
+        // and sliceable, so C# list patterns apply directly. A rest pattern
+        // becomes a slice pattern, whose value Slice() hands back as an RrbList<T>.
+        append ctx "["
+        for i, item in List.indexed items do
+            if i > 0 then append ctx ", "
+            generatePattern ctx item
+        match tailOpt with
+        | Some t ->
+            if not items.IsEmpty then append ctx ", "
+            append ctx ".. "
+            generatePattern ctx t
+        | None -> ()
+        append ctx "]"
     | TPAs _ ->
         failwithf $"'as' patterns have no C# equivalent (line %d{pat.Range.Start.Line})"
     | TPApp _ ->

@@ -130,6 +130,31 @@ let rec checkPattern (env: Env) (expectedType: HMType) (pat: Pattern) : TypedPat
           Range = r
           Node = TPList(typedItems, typedTail) },
         currentEnv
+    | PVec(items, tailOpt, r) ->
+        let elemType = freshMeta ()
+        let vecType = TCon("Vec", [ elemType ])
+        unify env.Registry expectedType vecType
+        let mutable currentEnv = Map.empty
+
+        let typedItems =
+            items
+            |> List.map (fun p ->
+                let tp, env = checkPattern env elemType p
+                currentEnv <- Map.fold (fun acc k v -> Map.add k v acc) currentEnv env
+                tp)
+
+        // A rest pattern captures the remaining elements, so it is itself a Vec.
+        let typedTail =
+            tailOpt
+            |> Option.map (fun p ->
+                let tp, env = checkPattern env vecType p
+                currentEnv <- Map.fold (fun acc k v -> Map.add k v acc) currentEnv env
+                tp)
+
+        { Type = vecType
+          Range = r
+          Node = TPVec(typedItems, typedTail) },
+        currentEnv
 
 let private typeNameMap =
     Map.ofList [

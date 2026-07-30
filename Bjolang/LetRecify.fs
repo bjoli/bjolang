@@ -18,7 +18,8 @@ let rec patternBoundNames (pat: Pattern) : string list =
     | PIdent(name, _) -> [ name ]
     | PInt _
     | PString _ -> []
-    | PList(items, tail, _) ->
+    | PList(items, tail, _)
+    | PVec(items, tail, _) ->
         let itemNames = List.collect patternBoundNames items
         let tailNames = tail |> Option.map patternBoundNames |> Option.defaultValue []
         itemNames @ tailNames
