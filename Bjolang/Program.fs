@@ -85,6 +85,7 @@ let main argv =
             let rec extractExports (decls: TypedAST.TDecl list) =
                 decls |> List.choose (function 
                     | TypedAST.TExport(names, _) -> Some names 
+                    | TypedAST.TReExport(names, _) -> Some names
                     | TypedAST.TModule(_, innerDecls, _) -> Some (extractExports innerDecls |> List.concat)
                     | _ -> None)
             

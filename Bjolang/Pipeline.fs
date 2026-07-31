@@ -97,7 +97,7 @@ let wrapInModule (moduleName: string) (decls: Decl list) : Decl list =
                 match d with
                 | DDef(_, _, r) | DDefun(_, _, _, r) | DDefTuple(_, _, r) | DDefMutable(_, _, r)
                 | DSignature(_, _, _, r) | DType(_, r) | DTypeRec(_, r) | DTrait(_, _, _, _, r) | DImpl(_, _, _, _, r)
-                | DModule(_, _, r) | DImport(_, r) | DExport(_, r) | DExtern(_, _, _, r) -> r
+                | DModule(_, _, r) | DImport(_, r) | DExport(_, r) | DReExport(_, r) | DExtern(_, _, _, r) -> r
             unionLexerRanges (getRange first) (getRange last)
     
     [ DModule(moduleName, decls, r) ]

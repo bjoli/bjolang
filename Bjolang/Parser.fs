@@ -91,6 +91,10 @@ type Decl =
     | DSignature of string * FType * (string * string) list * Range
     | DImport of ImportSpec list * Range
     | DExport of string list * Range
+    // Re-exports bindings this module imported from elsewhere. Unlike `export`,
+    // the names are not required to have a signature in this module — they
+    // already have one where they were defined.
+    | DReExport of string list * Range
     | DModule of string * Decl list * Range
     | DDef of string * Expr * Range
     | DDefTuple of string list * Expr * Range
@@ -601,6 +605,15 @@ let rec parseDecl (s: SExpr) : Decl =
                 | _ -> failwithf $"Invalid export item at line %d{r.Start.Line}")
 
         DExport(exportNames, r)
+
+    | SList(SAtom { Token = Symbol "re-export" } :: reExports, _) ->
+        let reExportNames =
+            reExports
+            |> List.map (function
+                | SAtom { Token = Symbol e } -> e
+                | _ -> failwithf $"Invalid re-export item at line %d{r.Start.Line}")
+
+        DReExport(reExportNames, r)
 
     | SList(SAtom { Token = Symbol "module" } :: SAtom { Token = Symbol name } :: body, _) ->
         DModule(name, List.map parseDecl body, r)

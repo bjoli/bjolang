@@ -1022,6 +1022,21 @@ let rec checkDecl (env: Env) (sigs: Map<string, HMType * FType option * (string 
 
     | DImport(paths, r) -> env, sigs, [ TImport(paths, r) ]
     | DExport(names, r) -> env, sigs, [ TExport(names, r) ]
+
+    | DReExport(names, r) ->
+        // A re-exported name was defined elsewhere and already carries a
+        // signature from there, so the local-signature rule `export` enforces
+        // cannot apply. What can be checked is that the name is actually in
+        // scope here — otherwise the module would advertise something it does
+        // not have.
+        for name in names do
+            if not (Map.containsKey name env.Bindings) then
+                failwithf
+                    "Re-export Error: '%s' is not in scope at line %d. A re-exported name must be imported by this module."
+                    name
+                    r.Start.Line
+
+        env, sigs, [ TReExport(names, r) ]
     | DType(typeDefs, r) -> registerTypeDefs false typeDefs env, sigs, [ TType(typeDefs, r) ]
     | DExtern(name, ftype, constraintPairs, r) ->
         let t = resolveTypeAnnotation env.Registry ftype

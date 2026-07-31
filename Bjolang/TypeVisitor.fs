@@ -140,6 +140,7 @@ let rec mapDecl (f: TypedExpr -> TypedExpr) (decl: TDecl) : TDecl =
         TImpl(traitName, targetType, assoc, methods |> List.map (mapDecl f), r)
     | TImport _
     | TExport _
+    | TReExport _
     | TType _
     | TTypeRec _
     | TTrait _

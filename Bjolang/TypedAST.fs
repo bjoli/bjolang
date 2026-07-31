@@ -162,6 +162,7 @@ and TMatchClause =
 type TDecl =
     | TImport of ImportSpec list * Range
     | TExport of string list * Range
+    | TReExport of string list * Range
     | TModule of string * TDecl list * Range
     | TDef of string * TypedExpr * HMType * Range
     | TDefTuple of string list * TypedExpr * HMType * Range
