@@ -135,6 +135,17 @@ let rec typeToString (hm: HMType) : string =
 
 let private isVoidType (t: HMType) = typeToString t = "void"
 
+/// The C# element type of a single-argument container type such as the runtime
+/// `SchemeList<T>` or `Vec<T>`.
+///
+/// Falls back to `object` when the type did not resolve to a one-argument
+/// constructor, which keeps the emitted C# well-formed rather than propagating
+/// an inference failure into codegen.
+let private elementTypeString (t: HMType) =
+    match t with
+    | TCon (_, [ elemT ]) -> typeToString elemT
+    | _ -> "object"
+
 /// Every type variable mentioned by `t`, in source spelling.
 let rec collectTypeVars (t: HMType) : string list =
     match t with
@@ -287,16 +298,10 @@ let rec generatePattern (ctx: CodegenContext) (pat: TypedPattern) : unit =
         let caseTypeStr =
             match name with
             | "Cons" ->
-                let elemTypeStr =
-                    match pat.Type with
-                    | TCon (_, [elemT]) -> typeToString elemT
-                    | _ -> "object"
+                let elemTypeStr = elementTypeString pat.Type
                 $"SchemeList.Cons<%s{elemTypeStr}>"
             | "Nil" ->
-                let elemTypeStr =
-                    match pat.Type with
-                    | TCon (_, [elemT]) -> typeToString elemT
-                    | _ -> "object"
+                let elemTypeStr = elementTypeString pat.Type
                 $"SchemeList.Nil<%s{elemTypeStr}>"
             | _ ->
                 match Map.tryFind name ctx.UnionCases with
@@ -314,10 +319,7 @@ let rec generatePattern (ctx: CodegenContext) (pat: TypedPattern) : unit =
     | TPList (items, tailOpt) ->
         // Lists are backed by SchemeList.SchemeList<T>. Desugar into nested
         // type patterns against the runtime Cons<T>/Nil<T> classes.
-        let elemTypeStr =
-            match pat.Type with
-            | TCon (_, [elemT]) -> typeToString elemT
-            | _ -> "object"
+        let elemTypeStr = elementTypeString pat.Type
         let listTypeStr = typeToString pat.Type
         let rec desugar elements =
             match elements with
@@ -374,10 +376,7 @@ let rec generateExpr (ctx: CodegenContext) (expr: TypedExpr) : unit =
         // Cons/Nil are now builtins backed by SchemeList, not union cases.
         match name with
         | "Nil" ->
-            let elemTypeStr =
-                match expr.Type with
-                | TCon (_, [elemT]) -> typeToString elemT
-                | _ -> "object"
+            let elemTypeStr = elementTypeString expr.Type
             append ctx $"Nil<%s{elemTypeStr}>()"
         | "Cons" ->
             match expr.Type with
@@ -514,10 +513,7 @@ let rec generateExpr (ctx: CodegenContext) (expr: TypedExpr) : unit =
 
     | TListMake items ->
         // Desugar to nested SchemeList.Cons / SchemeList.Empty calls.
-        let elemTypeStr =
-            match expr.Type with
-            | TCon (_, [elemT]) -> typeToString elemT
-            | _ -> "object"
+        let elemTypeStr = elementTypeString expr.Type
         let emitters = prepareOperands ctx items
         let rec emitCons remaining =
             match remaining with
@@ -862,10 +858,7 @@ and generateBlock (ctx: CodegenContext) (target: BlockTarget) (expr: TypedExpr) 
         indent ctx; appendLine ctx "}"
 
     | TVecMake items ->
-        let elementTypeStr =
-            match expr.Type with
-            | TCon (_, [ elemT ]) -> typeToString elemT
-            | _ -> "object"
+        let elementTypeStr = elementTypeString expr.Type
 
         let builder = freshName "__vec"
         indent ctx; appendLine ctx $"var %s{builder} = new Collections.RrbBuilder<%s{elementTypeStr}>();"
@@ -911,53 +904,37 @@ and generateBlock (ctx: CodegenContext) (target: BlockTarget) (expr: TypedExpr) 
 
     | TMatch (matchTarget, clauses) -> generateMatch ctx target expr matchTarget clauses
 
-    | _ ->
-        let isVoid = isVoidType expr.Type
-        emitStatement ctx (fun c ->
-            indent c
-            match target with
-            | Return ->
-                if isVoid then
-                    generateExpr c expr
-                    appendLine c ";"
-                    indent c; appendLine c "return;"
-                else
-                    append c "return "
-                    generateExpr c expr
-                    appendLine c ";"
-            | Assign name ->
-                if isVoid then
-                    generateExpr c expr
-                    appendLine c ";"
-                else
-                    append c $"{name} = "
-                    generateExpr c expr
-                    appendLine c ";"
-            | DeclareAndAssign (varType, varName) ->
-                if isVoid then
-                    generateExpr c expr
-                    appendLine c ";"
-                else
-                    append c $"{varType} {varName} = "
-                    generateExpr c expr
-                    appendLine c ";"
-            | Discard ->
-                generateExpr c expr
-                appendLine c ";")
+    // Any node with no statement shape of its own: emit it as a C# expression
+    // and let `emitTerminal` discharge the target. The `emitStatement` wrapper
+    // supplies the hoisting buffer that `generateExpr` may need.
+    | _ -> emitStatement ctx (fun c -> emitTerminal c target expr.Type (fun c2 -> generateExpr c2 expr))
 
 /// Discharges `target` with an already-formed C# expression fragment.
+///
+/// A void-typed value cannot be assigned or returned in C#, so under every
+/// target that would bind it the value is emitted as a bare statement instead.
+/// `Return` additionally needs a following `return;`, since the target still has
+/// to be discharged.
 and private emitTerminal (ctx: CodegenContext) (target: BlockTarget) (valueType: HMType) (emit: CodegenContext -> unit) : unit =
+    let isVoid = isVoidType valueType
     indent ctx
     match target with
     | Return ->
-        if isVoidType valueType then
+        if isVoid then
             emit ctx; appendLine ctx ";"
             indent ctx; appendLine ctx "return;"
         else
             append ctx "return "; emit ctx; appendLine ctx ";"
-    | Assign name -> append ctx $"%s{name} = "; emit ctx; appendLine ctx ";"
+    | Assign name ->
+        if isVoid then
+            emit ctx; appendLine ctx ";"
+        else
+            append ctx $"%s{name} = "; emit ctx; appendLine ctx ";"
     | DeclareAndAssign (varType, varName) ->
-        append ctx $"%s{varType} %s{varName} = "; emit ctx; appendLine ctx ";"
+        if isVoid then
+            emit ctx; appendLine ctx ";"
+        else
+            append ctx $"%s{varType} %s{varName} = "; emit ctx; appendLine ctx ";"
     | Discard -> emit ctx; appendLine ctx ";"
 
 and private generateMatch

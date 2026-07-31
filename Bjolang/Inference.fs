@@ -209,6 +209,30 @@ let rec resolveTypeAnnotation (registry: TraitRegistry) (ptype: FType) : HMType 
         | None -> TCon(name, resolvedArgs)
 
 
+/// Instantiates a record type with fresh type variables.
+///
+/// The record type and its field types have to be instantiated under the *same*
+/// substitution, or a field's type variable would be unrelated to the one in the
+/// record type it came from. Returns the instantiated record type, the declared
+/// fields as written, and the field types under that substitution.
+let private instantiateRecord
+    (registry: TraitRegistry)
+    (recordTypeName: string)
+    : HMType * (string * HMType) list * Map<string, HMType> =
+
+    let tArgs, expectedFields = Map.find recordTypeName registry.Records
+    let tArgsInst = tArgs |> List.map (fun a -> a.TrimStart('\''))
+    let recordScheme = Scheme(tArgsInst, [], TCon(recordTypeName, tArgsInst |> List.map TVar))
+
+    let instantiatedRecordType, freshVars, _ = instantiate registry recordScheme
+    let fieldSubst = List.zip tArgsInst freshVars |> Map.ofList
+
+    let expectedFieldsInstantiated =
+        expectedFields |> List.map (fun (n, t) -> n, applyTypeSubst fieldSubst t) |> Map.ofList
+
+    instantiatedRecordType, expectedFields, expectedFieldsInstantiated
+
+
 let rec infer (env: Env) (expr: Expr) : HMType * TypedExpr =
     match expr with
     | EInt(value, r) ->
@@ -656,15 +680,8 @@ let rec infer (env: Env) (expr: Expr) : HMType * TypedExpr =
             | Some tName -> tName
             | None -> failwithf $"Type Error: Unknown record field '%s{firstFieldName}' at line %d{r.Start.Line}"
 
-        let tArgs, expectedFields = Map.find recordTypeName env.Registry.Records
-        let tArgsInst = tArgs |> List.map (fun a -> a.TrimStart('\''))
-        let recordScheme = Scheme(tArgsInst, [], TCon(recordTypeName, tArgsInst |> List.map TVar))
-        
-        // Instantiate the record type and its fields
-        let instantiatedRecordType, freshVars, _ = instantiate env.Registry recordScheme
-        let fieldSubst = List.zip tArgsInst freshVars |> Map.ofList
-        let expectedFieldsInstantiated = 
-            expectedFields |> List.map (fun (n, t) -> n, applyTypeSubst fieldSubst t) |> Map.ofList
+        let instantiatedRecordType, expectedFields, expectedFieldsInstantiated =
+            instantiateRecord env.Registry recordTypeName
 
         // Check each provided field against the instantiated expected field
         let fieldExprs = 
@@ -690,14 +707,8 @@ let rec infer (env: Env) (expr: Expr) : HMType * TypedExpr =
             | Some tName -> tName
             | None -> failwithf $"Type Error: Unknown record field '%s{field}' at line %d{r.Start.Line}"
 
-        let tArgs, expectedFields = Map.find recordTypeName env.Registry.Records
-        let tArgsInst = tArgs |> List.map (fun a -> a.TrimStart('\''))
-        let recordScheme = Scheme(tArgsInst, [], TCon(recordTypeName, tArgsInst |> List.map TVar))
-
-        let instantiatedRecordType, freshVars, _ = instantiate env.Registry recordScheme
-        let fieldSubst = List.zip tArgsInst freshVars |> Map.ofList
-        let expectedFieldsInstantiated = 
-            expectedFields |> List.map (fun (n, t) -> n, applyTypeSubst fieldSubst t) |> Map.ofList
+        let instantiatedRecordType, _, expectedFieldsInstantiated =
+            instantiateRecord env.Registry recordTypeName
 
         unify env.Registry targetType instantiatedRecordType
 
@@ -722,14 +733,8 @@ let rec infer (env: Env) (expr: Expr) : HMType * TypedExpr =
             | Some tName -> tName
             | None -> failwithf $"Type Error: Unknown record field '%s{firstField}' at line %d{r.Start.Line}"
             
-        let tArgs, expectedFields = Map.find recordTypeName env.Registry.Records
-        let tArgsInst = tArgs |> List.map (fun a -> a.TrimStart('\''))
-        let recordScheme = Scheme(tArgsInst, [], TCon(recordTypeName, tArgsInst |> List.map TVar))
-        
-        let instantiatedRecordType, freshVars, _ = instantiate env.Registry recordScheme
-        let fieldSubst = List.zip tArgsInst freshVars |> Map.ofList
-        let expectedFieldsInstantiated = 
-            expectedFields |> List.map (fun (n, t) -> n, applyTypeSubst fieldSubst t) |> Map.ofList
+        let instantiatedRecordType, _, expectedFieldsInstantiated =
+            instantiateRecord env.Registry recordTypeName
 
         unify env.Registry targetType instantiatedRecordType
 

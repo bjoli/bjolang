@@ -1,0 +1,13 @@
+(import (std core))
+(import (std list))
+
+;; Exercises the quoted-list branch of Pipeline.read, which shares its range
+;; computation and dot-to-Tuple rewrite with the plain parenthesized branch.
+;; Nothing else in the corpus uses '(...).
+(defun (main args)
+  (def lst '(5 6 7))
+
+  (displayln (match lst
+               ((Cons hd tl) "starts-with-5")
+               (Nil "empty")))
+  0)

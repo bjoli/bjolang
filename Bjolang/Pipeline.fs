@@ -10,6 +10,28 @@ let unionLexerRanges (r1: Lexer.Range) (r2: Lexer.Range) : Lexer.Range =
     { Start = r1.Start; End = r2.End }
 
 let rec read (tokens: LexedToken list) : SExpr list * LexedToken list =
+    let isDot = function SAtom { Token = Dot } -> true | _ -> false
+
+    /// Reads the body of a parenthesized form. A dot anywhere in the body makes
+    /// it a tuple regardless of how the form was introduced; otherwise the
+    /// caller decides what, if anything, to put at the head.
+    ///
+    /// `startRange` opens the form and `rangeFrom` opens the range the result
+    /// spans — they differ for a quoted list, where the quote comes first.
+    let readForm (startRange: Lexer.Range) (rangeFrom: Lexer.Range) (undotted: SExpr list -> SExpr list) rest =
+        let innerNodes, afterList = read rest
+        let endRange = if List.isEmpty afterList then startRange else (List.head afterList).Range
+        let listRange = unionLexerRanges rangeFrom endRange
+
+        let finalNodes =
+            if List.exists isDot innerNodes then
+                let tupleToken = { Token = Lexer.Symbol "Tuple"; Range = startRange }
+                SAtom tupleToken :: List.filter (not << isDot) innerNodes
+            else
+                undotted innerNodes
+
+        SList(finalNodes, listRange), afterList
+
     let rec loop acc remaining =
         match remaining with
         | [] -> List.rev acc, []
@@ -18,37 +40,16 @@ let rec read (tokens: LexedToken list) : SExpr list * LexedToken list =
 
         // Quoted list: '(items...) → (quoted-list items...)
         | { Token = Quote; Range = qr } :: { Token = LParen; Range = r } :: rest ->
-            let innerNodes, afterList = read rest
-            let endRange = if List.isEmpty afterList then r else (List.head afterList).Range
-            let listRange = unionLexerRanges qr endRange
+            let withHead innerNodes =
+                let headToken = { Token = Lexer.Symbol "quoted-list"; Range = qr }
+                SAtom headToken :: innerNodes
 
-            let isDot = function SAtom { Token = Dot } -> true | _ -> false
+            let node, afterList = readForm r qr withHead rest
+            loop (node :: acc) afterList
 
-            let finalNodes =
-                if List.exists isDot innerNodes then
-                    let tupleToken = { Token = Lexer.Symbol "Tuple"; Range = r }
-                    SAtom tupleToken :: List.filter (not << isDot) innerNodes
-                else
-                    let headToken = { Token = Lexer.Symbol "quoted-list"; Range = qr }
-                    SAtom headToken :: innerNodes
-
-            loop (SList(finalNodes, listRange) :: acc) afterList
-
-        | { Token = LParen; Range = r } as t :: rest ->
-            let innerNodes, afterList = read rest
-            let endRange = if List.isEmpty afterList then r else (List.head afterList).Range
-            let listRange = unionLexerRanges r endRange
-
-            let isDot = function SAtom { Token = Dot } -> true | _ -> false
-
-            let finalNodes =
-                if List.exists isDot innerNodes then
-                    let tupleToken = { Token = Lexer.Symbol "Tuple"; Range = r }
-                    SAtom tupleToken :: List.filter (not << isDot) innerNodes
-                else
-                    innerNodes
-
-            loop (SList(finalNodes, listRange) :: acc) afterList
+        | { Token = LParen; Range = r } :: rest ->
+            let node, afterList = readForm r r id rest
+            loop (node :: acc) afterList
 
         // Vec literal: [items...] → (vec-literal items...)
         | { Token = LBracket; Range = r } :: rest ->
