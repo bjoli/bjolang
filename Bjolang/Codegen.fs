@@ -1389,42 +1389,69 @@ let private generateParameterList
         append ctx $"params %s{typeToString restElemType}[] %s{sanitizeIdent restName}"
     | None -> ()
 
+/// Emits a whole method: signature, the keyword-parameter unwrap prologue, and
+/// the body. Shared by module-level functions and trait-`impl` methods, which
+/// differ only in `modifier` and `genericParams`.
+///
+/// `ctx` must already carry the type parameters that are in scope: a module
+/// function's are its own, an `impl` method's belong to the enclosing class.
+let private generateMethod
+    (ctx: CodegenContext)
+    (modifier: string)
+    (genericParams: string)
+    (name: string)
+    (args: (string * HMType) list)
+    (kwArgs: (string * HMType * TypedExpr) list)
+    (restArg: (string * HMType) option)
+    (retType: HMType)
+    (body: TypedExpr)
+    : unit =
+
+    indent ctx
+    append ctx modifier
+    append ctx (typeToString retType)
+    append ctx " "
+    append ctx (sanitizeIdent name)
+    append ctx genericParams
+    append ctx "("
+    generateParameterList ctx name args kwArgs restArg
+    append ctx ") {\n"
+    withIndent ctx (fun c ->
+        // A keyword parameter arrives as an `Option`, so that an omitted one is
+        // distinguishable from one passed explicitly at its default value.
+        for (kwName, kwType, kwDefault) in kwArgs do
+            let c_type = typeToString kwType
+            let s_name = sanitizeIdent kwName
+            indent c
+            appendLine c $"{c_type} {s_name};"
+            indent c
+            appendLine c $"if (__kw_{s_name}.IsSome) {{"
+            withIndent c (fun c2 ->
+                indent c2; appendLine c2 $"{s_name} = __kw_{s_name}.Value;"
+            )
+            indent c
+            appendLine c "} else {"
+            withIndent c (fun c2 ->
+                generateBlock c2 (Assign(s_name)) kwDefault
+            )
+            indent c
+            appendLine c "}"
+        generateFunctionBody c body)
+    indent ctx
+    appendLine ctx "}"
+
 let rec generateDecl (ctx: CodegenContext) (decl: TDecl) : unit =
     match decl with
     | TDefun (name, tyArgs, args, kwArgs, restArg, retType, body, _) ->
         let ctx = { ctx with TypeParams = tyArgs |> List.map typeParamKey |> Set.ofList }
 
-        indent ctx
-        append ctx "public static "
-        append ctx (typeToString retType)
-        append ctx " "
-        append ctx (sanitizeIdent name)
-        if not tyArgs.IsEmpty then
-            let tyArgsStr = tyArgs |> List.map typeParamName |> String.concat ", "
-            append ctx $"<%s{tyArgsStr}>"
-        append ctx "("
-        generateParameterList ctx name args kwArgs restArg
-        append ctx ") {\n"
-        withIndent ctx (fun c ->
-            for (kwName, kwType, kwDefault) in kwArgs do
-                let c_type = typeToString kwType
-                let s_name = sanitizeIdent kwName
-                indent c
-                appendLine c $"{c_type} {s_name};"
-                indent c
-                appendLine c $"if (__kw_{s_name}.IsSome) {{"
-                withIndent c (fun c2 ->
-                    indent c2; appendLine c2 $"{s_name} = __kw_{s_name}.Value;"
-                )
-                indent c
-                appendLine c "} else {"
-                withIndent c (fun c2 ->
-                    generateBlock c2 (Assign(s_name)) kwDefault
-                )
-                indent c
-                appendLine c "}"
-            generateFunctionBody c body)
-        indent ctx; appendLine ctx "}"
+        let genericParams =
+            if tyArgs.IsEmpty then ""
+            else
+                let tyArgsStr = tyArgs |> List.map typeParamName |> String.concat ", "
+                $"<%s{tyArgsStr}>"
+
+        generateMethod ctx "public static " genericParams name args kwArgs restArg retType body
 
     | TType (defs, _) 
     | TTypeRec (defs, _) ->
@@ -1530,35 +1557,7 @@ let rec generateDecl (ctx: CodegenContext) (decl: TDecl) : unit =
                 // (`TestFiles/probe/generic_trait_method.bjo`) — so anything here
                 // is a class type parameter, already emitted above and in scope.
                 | TDefun (n, _, args, kwArgs, restArg, retType, body, _) ->
-                    indent ctx
-                    append ctx "public "
-                    append ctx (typeToString retType)
-                    append ctx " "
-                    append ctx (sanitizeIdent n)
-                    append ctx "("
-                    generateParameterList ctx n args kwArgs restArg
-                    append ctx ") {\n"
-                    withIndent ctx (fun c ->
-                        for (kwName, kwType, kwDefault) in kwArgs do
-                            let c_type = typeToString kwType
-                            let s_name = sanitizeIdent kwName
-                            indent c
-                            appendLine c $"{c_type} {s_name};"
-                            indent c
-                            appendLine c $"if (__kw_{s_name}.IsSome) {{"
-                            withIndent c (fun c2 ->
-                                indent c2; appendLine c2 $"{s_name} = __kw_{s_name}.Value;"
-                            )
-                            indent c
-                            appendLine c "} else {"
-                            withIndent c (fun c2 ->
-                                generateBlock c2 (Assign(s_name)) kwDefault
-                            )
-                            indent c
-                            appendLine c "}"
-                        generateFunctionBody c body)
-                    indent ctx
-                    appendLine ctx "}"
+                    generateMethod ctx "public " "" n args kwArgs restArg retType body
                 | _ -> ()
         )
         indent ctx
