@@ -415,7 +415,7 @@ let rec generateExpr (ctx: CodegenContext) (expr: TypedExpr) : unit =
             | _ ->
                 append ctx targetName
 
-    | TApply (target, args, kwArgs, _) ->
+    | TApply (target, args, kwArgs) ->
         generateApply ctx expr target args kwArgs
 
     | TInterfaceCall (iType, mName, dict, args) ->
@@ -788,16 +788,6 @@ and generateBlock (ctx: CodegenContext) (target: BlockTarget) (expr: TypedExpr) 
             codegenError
                 expr.Range.Start.Line
                 "internal error: a function-body loop was emitted outside of a function body"
-
-    | TApply (callTarget, _, _, true) ->
-        let name =
-            match callTarget.Node with
-            | TIdent (n, _) -> $"'%s{n}'"
-            | _ -> "this call"
-
-        codegenError
-            expr.Range.Start.Line
-            $"the tail call to %s{name} survived loop lowering and cannot be turned into a jump"
 
     | TLet (name, isFun, _, value, body) ->
         // `LetRecify` only emits `ELet` for a singleton component with no

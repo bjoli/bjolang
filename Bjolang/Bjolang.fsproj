@@ -14,7 +14,6 @@
         <Compile Include="Unification.fs" />
         <Compile Include="Inference.fs" />
         <Compile Include="Lowering.fs" />
-        <Compile Include="TailRecursion.fs" />
         <Compile Include="LoopLowering.fs" />
         <Compile Include="Prelude.fs" />
         <Compile Include="Pipeline.fs"/>

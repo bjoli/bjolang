@@ -241,11 +241,8 @@ let runFullFrontendPipeline (mainFilePath: string) =
         printfn "=== Step 3: Dictionary Lowering ==="
         let loweredAst = Lowering.lowerProgram env typedAst
 
-        printfn "=== Step 4: Tail Recursion Analysis ==="
-        let tailAnalyzedAst = TailRecursion.analyzeProgram loweredAst
-
-        printfn "=== Step 5: Loop Lowering ==="
-        let loopLoweredAst = LoopLowering.lowerProgram tailAnalyzedAst
+        printfn "=== Step 4: Loop Lowering ==="
+        let loopLoweredAst = LoopLowering.lowerProgram loweredAst
 
         printfn "=== Frontend pipeline complete ==="
         Some (env, loopLoweredAst, dllDeps)

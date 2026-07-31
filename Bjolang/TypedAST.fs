@@ -105,7 +105,7 @@ and TExprNode =
     | TLetRec of (string * bool * string list * TypedExpr) list * TypedExpr
     | TLetTuple of string list * TypedExpr * TypedExpr
     | TLambda of string list * TypedExpr
-    | TApply of TypedExpr * TypedExpr list * (string * TypedExpr) list * bool
+    | TApply of TypedExpr * TypedExpr list * (string * TypedExpr) list
     | TTupleMake of TypedExpr list
     | TListMake of TypedExpr list
     | TVecMake of TypedExpr list

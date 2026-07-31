@@ -10,7 +10,7 @@ open Bjolang.Unification
 let collectTraitConstraints (registry: TraitRegistry) (body: TypedExpr) : TraitConstraint list =
     let step (acc: Set<string * string>) (expr: TypedExpr) =
         match expr.Node with
-        | TApply({ Node = TIdent(methodName, _); Type = TFun(argTypes, _) }, _, _, _) when not argTypes.IsEmpty ->
+        | TApply({ Node = TIdent(methodName, _); Type = TFun(argTypes, _) }, _, _) when not argTypes.IsEmpty ->
             let traitOpt =
                 registry.Traits
                 |> Map.tryPick (fun traitName info ->
@@ -320,7 +320,7 @@ let rec infer (env: Env) (expr: Expr) : HMType * TypedExpr =
             retType,
             { Type = retType
               Range = r
-              Node = TApply(typedTarget, positionalTypedArgs, typedKwArgs, false) }
+              Node = TApply(typedTarget, positionalTypedArgs, typedKwArgs) }
 
         | _ ->
             // No FunMeta or no keyword args: simple positional call
@@ -332,7 +332,7 @@ let rec infer (env: Env) (expr: Expr) : HMType * TypedExpr =
             retType,
             { Type = retType
               Range = r
-              Node = TApply(typedTarget, positionalArgs |> List.map snd, [], false) }
+              Node = TApply(typedTarget, positionalArgs |> List.map snd, []) }
 
     | ELet(name, isFun, args, typeAnn, value, body, r) ->
         let valType, typedVal =

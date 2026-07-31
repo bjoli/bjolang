@@ -228,16 +228,6 @@ let rec referencedNames (expr: TypedExpr) : Set<string> =
     TypeVisitor.children expr
     |> List.fold (fun acc c -> Set.union acc (referencedNames c)) here
 
-/// Drops tail marks from a subtree the pass declined to turn into a loop, so the
-/// emitter does not report a jump it should have lowered.
-let rec private clearTailMarks (expr: TypedExpr) : TypedExpr =
-    let cleared =
-        match expr.Node with
-        | TApply(target, args, kwArgs, _) -> { expr with Node = TApply(target, args, kwArgs, false) }
-        | _ -> expr
-
-    TypeVisitor.mapChildren clearTailMarks cleared
-
 // ---------------------------------------------------------------------------
 // Expressions
 // ---------------------------------------------------------------------------
@@ -255,7 +245,7 @@ let rec private lowerExpr (targets: LoopTarget list) (inTail: bool) (expr: Typed
         targets |> List.filter (fun t -> not (t.Names |> List.exists (fun n -> List.contains n names)))
 
     match expr.Node with
-    | TApply(target, args, kwArgs, isTail) ->
+    | TApply(target, args, kwArgs) ->
         let loopTarget =
             if inTail then
                 match target.Node with
@@ -273,7 +263,7 @@ let rec private lowerExpr (targets: LoopTarget list) (inTail: bool) (expr: Typed
                 Node = normalizeRecur t loweredArgs loweredKwArgs expr }
         | None ->
             { expr with
-                Node = TApply(notTail target, loweredArgs, loweredKwArgs, isTail) }
+                Node = TApply(notTail target, loweredArgs, loweredKwArgs) }
 
     | TIf(c, t, f) ->
         { expr with
@@ -353,7 +343,7 @@ and private lowerLetRec
             Node =
                 TLetRec(
                     renamedBindings
-                    |> List.map (fun (n, isFun, args, v) -> n, isFun, args, clearTailMarks (lowerExpr [] true v)),
+                    |> List.map (fun (n, isFun, args, v) -> n, isFun, args, lowerExpr [] true v),
                     lowerExpr targets inTail renamedBody
                 ) }
     | true ->
@@ -483,79 +473,4 @@ let rec private lowerDeclWith (aliasFor: string -> string list) (decl: TDecl) : 
 
 let lowerDecl (decl: TDecl) : TDecl = lowerDeclWith (fun _ -> []) decl
 
-// ---------------------------------------------------------------------------
-// Verification
-// ---------------------------------------------------------------------------
-
-/// Reports any call still marked as a tail call after lowering.
-///
-/// Erroring rather than falling back is what turns "usually tail-call
-/// optimized" into a guarantee: a silent real call would blow the stack at run
-/// time, and the position is very hard to identify from the outside, so the
-/// message names it.
-let rec private checkNoTailMarks (position: string) (expr: TypedExpr) : unit =
-    let describeCallee (target: TypedExpr) =
-        match target.Node with
-        | TIdent(n, _) -> $"'%s{n}'"
-        | _ -> "a computed callee"
-
-    match expr.Node with
-    | TApply(target, args, kwArgs, isTail) ->
-        if isTail then
-            failwithf
-                $"Tail Call Error: the call to %s{describeCallee target} at line %d{expr.Range.Start.Line} is in tail position of its own function but sits %s{position}, which no loop owns, so it cannot become a jump. Restructure it so the call is the function's result, or accept it as an ordinary call by not writing it in tail position."
-
-        let inner = $"inside an argument to %s{describeCallee target}"
-        checkNoTailMarks inner target
-        args |> List.iter (checkNoTailMarks inner)
-        kwArgs |> List.iter (snd >> checkNoTailMarks inner)
-
-    | TLambda(_, body) -> checkNoTailMarks "inside a lambda body" body
-
-    | TIf(cond, t, f) ->
-        checkNoTailMarks "inside an `if` condition" cond
-        checkNoTailMarks position t
-        checkNoTailMarks position f
-
-    | TMatch(target, clauses) ->
-        checkNoTailMarks "inside a `match` scrutinee" target
-
-        for clause in clauses do
-            clause.Guard |> Option.iter (checkNoTailMarks "inside a `match` guard")
-            checkNoTailMarks position clause.Body
-
-    | TTryFinally(body, cleanup) ->
-        checkNoTailMarks "inside a `try` body, where the call must return so that `finally` can run" body
-        checkNoTailMarks "inside a `finally` body" cleanup
-
-    | TLet(_, isFun, _, value, body) ->
-        checkNoTailMarks (if isFun then "inside a local function" else "inside a `let` initializer") value
-        checkNoTailMarks position body
-
-    | TLetRec(bindings, body) ->
-        bindings |> List.iter (fun (_, _, _, v) -> checkNoTailMarks "inside a `letrec` binding" v)
-        checkNoTailMarks position body
-
-    | TLetMutable(_, value, body)
-    | TLetTuple(_, value, body) ->
-        checkNoTailMarks "inside a `let` initializer" value
-        checkNoTailMarks position body
-
-    | TLoop(members, bodyOpt) ->
-        members |> List.iter (fun m -> checkNoTailMarks position m.Body)
-        bodyOpt |> Option.iter (checkNoTailMarks position)
-
-    | _ -> TypeVisitor.children expr |> List.iter (checkNoTailMarks "in a non-tail position")
-
-let private checkDecl (decl: TDecl) : unit =
-    TypeVisitor.mapDecl
-        (fun e ->
-            checkNoTailMarks "in a non-tail position" e
-            e)
-        decl
-    |> ignore
-
-let lowerProgram (decls: TDecl list) : TDecl list =
-    let lowered = List.map lowerDecl decls
-    lowered |> List.iter checkDecl
-    lowered
+let lowerProgram (decls: TDecl list) : TDecl list = List.map lowerDecl decls

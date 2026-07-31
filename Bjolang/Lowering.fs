@@ -26,8 +26,7 @@ module DictionaryLowering =
         // Target trait method invocations
         | TApply({ Node = TIdent(methodName, _)
                    Type = TFun(argTypes, _) } as target,
-                 args, kwArgs,
-                 isTail) ->
+                 args, kwArgs) ->
             let traitMethodOpt =
                 env.Registry.Traits
                 |> Map.tryPick (fun traitName info ->
@@ -52,7 +51,7 @@ module DictionaryLowering =
                             { target with
                                 Node = TIdent(implInstanceMethod traitName targetTypeName methodName, []) }
 
-                        TApply(staticDirectTarget, loweredArgs, [], isTail)
+                        TApply(staticDirectTarget, loweredArgs, [])
 
                     | TVar varName ->
                         // GENERIC DISPATCH
@@ -79,8 +78,7 @@ module DictionaryLowering =
                         TApply(
                             recurse target,
                             args |> List.map recurse,
-                            kwArgs |> List.map (fun (n, e) -> n, recurse e),
-                            false
+                            kwArgs |> List.map (fun (n, e) -> n, recurse e)
                         )
 
                     match target.Node with
@@ -136,8 +134,7 @@ module DictionaryLowering =
                                 TApply(
                                     recurse target,
                                     dictArgs @ (args |> List.map recurse),
-                                    kwArgs |> List.map (fun (n, e) -> n, recurse e),
-                                    false
+                                    kwArgs |> List.map (fun (n, e) -> n, recurse e)
                                 )
                             else
                                 standardCall ()

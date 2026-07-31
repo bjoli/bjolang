@@ -57,8 +57,8 @@ let mapChildren (f: TypedExpr -> TypedExpr) (expr: TypedExpr) : TypedExpr =
             TLetRec(bindings |> List.map (fun (n, isFun, args, e) -> n, isFun, args, f e), f body)
         | TLetTuple(names, value, body) -> TLetTuple(names, f value, f body)
         | TLambda(args, body) -> TLambda(args, f body)
-        | TApply(target, args, kwArgs, isTail) ->
-            TApply(f target, List.map f args, kwArgs |> List.map (fun (n, e) -> n, f e), isTail)
+        | TApply(target, args, kwArgs) ->
+            TApply(f target, List.map f args, kwArgs |> List.map (fun (n, e) -> n, f e))
         | TTupleMake items -> TTupleMake(List.map f items)
         | TListMake items -> TListMake(List.map f items)
         | TVecMake items -> TVecMake(List.map f items)
