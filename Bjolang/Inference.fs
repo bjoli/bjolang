@@ -1193,9 +1193,14 @@ and private checkDeclGroup
     // 1. Pre-pass: collect all explicit signatures defined in this group
     let explicitSigs =
         decls
-        |> List.choose (function
-            | DSignature(name, ftype, constraints, _) -> Some(name, (resolveTypeAnnotation env.Registry ftype, Some ftype, constraints))
-            | _ -> None)
+        |> List.collect (function
+            | DSignature(name, ftype, constraints, _) -> 
+                [name, (resolveTypeAnnotation env.Registry ftype, Some ftype, constraints)]
+            | DTrait(_, _, _, signatures, _) ->
+                signatures
+                |> List.map (fun (name, ftype) ->
+                    name, (resolveTypeAnnotation env.Registry ftype, Some ftype, []))
+            | _ -> [])
         |> Map.ofList
 
     // 2. Validate exports against collected signatures

@@ -3,12 +3,14 @@
 
 (import
     (std core)
-    (std list)
     (std iter))
+(re-export print println ->str)
+(export fold)
+
+(include "Foldable.protobjo")
 
 ;; The aggregate surface of the standard library. Names listed here are visible
 ;; to anything that imports (std prelude); nothing else is.
-(re-export print println)
 
 ;; Placeholder so the aggregate module has a body.
 (: noop (-> int))

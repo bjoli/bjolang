@@ -1,5 +1,5 @@
 ;; std/core.bjo
-(export print println)
+(export print println ->str)
 
 ;; Type to String Trait
 (def/trait (->str %a)
