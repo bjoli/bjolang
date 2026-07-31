@@ -1013,36 +1013,8 @@ let rec checkDecl (env: Env) (sigs: Map<string, HMType * FType option * (string 
         newEnv, Map.remove name sigs, [ TDefMutable(name, typedExpr, exprType, r) ]
 
     | DModule(moduleName, decls, r) ->
-        // 1. Pre-pass: collect all explicit signatures defined in this module
-        let explicitSigs =
-            decls
-            |> List.choose (function
-                | DSignature(name, ftype, constraints, _) -> Some(name, (resolveTypeAnnotation env.Registry ftype, Some ftype, constraints))
-                | _ -> None)
-            |> Map.ofList
-
-        // 2. Validate exports against collected signatures
-        decls
-        |> List.iter (function
-            | DExport(names, exprRange) ->
-                for name in names do
-                    if not (Map.containsKey name explicitSigs) then
-                        failwithf "Export Error: Exported item '%s' is missing a mandatory type signature at line %d" name exprRange.Start.Line
-            | _ -> ())
-
-        // 3. Inject module signatures into the environment for out-of-order inference
-        let combinedSigs = Map.fold (fun acc k v -> Map.add k v acc) sigs explicitSigs
-
-        // 4. Standard sequential typechecking pass
-        let finalEnv, finalSigs, typedDecls =
-            decls
-            |> List.fold
-                (fun (currEnv, currSigs, accDecls) d ->
-                    let nextEnv, nextSigs, tDecls = checkDecl currEnv currSigs d
-                    (nextEnv, nextSigs, tDecls @ accDecls))
-                (env, combinedSigs, [])
-
-        finalEnv, finalSigs, [ TModule(moduleName, List.rev typedDecls, r) ]
+        let finalEnv, finalSigs, typedDecls = checkDeclGroup env sigs decls
+        finalEnv, finalSigs, [ TModule(moduleName, typedDecls, r) ]
 
     | DImport(paths, r) -> env, sigs, [ TImport(paths, r) ]
     | DExport(names, r) -> env, sigs, [ TExport(names, r) ]
@@ -1163,21 +1135,30 @@ let rec checkDecl (env: Env) (sigs: Map<string, HMType * FType option * (string 
                     traitName requiredMethod r.Start.Line
 
         regEnv, sigs, [ TImpl(traitName, targetType, hmAssocBindings, typedMethods, r) ]
-// --- PIPELINE COORDINATION ---
-/// Runs Hindley-Milner inference over a parsed program.
+
+/// Type-checks a group of declarations that share a signature scope: a module
+/// body, or a whole program.
 ///
-/// The result still contains high-level `TMatch` nodes: pattern matching is
-/// translated straight to C# patterns by the code generator, and trait dispatch
-/// is resolved afterwards by `Bjolang.Lowering`.
-let checkProgram (initialEnv: Env) (program: Decl list) : Env * TDecl list =
+/// Signatures are collected up front so that declarations may refer to each
+/// other out of order, which is why this cannot simply be a fold over
+/// `checkDecl`. Signatures inherited from an enclosing group stay visible, with
+/// the group's own taking precedence.
+and private checkDeclGroup
+    (env: Env)
+    (sigs: Map<string, HMType * FType option * (string * string) list>)
+    (decls: Decl list)
+    : Env * Map<string, HMType * FType option * (string * string) list> * TDecl list =
+
+    // 1. Pre-pass: collect all explicit signatures defined in this group
     let explicitSigs =
-        program
+        decls
         |> List.choose (function
-            | DSignature(name, typ, constraints, _) -> Some(name, (resolveTypeAnnotation initialEnv.Registry typ, Some typ, constraints))
+            | DSignature(name, ftype, constraints, _) -> Some(name, (resolveTypeAnnotation env.Registry ftype, Some ftype, constraints))
             | _ -> None)
         |> Map.ofList
 
-    program
+    // 2. Validate exports against collected signatures
+    decls
     |> List.iter (function
         | DExport(names, exprRange) ->
             for name in names do
@@ -1185,12 +1166,31 @@ let checkProgram (initialEnv: Env) (program: Decl list) : Env * TDecl list =
                     failwithf "Export Error: Exported item '%s' is missing a mandatory type signature at line %d" name exprRange.Start.Line
         | _ -> ())
 
-    let finalEnv, _, revDecls =
-        program
-        |> List.fold
-            (fun (currEnv, currSigs, typedDecls: TDecl list) decl ->
-                let nextEnv, nextSigs, tDecls = checkDecl currEnv currSigs decl
-                (nextEnv, nextSigs, tDecls @ typedDecls))
-            (initialEnv, explicitSigs, [])
+    // 3. Inject the group's signatures into the environment for out-of-order inference
+    let combinedSigs = Map.fold (fun acc k v -> Map.add k v acc) sigs explicitSigs
 
-    finalEnv, List.rev revDecls
+    // 4. Standard sequential typechecking pass
+    let finalEnv, finalSigs, typedDecls =
+        decls
+        |> List.fold
+            (fun (currEnv, currSigs, accDecls) d ->
+                let nextEnv, nextSigs, tDecls = checkDecl currEnv currSigs d
+                (nextEnv, nextSigs, tDecls @ accDecls))
+            (env, combinedSigs, [])
+
+    finalEnv, finalSigs, List.rev typedDecls
+
+// --- PIPELINE COORDINATION ---
+/// Runs Hindley-Milner inference over a parsed program.
+///
+/// The result still contains high-level `TMatch` nodes: pattern matching is
+/// translated straight to C# patterns by the code generator, and trait dispatch
+/// is resolved afterwards by `Bjolang.Lowering`.
+///
+/// `Pipeline.loadModuleGraph` runs every file through `wrapInModule`, so in
+/// practice `program` is a list of `DModule`s and the real work happens one
+/// level down. The declarations are still handed to `checkDeclGroup` directly
+/// rather than assumed to be wrapped, so a bare list type-checks the same way.
+let checkProgram (initialEnv: Env) (program: Decl list) : Env * TDecl list =
+    let finalEnv, _, typedDecls = checkDeclGroup initialEnv Map.empty program
+    finalEnv, typedDecls
