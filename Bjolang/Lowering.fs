@@ -43,13 +43,15 @@ module DictionaryLowering =
                     let receiverType = prune env.Registry argTypes[0]
 
                     match prune env.Registry targetObj.Type with
-                    | TCon(targetTypeName, _) ->
+                    | TCon(targetTypeName, tconArgs) ->
                         // STATIC DISPATCH: Direct devirtualization.
                         // The methods live on the impl *class* as instance methods,
                         // so the call has to go through its singleton.
+                        // Propagate the TCon's type args so codegen can emit
+                        // generic class instantiations (e.g. Foldable_List<int>).
                         let staticDirectTarget =
                             { target with
-                                Node = TIdent(implInstanceMethod traitName targetTypeName methodName, []) }
+                                Node = TIdent(implInstanceMethod traitName targetTypeName methodName, tconArgs) }
 
                         TApply(staticDirectTarget, loweredArgs, [])
 
@@ -106,14 +108,14 @@ module DictionaryLowering =
                                             | _ -> prune env.Registry c.TargetType
 
                                         match resolvedType with
-                                        | TCon(typeName, _) ->
+                                        | TCon(typeName, tconArgs) ->
                                             // Static dispatch: pass the singleton Instance
                                             let sanitizedTypeName = typeName.Replace(".", "_")
                                             let instanceName = $"%s{c.TraitName}_%s{sanitizedTypeName}::Instance"
 
                                             { Type = TCon(c.TraitName, [ resolvedType ])
                                               Range = expr.Range
-                                              Node = TIdent(instanceName, []) }
+                                              Node = TIdent(instanceName, tconArgs) }
                                             : TypedExpr
                                         | TVar varName ->
                                             // Forward the dictionary from our own parameters

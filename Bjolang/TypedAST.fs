@@ -199,8 +199,10 @@ type TraitRegistry =
     { LocalTraits: Set<string>
       LocalTypes: Set<string>
       Traits: Map<string, TraitInfo>
-      // Maps (TraitName * TargetTypeIdentifier) -> Map<AssociatedTypeName, HMType>
-      Implementations: Map<string * string, Map<string, HMType>>
+      // Maps (TraitName * TargetTypeIdentifier) -> (GenericTargetType * Map<AssociatedTypeName, HMType>)
+      // The GenericTargetType preserves TVars (e.g. TCon("List", [TVar "'a"]))
+      // so ResolveAssociatedType can substitute them when given a concrete type.
+      Implementations: Map<string * string, HMType * Map<string, HMType>>
       Aliases: Map<string, string list * HMType>
       Records: Map<string, string list * (string * HMType) list>
       RecordFields: Map<string, string> }
@@ -209,7 +211,24 @@ type TraitRegistry =
     member this.IsTypeDefinedLocally(name) = Set.contains name this.LocalTypes
 
     member this.ResolveAssociatedType (traitName: string) (assocName: string) (implType: HMType) : HMType option =
-        // Extract a string key for the concrete type (e.g., "System.Int32" or "Vec")
+        // Pattern-match a stored generic type against a concrete type to build
+        // a substitution for type variables.
+        let rec matchTypes pat conc subst =
+            match pat, conc with
+            | TVar name, _ -> Some (Map.add name conc subst)
+            | TCon(n1, args1), TCon(n2, args2) when n1 = n2 && args1.Length = args2.Length ->
+                List.fold2 (fun acc p c -> acc |> Option.bind (fun s -> matchTypes p c s)) (Some subst) args1 args2
+            | _ when pat = conc -> Some subst
+            | _ -> None
+
+        let rec applySubstLocal subst t =
+            match t with
+            | TVar name -> match Map.tryFind name subst with Some conc -> conc | None -> t
+            | TCon(n, args) -> TCon(n, args |> List.map (applySubstLocal subst))
+            | TFun(args, ret) -> TFun(args |> List.map (applySubstLocal subst), applySubstLocal subst ret)
+            | TTuple args -> TTuple(args |> List.map (applySubstLocal subst))
+            | _ -> t
+
         let typeKey =
             match implType with
             | TCon(name, _) -> Some name
@@ -217,9 +236,14 @@ type TraitRegistry =
 
         match typeKey with
         | Some tk ->
-            this.Implementations
-            |> Map.tryFind (traitName, tk)
-            |> Option.bind (Map.tryFind assocName)
+            match Map.tryFind (traitName, tk) this.Implementations with
+            | Some (genericTarget, assocMap) ->
+                match matchTypes genericTarget implType Map.empty with
+                | Some subst ->
+                    Map.tryFind assocName assocMap
+                    |> Option.map (applySubstLocal subst)
+                | None -> None
+            | None -> None
         | None -> None
 
 type Env =
@@ -236,9 +260,10 @@ let addTrait (name: string) (info: TraitInfo) (env: Env) : Env =
 
     { env with Registry = newRegistry }
 
-let addImplementation (traitName: string) (typeKey: string) (assocBindings: Map<string, HMType>) (env: Env) : Env =
+let addImplementation (traitName: string) (typeKey: string) (targetType: HMType) (assocBindings: Map<string, HMType>) (env: Env) : Env =
     let newRegistry =
         { env.Registry with
-            Implementations = Map.add (traitName, typeKey) assocBindings env.Registry.Implementations }
+            Implementations = Map.add (traitName, typeKey) (targetType, assocBindings) env.Registry.Implementations }
 
     { env with Registry = newRegistry }
+

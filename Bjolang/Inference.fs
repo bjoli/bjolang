@@ -1072,7 +1072,13 @@ let rec checkDecl (env: Env) (sigs: Map<string, HMType * FType option * (string 
         let mutable finalEnv = newEnv
         for kvp in hmSignatures do
             let methodTypeWithAssoc = applyTypeSubst assocSubst kvp.Value
-            let scheme = Scheme(["'" + implementorVar], [], methodTypeWithAssoc)
+            // Collect ALL free type variables from the method signature.
+            // The implementor var is always first; any additional vars (like 'acc)
+            // are method-level generics that must also be quantified.
+            let methodVars = freeTVars env.Registry methodTypeWithAssoc |> List.distinct
+            let implVar = "'" + implementorVar
+            let allVars = implVar :: (methodVars |> List.filter ((<>) implVar))
+            let scheme = Scheme(allVars, [], methodTypeWithAssoc)
             finalEnv <- addBinding kvp.Key { Scheme = scheme; IsMutable = false } finalEnv
 
         // TDecl representation requires a TTrait node definition in your AST
@@ -1098,7 +1104,7 @@ let rec checkDecl (env: Env) (sigs: Map<string, HMType * FType option * (string 
             |> List.map (fun (name, fType) -> name, resolveTypeAnnotation env.Registry fType)
 
         let hmAssocBindingsMap = Map.ofList hmAssocBindings
-        let regEnv = addImplementation traitName typeKey hmAssocBindingsMap env
+        let regEnv = addImplementation traitName typeKey targetType hmAssocBindingsMap env
         let traitInfo = Map.find traitName regEnv.Registry.Traits
 
         // FIX 1: Prepend the "'" to the substitution keys so they match TVar "'c"
@@ -1131,9 +1137,25 @@ let rec checkDecl (env: Env) (sigs: Map<string, HMType * FType option * (string 
                             failwithf
                                 $"Method '%s{name}' is not a member of trait '%s{traitName}' at line %d{methodRange.Start.Line}"
 
-                    // FIX 3: Pass expectedSignature through 'sigs'. 
-                    // This forces DDefun to unify the expected types into the arguments BEFORE inference and generalization!
-                    let methodSigs = Map.add name (expectedSignature, None, []) Map.empty
+                    // After substituting the implementor var and associated types,
+                    // the signature may still contain TVars from two sources:
+                    //   1. Class-level type params (from targetType, e.g. 'a in List %a)
+                    //      → These must stay as rigid TVars so they match the class params.
+                    //   2. Method-level generics (like 'acc in fold's signature)
+                    //      → These must be instantiated to fresh metas.
+                    let classLevelVars = freeTVars regEnv.Registry targetType |> Set.ofList
+                    let remainingVars = freeTVars regEnv.Registry expectedSignature |> List.distinct
+                    let freshSubst =
+                        remainingVars
+                        |> List.filter (fun v -> not (Set.contains v classLevelVars))
+                        |> List.map (fun v -> v, freshMeta())
+                        |> Map.ofList
+                    let instantiatedSig = applyTypeSubst freshSubst expectedSignature
+
+                    // Pass instantiatedSig through 'sigs'.
+                    // This forces DDefun to unify the expected types into the arguments
+                    // BEFORE inference and generalization.
+                    let methodSigs = Map.add name (instantiatedSig, None, []) Map.empty
                     
                     let _, _, tDecls = checkDecl regEnv methodSigs methodDecl
                     List.head tDecls // Return the fully verified TDefun node

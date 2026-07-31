@@ -690,10 +690,32 @@ and private generateApply
 
         match target.Node with
         | TIdent (name, tArgs) ->
-            append ctx (qualifiedName ctx name)
-            if not tArgs.IsEmpty && args.IsEmpty && kwArgs.IsEmpty then
+            if name.Contains("::") && not tArgs.IsEmpty then
+                // Trait instance method: "TraitName_Type.Instance::methodName"
+                // Split at "::" to insert type args on the class portion.
+                let parts = name.Split("::")
+                let classPart = parts.[0]  // e.g. "Foldable_List.Instance"
+                let methodPart = parts.[1] // e.g. "fold"
                 let tyArgsStr = tArgs |> List.map typeToString |> String.concat ", "
-                append ctx $"<%s{tyArgsStr}>"
+                // Insert <T> before ".Instance"
+                let classPortions = classPart.Split('.')
+                if classPortions.Length >= 2 then
+                    // className.Instance -> className<T>.Instance
+                    append ctx (sanitizeIdent classPortions.[0])
+                    append ctx $"<%s{tyArgsStr}>"
+                    for i in 1 .. classPortions.Length - 1 do
+                        append ctx "."
+                        append ctx (sanitizeIdent classPortions.[i])
+                else
+                    append ctx (sanitizeIdent classPart)
+                    append ctx $"<%s{tyArgsStr}>"
+                append ctx "."
+                append ctx (sanitizeIdent methodPart)
+            else
+                append ctx (qualifiedName ctx name)
+                if not tArgs.IsEmpty && args.IsEmpty && kwArgs.IsEmpty then
+                    let tyArgsStr = tArgs |> List.map typeToString |> String.concat ", "
+                    append ctx $"<%s{tyArgsStr}>"
         | TLambda _ ->
             // A lambda literal has no type of its own. C# infers one from an
             // argument or assignment context, but a callee position gives it
@@ -1470,19 +1492,44 @@ let rec generateDecl (ctx: CodegenContext) (decl: TDecl) : unit =
             | Alias _ -> ()
 
     | TTrait (name, targetVar, assocTypes, signatures, _) ->
+        // Helper to collect all TVar names from a type
+        let rec collectTVars t =
+            match t with
+            | TVar v -> [v]
+            | TCon(_, args) -> List.collect collectTVars args
+            | TFun(args, ret) -> (List.collect collectTVars args) @ collectTVars ret
+            | TTuple args -> List.collect collectTVars args
+            | TAssoc(_, _, impl) -> collectTVars impl
+            | _ -> []
+
         indent ctx
-        let tyParams = targetVar :: assocTypes |> List.map typeParamName |> String.concat ", "
+        // Class-level type params: the implementor var + associated types
+        let classTyParamsList = targetVar :: assocTypes
+        let tyParams = classTyParamsList |> List.map typeParamName |> String.concat ", "
         appendLine ctx $"public interface %s{sanitizeIdent name}<%s{tyParams}> {{"
         withIndent ctx (fun ctx ->
+            // The raw trait signature uses unprimed names (e.g. "col"),
+            // but the TVars in the resolved HMType are primed (e.g. "'col").
+            let classTyVarNames = classTyParamsList |> List.map (fun v -> "'" + v)
             for kvp in signatures do
                 let mName = kvp.Key
                 let mType = kvp.Value
+                // Method-level generics: TVars in this method that aren't class-level
+                let methodVars =
+                    collectTVars mType
+                    |> List.distinct
+                    |> List.filter (fun v -> not (List.contains v classTyVarNames))
+                let methodTyParamsStr =
+                    if methodVars.IsEmpty then ""
+                    else "<" + (methodVars |> List.map typeParamName |> String.concat ", ") + ">"
+
                 match mType with
                 | TFun (args, ret) ->
                     indent ctx
                     append ctx (typeToString ret)
                     append ctx " "
                     append ctx (sanitizeIdent mName)
+                    append ctx methodTyParamsStr
                     append ctx "("
                     for i, arg in List.indexed args do
                         if i > 0 then append ctx ", "
@@ -1528,13 +1575,17 @@ let rec generateDecl (ctx: CodegenContext) (decl: TDecl) : unit =
             appendLine ctx $"public static readonly %s{className}%s{tyParamsStr} Instance = new();"
             for m in methods do
                 match m with
-                // The method's own `tyArgs` are dropped: a trait signature may
-                // only mention the trait's target and associated variables — one
-                // naming a variable of its own is rejected during inference
-                // (`TestFiles/probe/generic_trait_method.bjo`) — so anything here
-                // is a class type parameter, already emitted above and in scope.
-                | TDefun (n, _, args, kwArgs, restArg, retType, body, _) ->
-                    generateMethod ctx "public " "" n args kwArgs restArg retType body
+                | TDefun (n, tyArgs, args, kwArgs, restArg, retType, body, _) ->
+                    // Filter out class-level type params to get method-level generics
+                    let methodOnlyTyArgs =
+                        tyArgs |> List.filter (fun v -> not (Set.contains (typeParamKey v) (typeParamVars |> List.map typeParamKey |> Set.ofList)))
+                    let methodTyArgsStr =
+                        if methodOnlyTyArgs.IsEmpty then ""
+                        else "<" + (methodOnlyTyArgs |> List.map typeParamName |> String.concat ", ") + ">"
+                    // Include method-level type params in scope
+                    let methodCtx =
+                        { ctx with TypeParams = Set.union ctx.TypeParams (methodOnlyTyArgs |> List.map typeParamKey |> Set.ofList) }
+                    generateMethod methodCtx "public " methodTyArgsStr n args kwArgs restArg retType body
                 | _ -> ()
         )
         indent ctx
