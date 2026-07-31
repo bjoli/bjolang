@@ -7,7 +7,9 @@ open Bjolang.Parser
 open Bjolang.LetRecify
 
 let unionLexerRanges (r1: Lexer.Range) (r2: Lexer.Range) : Lexer.Range =
-    { Start = r1.Start; End = r2.End }
+    // The two ranges can come from different files once `include` is involved.
+    // The opening one wins: it is where the form the caller is describing began.
+    { Start = r1.Start; End = r2.End; File = r1.File }
 
 let rec read (tokens: LexedToken list) : SExpr list * LexedToken list =
     let isDot = function SAtom { Token = Dot } -> true | _ -> false
@@ -86,11 +88,11 @@ type LoadedModule = {
     ParsedDecls: Decl list
 }
 
-let wrapInModule (moduleName: string) (decls: Decl list) : Decl list =
+let wrapInModule (moduleName: string) (filePath: string) (decls: Decl list) : Decl list =
     // Find the first and last range to represent the module range
     let r = 
         match decls with
-        | [] -> { Start = { Line = 1; Column = 1 }; End = { Line = 1; Column = 1 } }
+        | [] -> { Start = { Line = 1; Column = 1 }; End = { Line = 1; Column = 1 }; File = filePath }
         | first :: _ ->
             let last = List.last decls
             let getRange d = 
@@ -149,7 +151,7 @@ let loadModuleGraph (mainFilePath: string) : Decl list * string list =
                         |> Array.tryHead
                     match exports with
                     | Some metaStr ->
-                        let tokens, _ = Lexer.tokenize metaStr |> read
+                        let tokens, _ = Lexer.tokenize absPath metaStr |> read
                         
                         // Extract constraint info from S-expressions before parsing
                         // Format: (: name type (where (trait var) ...))
@@ -193,7 +195,7 @@ let loadModuleGraph (mainFilePath: string) : Decl list * string list =
                         [], []
                 else
                     let sourceCode = File.ReadAllText(absPath)
-                    let tokens, _ = Lexer.tokenize sourceCode |> read
+                    let tokens, _ = Lexer.tokenize absPath sourceCode |> read
                     let parsedDecls = Parser.parseModule tokens
                     
                     let deps = 
@@ -231,7 +233,7 @@ let loadModuleGraph (mainFilePath: string) : Decl list * string list =
     visit (Path.GetFullPath(mainFilePath))
     
     // Concatenate all module ASTs
-    let allDecls = sorted |> Seq.map (fun m -> wrapInModule m.ModuleName m.ParsedDecls) |> List.concat
+    let allDecls = sorted |> Seq.map (fun m -> wrapInModule m.ModuleName m.FilePath m.ParsedDecls) |> List.concat
     allDecls, dllDeps |> Seq.toList
 
 let runFullFrontendPipeline (mainFilePath: string) =

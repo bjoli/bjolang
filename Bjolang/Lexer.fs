@@ -5,7 +5,19 @@ module Lexer =
 
     // 1-based lines, 0-based columns (aligns with FSharp.Compiler.Text.Position)
     type Position = { Line: int; Column: int }
-    type Range = { Start: Position; End: Position }
+
+    /// `File` is the source the range came from. It matters because `include`
+    /// splices one file's forms into another, so a line number on its own is
+    /// ambiguous.
+    type Range = { Start: Position; End: Position; File: string }
+
+    /// A location for a diagnostic, as `file.bjo:12`.
+    let formatPos (r: Range) =
+        let name =
+            if String.IsNullOrEmpty r.File then "<unknown>"
+            else IO.Path.GetFileName r.File
+
+        $"%s{name}:%d{r.Start.Line}"
 
     type Token =
         | Quote
@@ -27,7 +39,7 @@ module Lexer =
 
     type LexedToken = { Token: Token; Range: Range }
 
-    let tokenize (input: string) : LexedToken list =
+    let tokenize (file: string) (input: string) : LexedToken list =
         let length = input.Length
 
         let isSymbolChar c =
@@ -78,7 +90,8 @@ module Lexer =
 
                     let range =
                         { Start = { Line = line; Column = col }
-                          End = { Line = endLine; Column = endCol } }
+                          End = { Line = endLine; Column = endCol }
+                          File = file }
 
                     loop (pos + len) endLine endCol ({ Token = t; Range = range } :: tokens)
 
@@ -148,7 +161,8 @@ module Lexer =
 
                     let range =
                         { Start = { Line = line; Column = col }
-                          End = { Line = endLine; Column = endCol } }
+                          End = { Line = endLine; Column = endCol }
+                          File = file }
 
                     loop
                         nextPos
