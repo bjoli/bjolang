@@ -127,16 +127,18 @@ let loadModuleGraph (mainFilePath: string) : Decl list * string list =
                             let meta = a :?> System.Reflection.AssemblyMetadataAttribute
                             if meta.Key = "BjolangDeps" then Some meta.Value else None)
                         |> Array.tryHead
-                    let transitiveDllDeps = System.Collections.Generic.List<string>()
+                    // A transitive dependency is *linked*, not *imported*. Its
+                    // assembly has to be referenced, because that is where the
+                    // code of anything re-exported through this DLL actually
+                    // lives — but its exports are deliberately not parsed into
+                    // the module graph. Only what this DLL exports or
+                    // re-exports becomes visible to whoever imports it.
                     match transitiveDeps with
                     | Some depsStr ->
                         for dep in depsStr.Split(';') do
                             let depPath = dep.Trim()
                             if depPath <> "" && System.IO.File.Exists(depPath) then
                                 dllDeps.Add(depPath) |> ignore
-                                transitiveDllDeps.Add(depPath)
-                                // Also recursively load the dep so its exports get parsed
-                                load depPath
                     | None -> ()
                     
                     let exports =
@@ -184,9 +186,11 @@ let loadModuleGraph (mainFilePath: string) : Decl list * string list =
                                     let constraints = Map.tryFind name constraintMap |> Option.defaultValue []
                                     DExtern(name, t, constraints, r)
                                 | d -> d)
-                        parsedDecls, transitiveDllDeps |> Seq.toList
+                        // No module dependencies: a DLL's transitive deps are
+                        // link-only and never enter the module graph.
+                        parsedDecls, []
                     | None ->
-                        [], transitiveDllDeps |> Seq.toList
+                        [], []
                 else
                     let sourceCode = File.ReadAllText(absPath)
                     let tokens, _ = Lexer.tokenize sourceCode |> read

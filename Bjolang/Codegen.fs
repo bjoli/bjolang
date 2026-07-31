@@ -1612,7 +1612,12 @@ let rec generateDecl (ctx: CodegenContext) (decl: TDecl) : unit =
     | _ -> ()
 
 
-let generateProgram (exportMetadata: string) (dllDeps: string list) (decls: TDecl list) : string =
+/// `metadataDeps` is recorded in the assembly for downstream compilations to
+/// link against; it is empty for an executable, which nothing links to.
+/// `linkedDlls` is every assembly this compilation references, and each one
+/// contributes a `using static` so that names re-exported through one DLL can
+/// still be found in the class that actually defines them.
+let generateProgram (exportMetadata: string) (metadataDeps: string list) (linkedDlls: string list) (decls: TDecl list) : string =
     let unionCases =
         let rec collect decls =
             decls |> List.collect (function
@@ -1675,7 +1680,14 @@ let generateProgram (exportMetadata: string) (dllDeps: string list) (decls: TDec
                             | ModulePath parts ->
                                 yield moduleClassName (List.last parts)
                     | _ -> ()
-            | _ -> () ]
+            | _ -> ()
+
+          // Every linked assembly, including ones reached only transitively.
+          // A name re-exported through one DLL is compiled as an unqualified
+          // reference, so the class that actually defines it has to be in
+          // scope even though its module was never imported.
+          for dllPath in linkedDlls do
+              yield moduleClassName (System.IO.Path.GetFileNameWithoutExtension dllPath) ]
         |> List.distinct
 
     for className in moduleUsings do
@@ -1685,8 +1697,8 @@ let generateProgram (exportMetadata: string) (dllDeps: string list) (decls: TDec
         let escapedMeta = exportMetadata.Replace("\"", "\\\"").Replace("\n", "\\n").Replace("\r", "")
         appendLine ctx $"[assembly: System.Reflection.AssemblyMetadata(\"BjolangExports\", \"%s{escapedMeta}\")]"
     
-    if not dllDeps.IsEmpty then
-        let depsStr = dllDeps |> List.map System.IO.Path.GetFullPath |> String.concat ";"
+    if not metadataDeps.IsEmpty then
+        let depsStr = metadataDeps |> List.map System.IO.Path.GetFullPath |> String.concat ";"
         appendLine ctx $"[assembly: System.Reflection.AssemblyMetadata(\"BjolangDeps\", \"%s{depsStr}\")]"
         
     appendLine ctx ""

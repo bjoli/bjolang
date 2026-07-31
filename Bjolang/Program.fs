@@ -147,7 +147,7 @@ let main argv =
                     typesStr + "\n" + sigsStr
                 else ""
 
-            let csCode = Codegen.generateProgram exportMetadata (if isLibrary then dllDeps else []) typedAst
+            let csCode = Codegen.generateProgram exportMetadata (if isLibrary then dllDeps else []) dllDeps typedAst
             
             if options.Debug then
                 File.WriteAllText("ast_dump.txt", sprintf "%A" typedAst)
