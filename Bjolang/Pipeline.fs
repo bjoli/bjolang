@@ -66,6 +66,58 @@ let rec read (tokens: LexedToken list) : SExpr list * LexedToken list =
 
     loop [] tokens
 
+/// Splices the top-level forms of other files in at the position of each
+/// `(include "path")`.
+///
+/// Unlike `import`, an include produces no module of its own: the forms become
+/// part of the including file, exactly as if they had been typed there. That is
+/// what makes it usable for splitting one module across files — the included
+/// definitions are in scope without needing to be exported, and there is no
+/// second module for the code generator to reach.
+///
+/// Paths resolve relative to the directory of the file doing the including, so
+/// a chain of includes follows the files rather than the process's working
+/// directory.
+let rec private expandIncludes (activeFiles: string list) (filePath: string) (forms: SExpr list) : SExpr list =
+    let includedFrom (r: Lexer.Range) = Lexer.formatPos r
+
+    forms
+    |> List.collect (fun form ->
+        match form with
+        | SList([ SAtom { Token = Lexer.Symbol "include" }; SAtom { Token = Lexer.StringLit rel } ], r) ->
+            let target =
+                Path.GetFullPath(Path.Combine(Path.GetDirectoryName(filePath: string), rel))
+
+            if List.contains target activeFiles then
+                let chain =
+                    (List.rev (target :: activeFiles))
+                    |> List.map Path.GetFileName
+                    |> String.concat " -> "
+
+                failwithf
+                    "Include Error: '%s' includes itself at %s. Include chain: %s"
+                    (Path.GetFileName target)
+                    (includedFrom r)
+                    chain
+
+            if not (File.Exists target) then
+                failwithf
+                    "Include Error: cannot find '%s' included at %s (looked for %s)"
+                    rel
+                    (includedFrom r)
+                    target
+
+            let source = File.ReadAllText(target)
+            let innerForms, _ = Lexer.tokenize target source |> read
+            expandIncludes (target :: activeFiles) target innerForms
+
+        | SList(SAtom { Token = Lexer.Symbol "include" } :: _, r) ->
+            failwithf
+                "Include Error: malformed include at %s. Expected (include \"path\")"
+                (includedFrom r)
+
+        | other -> [ other ])
+
 let resolveImportPath (basePath: string) (importSpec: ImportSpec) : string option =
     match importSpec with
     | RelativePath p -> 
@@ -196,6 +248,10 @@ let loadModuleGraph (mainFilePath: string) : Decl list * string list =
                 else
                     let sourceCode = File.ReadAllText(absPath)
                     let tokens, _ = Lexer.tokenize absPath sourceCode |> read
+                    // Includes are spliced before anything looks at the forms, so
+                    // an included file's own imports are picked up as this
+                    // module's dependencies below.
+                    let tokens = expandIncludes [ absPath ] absPath tokens
                     let parsedDecls = Parser.parseModule tokens
                     
                     let deps = 

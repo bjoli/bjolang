@@ -823,7 +823,7 @@ let rec checkDecl (env: Env) (sigs: Map<string, HMType * FType option * (string 
         // Enforce mandatory signature for all top-level defuns except 'main'
         let sigOpt = Map.tryFind name sigs
         if name <> "main" && sigOpt.IsNone then
-            failwithf $"Type Error: Function '%s{name}' requires a type signature (: %s{name} ...) at line %d{r.Start.Line}"
+            failwithf $"Type Error: Function '%s{name}' requires a type signature (: %s{name} ...) at %s{Lexer.formatPos r}"
 
         // Extract structured keyword/rest info from the raw FType (if available)
         let mandatoryFTypes, keywordFTypes, restFTypeOpt, retFType =
@@ -853,7 +853,7 @@ let rec checkDecl (env: Env) (sigs: Map<string, HMType * FType option * (string 
         let mandatoryTypes =
             if mandatoryFTypes.Length > 0 then
                 if mandatoryArgNames.Length <> mandatoryFTypes.Length then
-                    failwithf $"Type Error: Function '%s{name}' has %d{mandatoryArgNames.Length} mandatory args but signature specifies %d{mandatoryFTypes.Length} at line %d{r.Start.Line}"
+                    failwithf $"Type Error: Function '%s{name}' has %d{mandatoryArgNames.Length} mandatory args but signature specifies %d{mandatoryFTypes.Length} at %s{Lexer.formatPos r}"
                 List.zip mandatoryArgNames (mandatoryFTypes |> List.map (resolveTypeAnnotation env.Registry))
             else
                 // For main or functions without TArrow signature, use fresh metas
@@ -867,7 +867,7 @@ let rec checkDecl (env: Env) (sigs: Map<string, HMType * FType option * (string 
                     | Some (_, ft) -> resolveTypeAnnotation env.Registry ft
                     | None ->
                         if sigOpt.IsSome then
-                            failwithf $"Type Error: Keyword argument '#:%s{kwName}' not found in signature for '%s{name}' at line %d{r.Start.Line}"
+                            failwithf $"Type Error: Keyword argument '#:%s{kwName}' not found in signature for '%s{name}' at %s{Lexer.formatPos r}"
                         else freshMeta()
                 kwName, kwType)
 
@@ -877,7 +877,7 @@ let rec checkDecl (env: Env) (sigs: Map<string, HMType * FType option * (string 
             | Some _, Some ft -> Some (resolveTypeAnnotation env.Registry ft)
             | Some _, None ->
                 if sigOpt.IsSome then
-                    failwithf $"Type Error: Function '%s{name}' has a rest arg but signature has no #:rest at line %d{r.Start.Line}"
+                    failwithf $"Type Error: Function '%s{name}' has a rest arg but signature has no #:rest at %s{Lexer.formatPos r}"
                 else Some (freshMeta())
             | None, _ -> None
 
@@ -1031,10 +1031,10 @@ let rec checkDecl (env: Env) (sigs: Map<string, HMType * FType option * (string 
         // not have.
         for name in names do
             if not (Map.containsKey name env.Bindings) then
-                failwithf
-                    "Re-export Error: '%s' is not in scope at line %d. A re-exported name must be imported by this module."
-                    name
-                    r.Start.Line
+                                    failwithf
+                                        "Re-export Error: '%s' is not in scope at %s. A re-exported name must be imported by this module."
+                                        name
+                                        (Lexer.formatPos r)
 
         env, sigs, [ TReExport(names, r) ]
     | DType(typeDefs, r) -> registerTypeDefs false typeDefs env, sigs, [ TType(typeDefs, r) ]
@@ -1084,14 +1084,14 @@ let rec checkDecl (env: Env) (sigs: Map<string, HMType * FType option * (string 
         let typeKey =
             match targetType with
             | TCon(name, _) -> name
-            | _ -> failwithf $"Trait implementations require concrete target types at line %d{r.Start.Line}"
+            | _ -> failwithf $"Trait implementations require concrete target types at %s{Lexer.formatPos r}"
 
         let isLocalTrait = env.Registry.IsTraitDefinedLocally(traitName)
         let isLocalType = env.Registry.IsTypeDefinedLocally(typeKey)
 
         if not (isLocalTrait || isLocalType) then
             failwithf
-                $"Orphan Rule Violation at line %d{r.Start.Line}: Cannot implement foreign trait '%s{traitName}' for foreign type '%s{typeKey}'."
+                $"Orphan Rule Violation at %s{Lexer.formatPos r}: Cannot implement foreign trait '%s{traitName}' for foreign type '%s{typeKey}'."
 
         let hmAssocBindings =
             assocBindings
@@ -1138,7 +1138,7 @@ let rec checkDecl (env: Env) (sigs: Map<string, HMType * FType option * (string 
                     let _, _, tDecls = checkDecl regEnv methodSigs methodDecl
                     List.head tDecls // Return the fully verified TDefun node
 
-                | _ -> failwithf $"Only 'defun' declarations are allowed inside 'def/impl' at line %d{r.Start.Line}")
+                | _ -> failwithf $"Only 'defun' declarations are allowed inside 'def/impl' at %s{Lexer.formatPos r}")
 
         // Ensure all required methods from the trait are implemented
         for requiredMethod in traitInfo.Signatures.Keys do
@@ -1182,7 +1182,7 @@ and private checkDeclGroup
         | DExport(names, exprRange) ->
             for name in names do
                 if not (Map.containsKey name explicitSigs) then
-                    failwithf "Export Error: Exported item '%s' is missing a mandatory type signature at line %d" name exprRange.Start.Line
+                    failwithf "Export Error: Exported item '%s' is missing a mandatory type signature at %s" name (Lexer.formatPos exprRange)
         | _ -> ())
 
     // 3. Inject the group's signatures into the environment for out-of-order inference
