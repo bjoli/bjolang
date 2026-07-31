@@ -53,8 +53,6 @@ let instantiate
         boundVars |> List.map (fun name -> name, freshMeta ()) |> Map.ofList
 
     let boundFreshTypes = boundSubst |> Map.toList |> List.map snd
-    let mutable unboundSubst = Map.empty
-    let mutable unboundFreshTypes = []
 
     let rec walk node =
         match prune registry node with
@@ -76,7 +74,7 @@ let instantiate
             { c with
                 TargetType = walk c.TargetType })
 
-    instantiatedType, boundFreshTypes @ unboundFreshTypes, instantiatedConstraints
+    instantiatedType, boundFreshTypes, instantiatedConstraints
 
 let rec occurs (registry: TraitRegistry) (m: MetaVar) (t: HMType) : bool =
     match prune registry t with

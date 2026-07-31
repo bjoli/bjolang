@@ -11,7 +11,7 @@ cp -r lib/std /tmp/std_backup_$$
 for src in lib/std/core.bjo lib/std/iter.bjo TestFiles/traitparsetest.bjo; do
     base=$(basename "$src" .bjo)
     rm -f out.cs
-    dotnet run --no-build --lib "$src" </dev/null >"$outdir/$base.log" 2>&1
+    dotnet run --no-build --lib --debug "$src" </dev/null >"$outdir/$base.log" 2>&1
     if [ -f out.cs ]; then cp out.cs "$outdir/$base.cs"; else echo FAILED > "$outdir/$base.cs"; fi
 done
 

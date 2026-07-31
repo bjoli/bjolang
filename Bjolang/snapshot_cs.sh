@@ -19,7 +19,7 @@ for bjo in TestFiles/[0-9][0-9]_*.bjo TestFiles/probe_*.bjo; do
     [ -e "$bjo" ] || continue
     base=$(basename "$bjo" .bjo)
     rm -f out.cs
-    dotnet run --no-build "$bjo" </dev/null >"$outdir/$base.log" 2>&1
+    dotnet run --no-build "$bjo" --debug </dev/null >"$outdir/$base.log" 2>&1
     # out.cs is written by the frontend before the C# backend is invoked, so it
     # exists whenever the frontend succeeded — which is what we want to compare.
     if [ -f out.cs ]; then

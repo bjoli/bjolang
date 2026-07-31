@@ -1,8 +1,9 @@
 type CompilerOptions =
     { InputFile: string option
-      IsLibrary: bool }
+      IsLibrary: bool
+      Debug: bool }
 
-let defaultOptions = { InputFile = None; IsLibrary = false }
+let defaultOptions = { InputFile = None; IsLibrary = false; Debug = false }
 
 let printUsage () =
     printfn "Fisp Compiler"
@@ -10,6 +11,7 @@ let printUsage () =
     printfn ""
     printfn "Options:"
     printfn "  --lib       Compile the source as a library (.dll) instead of an executable"
+    printfn "  --debug     Dump the typed AST to ast_dump.txt and the generated C# to out.cs"
     printfn "  --help      Show this help message"
 
 let rec parseArgs (args: string list) (opts: CompilerOptions) =
@@ -19,6 +21,7 @@ let rec parseArgs (args: string list) (opts: CompilerOptions) =
         printUsage ()
         exit 0
     | "--lib" :: rest -> parseArgs rest { opts with IsLibrary = true }
+    | "--debug" :: rest -> parseArgs rest { opts with Debug = true }
     | arg :: rest when not (arg.StartsWith("-")) ->
         // If it doesn't start with '-', assume it's the input file
         match opts.InputFile with
@@ -67,7 +70,7 @@ let main argv =
         // 5. Pass the isLibrary flag to the Emitter
         // Emitter.compileAssembly outputFilePath options.IsLibrary loweredDecls
         // here we should add the complation to a library
-        let result = Pipeline.compile inputFilePath "out.exe" options.IsLibrary
+        let result = Pipeline.runFullFrontendPipeline inputFilePath
         match result with
         | Some (env, typedAst, dllDeps) ->
             // A source file with no `main` is a library whether or not `--lib`
@@ -145,8 +148,8 @@ let main argv =
 
             let csCode = Codegen.generateProgram exportMetadata (if isLibrary then dllDeps else []) typedAst
             
-            // DEBUG: Dump the AST to a file so we can inspect it
-            File.WriteAllText("ast_dump.txt", sprintf "%A" typedAst)
+            if options.Debug then
+                File.WriteAllText("ast_dump.txt", sprintf "%A" typedAst)
             
             let mainArgKind =
                 match Map.tryFind "main" env.Bindings with
@@ -216,7 +219,8 @@ let main argv =
 </Project>"""
             File.WriteAllText(Path.Combine(tmpDir, "Project.csproj"), csprojContent)
             File.WriteAllText(Path.Combine(tmpDir, "Program.cs"), fullCode)
-            File.WriteAllText("out.cs", fullCode)
+            if options.Debug then
+                File.WriteAllText("out.cs", fullCode)
             
             let outDir = Path.GetFullPath(if System.String.IsNullOrWhiteSpace(Path.GetDirectoryName(outputFilePath)) then "." else Path.GetDirectoryName(outputFilePath))
             let assemblyName = Path.GetFileNameWithoutExtension(outputFilePath)

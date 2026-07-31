@@ -252,6 +252,3 @@ let runFullFrontendPipeline (mainFilePath: string) =
         printfn $"Stack Trace: %s{ex.StackTrace}"
         None
 
-let compile (sourceFilePath: string) (outputFileName: string) (isLibrary: bool) =
-    runFullFrontendPipeline sourceFilePath
-

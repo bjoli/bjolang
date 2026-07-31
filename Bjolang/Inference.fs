@@ -657,7 +657,6 @@ let rec infer (env: Env) (expr: Expr) : HMType * TypedExpr =
 
                 let bodyType, typedBody = infer boundEnv body
 
-                printfn "EMatch Clause: unifying bodyType=%A with returnType=%A" bodyType returnType
                 unify env.Registry bodyType returnType
 
                 { Pattern = typedPat
