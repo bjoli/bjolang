@@ -100,8 +100,44 @@ let main argv =
             
             let typesToExport = extractTypes typedAst |> List.concat
             
+            // A trait travels with its methods. Whichever module publishes a
+            // trait method has to publish the trait itself and every
+            // implementation of it, or the importer sees a plain function whose
+            // associated types cannot be resolved and whose calls cannot be
+            // dispatched to an impl class.
+            let exportedTraits =
+                env.Registry.Traits
+                |> Map.filter (fun _ info ->
+                    info.Signatures |> Map.exists (fun methodName _ -> List.contains methodName exports))
+
+            let exportedTraitMethods =
+                exportedTraits
+                |> Map.toList
+                |> List.collect (fun (_, info) -> info.Signatures |> Map.toList |> List.map fst)
+                |> Set.ofList
+
             let exportMetadata =
                 if isLibrary && (not exports.IsEmpty || not typesToExport.IsEmpty) then
+                    let quoted (name: string) = if name.StartsWith("'") then name else "'" + name
+
+                    let serializeTrait (traitName: string) (info: TypedAST.TraitInfo) =
+                        let assocStrs =
+                            info.AssociatedTypes |> List.map (fun a -> $"(type %s{quoted a})")
+                        let methodStrs =
+                            info.Signatures
+                            |> Map.toList
+                            |> List.map (fun (mName, mType) -> $"(: %s{mName} %s{Codegen.serializeHMType mType})")
+                        let parts = assocStrs @ methodStrs |> String.concat " "
+                        $"(def/trait (%s{traitName} %s{quoted info.ImplementorVar}) %s{parts})"
+
+                    let serializeImpl (traitName: string) (targetType: TypedAST.HMType) (assocMap: Map<string, TypedAST.HMType>) =
+                        let assocStrs =
+                            assocMap
+                            |> Map.toList
+                            |> List.map (fun (n, t) -> $"(type %s{quoted n} %s{Codegen.serializeHMType t})")
+                            |> String.concat " "
+                        $"(def/impl/extern (%s{traitName} %s{Codegen.serializeHMType targetType}) %s{assocStrs})"
+
                     let serializeExport name =
                         match Map.tryFind name env.Bindings with
                         | Some b ->
@@ -142,9 +178,36 @@ let main argv =
                             $"({head} (({td.Name}{typeArgsStr})\n  " + String.concat "\n  " (List.map serializeCase cases) + "))"
                         | Parser.Record(fields) -> "" // Ignore for now
                         
-                    let sigsStr = exports |> List.map serializeExport |> String.concat "\n"
+                    // A trait method is published by its `def/trait`, which
+                    // gives it the associated types a bare signature cannot
+                    // express. Emitting a signature for it too would shadow
+                    // that binding with a weaker one on the importing side.
+                    let sigsStr =
+                        exports
+                        |> List.filter (fun name -> not (Set.contains name exportedTraitMethods))
+                        |> List.map serializeExport
+                        |> String.concat "\n"
                     let typesStr = typesToExport |> List.map serializeTypeDef |> String.concat "\n"
-                    typesStr + "\n" + sigsStr
+
+                    let traitsStr =
+                        exportedTraits
+                        |> Map.toList
+                        |> List.map (fun (traitName, info) -> serializeTrait traitName info)
+                        |> String.concat "\n"
+
+                    // Implementations follow the traits they belong to: reading
+                    // one back needs the trait already registered.
+                    let implsStr =
+                        env.Registry.Implementations
+                        |> Map.toList
+                        |> List.filter (fun ((traitName, _), _) -> Map.containsKey traitName exportedTraits)
+                        |> List.map (fun ((traitName, _), (targetType, assocMap)) ->
+                            serializeImpl traitName targetType assocMap)
+                        |> String.concat "\n"
+
+                    [ typesStr; traitsStr; implsStr; sigsStr ]
+                    |> List.filter (fun s -> not (System.String.IsNullOrWhiteSpace s))
+                    |> String.concat "\n"
                 else ""
 
             let csCode = Codegen.generateProgram exportMetadata (if isLibrary then dllDeps else []) dllDeps typedAst

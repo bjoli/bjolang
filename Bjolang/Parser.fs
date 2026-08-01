@@ -109,6 +109,13 @@ type Decl =
     // DImpl (TraitName, TargetType, AssociatedTypeBindings, Methods, Range)
     | DImpl of string * FType * (string * FType) list * Decl list * Range
 
+    // A declaration-only implementation: it records that the target type
+    // implements the trait, and what its associated types are, without carrying
+    // any method bodies. This is what a compiled module's metadata exports —
+    // the methods themselves already live in that assembly.
+    // DImplExtern (TraitName, TargetType, AssociatedTypeBindings, Range)
+    | DImplExtern of string * FType * (string * FType) list * Range
+
 // --- Parser ---
 
 let rec parsePattern (s: SExpr) : Pattern =
@@ -697,7 +704,25 @@ let rec parseDecl (s: SExpr) : Decl =
             | _ -> failwithf $"Syntax error in def/impl for '%s{traitName}': Expected (type ...) or (defun ...)."
 
         DImpl (traitName, targetType, List.rev assocBindings, List.rev methods, r)
-    
+
+    // Parse: (def/impl/extern (Foldable (Vec 'a)) (type 'item 'a))
+    //
+    // The bodyless counterpart of `def/impl`, emitted into a library's export
+    // metadata so that whoever imports it can resolve the trait's associated
+    // types and dispatch to the impl class compiled into that assembly.
+    | SList (SAtom { Token = Symbol "def/impl/extern" } ::
+             SList (SAtom { Token = Symbol traitName } :: targetTypeExpr :: [], _) ::
+             body, r) ->
+
+        let assocBindings =
+            body
+            |> List.map (function
+                | SList (SAtom { Token = Symbol "type" } :: SAtom { Token = QuotedSymbol assocName } :: boundTypeExpr :: [], _) ->
+                    assocName, parseType boundTypeExpr
+                | _ -> failwithf $"Syntax error in def/impl/extern for '%s{traitName}': Expected (type ...).")
+
+        DImplExtern (traitName, parseType targetTypeExpr, assocBindings, r)
+
     | _ -> failwithf $"Unknown declaration at line %d{r.Start.Line}"
 
 let parseModule (exprs: SExpr list) : Decl list = List.map parseDecl exprs

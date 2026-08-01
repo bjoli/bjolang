@@ -17,6 +17,23 @@ let implInstanceMethod (traitName: string) (targetTypeName: string) (methodName:
     let targetTypeSanitized = targetTypeName.Replace(".", "_")
     $"%s{traitName}_%s{targetTypeSanitized}.Instance::%s{methodName}"
 
+/// The type of a dictionary for `traitName` at `implType`.
+///
+/// A trait is emitted as an interface parameterized by its implementor *and*
+/// every associated type — `Foldable<T_col, T_item>` — so a dictionary has to
+/// name them all. For a concrete implementor `prune` resolves each projection
+/// through the registry; for a type variable it leaves a `TAssoc` standing,
+/// which the code generator spells as a synthesized type parameter.
+let dictionaryType (env: Env) (traitName: string) (implType: HMType) : HMType =
+    let assocArgs =
+        match Map.tryFind traitName env.Registry.Traits with
+        | Some info ->
+            info.AssociatedTypes
+            |> List.map (fun assocName -> prune env.Registry (TAssoc(traitName, assocName, implType)))
+        | None -> []
+
+    TCon(traitName, implType :: assocArgs)
+
 module DictionaryLowering =
 
     let rec lowerExpr (env: Env) (activeDicts: Map<string, string>) (expr: TypedExpr) : TypedExpr =
@@ -64,7 +81,7 @@ module DictionaryLowering =
                                 $"Missing dictionary '%s{expectedDictName}' for trait dispatch at line %d{expr.Range.Start.Line}"
 
                         let dictIdent =
-                            { Type = TCon(traitName, [ receiverType ])
+                            { Type = dictionaryType env traitName receiverType
                               Range = expr.Range
                               Node = TIdent(expectedDictName, []) }
                             : TypedExpr
@@ -113,7 +130,7 @@ module DictionaryLowering =
                                             let sanitizedTypeName = typeName.Replace(".", "_")
                                             let instanceName = $"%s{c.TraitName}_%s{sanitizedTypeName}::Instance"
 
-                                            { Type = TCon(c.TraitName, [ resolvedType ])
+                                            { Type = dictionaryType env c.TraitName resolvedType
                                               Range = expr.Range
                                               Node = TIdent(instanceName, tconArgs) }
                                             : TypedExpr
@@ -125,7 +142,7 @@ module DictionaryLowering =
                                                 failwithf
                                                     $"Missing dictionary '%s{expectedDictName}' to forward for call to '%s{calleeName}' at line %d{expr.Range.Start.Line}"
 
-                                            { Type = TCon(c.TraitName, [ resolvedType ])
+                                            { Type = dictionaryType env c.TraitName resolvedType
                                               Range = expr.Range
                                               Node = TIdent(expectedDictName, []) }
                                             : TypedExpr
@@ -171,7 +188,21 @@ module DictionaryLowering =
                             | _ -> "unknown"
 
                         let paramName = $"_dict_%s{c.TraitName}_%s{typeVarName}"
-                        paramName, TCon(c.TraitName, [ c.TargetType ]))
+                        paramName, dictionaryType env c.TraitName c.TargetType)
+
+                // Each associated type of a constrained trait becomes a type
+                // parameter of the function itself. The caller never writes it:
+                // C# infers it from the dictionary argument, whose impl class
+                // fixes the association (`Foldable_Vec<int>` is a
+                // `Foldable<Vec<int>, int>`).
+                let assocTyArgs =
+                    constraints
+                    |> List.collect (fun c ->
+                        match prune env.Registry c.TargetType, Map.tryFind c.TraitName env.Registry.Traits with
+                        | TVar typeVarName, Some info ->
+                            info.AssociatedTypes
+                            |> List.map (assocTypeVar typeVarName)
+                        | _ -> [])
 
                 let activeDicts =
                     dictParams
@@ -182,7 +213,16 @@ module DictionaryLowering =
                 let loweredKwArgs =
                     kwArgs |> List.map (fun (n, t, e) -> n, t, lowerExpr env activeDicts e)
 
-                TDefun(name, tyArgs, dictParams @ args, loweredKwArgs, restArg, retType, loweredBody, r)
+                TDefun(
+                    name,
+                    (tyArgs @ assocTyArgs) |> List.distinct,
+                    dictParams @ args,
+                    loweredKwArgs,
+                    restArg,
+                    retType,
+                    loweredBody,
+                    r
+                )
 
         | TImpl(traitName, targetType, assoc, methods, r) ->
             TImpl(traitName, targetType, assoc, methods |> List.map (lowerDecl env), r)

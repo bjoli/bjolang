@@ -33,6 +33,17 @@ and HMType =
 
 
 
+/// The type variable standing for an associated type projected out of a
+/// *generic* implementor, e.g. `%item` of `Foldable %c`.
+///
+/// C# has nothing to project with, so a function generic in `'c` that dispatches
+/// through a `Foldable` dictionary carries the element type as a second type
+/// parameter of its own and lets the dictionary argument infer it:
+/// `int count<T_c, T_c_item>(Foldable<T_c, T_c_item> dict, T_c c)`.
+/// `Lowering` injects the parameter and `Codegen` spells the projection with it,
+/// so both have to agree on the name.
+let assocTypeVar (implVar: string) (assocName: string) = $"%s{implVar}_%s{assocName}"
+
 module TypeConstants =
     [<Literal>]
     let Int32Name = "System.Int32"

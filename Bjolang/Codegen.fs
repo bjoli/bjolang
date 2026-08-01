@@ -105,6 +105,8 @@ let typeParamName (name: string) = "T_" + name.TrimStart('\'')
 /// the source wrote it quoted.
 let typeParamKey (name: string) = name.TrimStart('\'')
 
+
+
 let rec typeToString (hm: HMType) : string =
     match hm with
     | TCon ("Array", [elemType]) ->
@@ -130,6 +132,11 @@ let rec typeToString (hm: HMType) : string =
         match m.Value with
         | Some t -> typeToString t
         | None -> "object /* unresolved meta */"
+    // Projected out of a type variable, an associated type is spelled as the
+    // synthesized type parameter that stands for it.
+    | TAssoc (_, assocName, TVar implVar) -> typeParamName (assocTypeVar implVar assocName)
+    | TAssoc (traitName, assocName, TMeta { Value = Some inner }) ->
+        typeToString (TAssoc(traitName, assocName, inner))
     | TAssoc (traitName, assocName, implType) ->
         "object /* unresolved assoc */"
 
@@ -157,6 +164,10 @@ let rec collectTypeVars (t: HMType) : string list =
         match m.Value with
         | Some t' -> collectTypeVars t'
         | None -> []
+    // The projection is itself a type parameter, not a mention of the
+    // implementor: `Foldable %c`'s element type is `T_c_item`, and a local
+    // function that uses it must not redeclare it.
+    | TAssoc (_, assocName, TVar implVar) -> [ assocTypeVar implVar assocName ]
     | TAssoc (_, _, implType) -> collectTypeVars implType
 
 type BlockTarget =
@@ -187,8 +198,12 @@ let rec serializeHMType (t: HMType) : string =
         match m.Value with
         | Some v -> serializeHMType v
         | None -> "object"
+    // An unresolved associated type has to survive into the metadata as an
+    // associated type. Flattening it to `object` used to make an imported
+    // signature unusable: `fold`'s element type is `%item`, and `object` will
+    // not unify with the `int` the caller actually has.
     | TAssoc (traitName, assocName, implType) ->
-        $"object"
+        $"(assoc %s{traitName} %s{assocName} %s{serializeHMType implType})"
 
 
 let getUnionTypeString (hm: HMType) (parentName: string) : string =
@@ -372,6 +387,18 @@ let rec generateExpr (ctx: CodegenContext) (expr: TypedExpr) : unit =
     | TString s -> append ctx $"\"%s{escapeStringLiteral s}\""
     | TKeyword k -> append ctx $"\"%s{k}\""
     | TSymbol s -> append ctx $"\"%s{s}\""
+    // A dictionary singleton: "Foldable_Vec::Instance" with the impl class's own
+    // type arguments. `Lowering` produces these when it passes a dictionary to a
+    // constrained function, and the class is generic whenever the implemented
+    // type is (`Foldable_Vec<T_a>`), so the arguments cannot be dropped.
+    | TIdent (name, tArgs) when name.Contains("::") && not tArgs.IsEmpty ->
+        let parts = name.Split("::")
+        let tyArgsStr = tArgs |> List.map typeToString |> String.concat ", "
+        append ctx (sanitizeIdent parts[0])
+        append ctx $"<%s{tyArgsStr}>"
+        for part in parts[1..] do
+            append ctx "."
+            append ctx (sanitizeIdent part)
     | TIdent (name, _) ->
         // Cons/Nil are now builtins backed by SchemeList, not union cases.
         match name with

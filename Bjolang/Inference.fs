@@ -5,23 +5,65 @@ open Bjolang.Parser
 open Bjolang.TypedAST
 open Bjolang.Unification
 
-/// Walk a typed expression body to find all trait method calls on type variables.
-/// Returns a list of TraitConstraints (TraitName, TargetType as TVar).
-let collectTraitConstraints (registry: TraitRegistry) (body: TypedExpr) : TraitConstraint list =
+/// Walk a typed expression body for the trait constraints its enclosing function
+/// must carry. Returns a list of TraitConstraints (TraitName, TargetType as TVar).
+///
+/// There are two ways a body demands one:
+///
+///   1. It calls a trait method on a type variable — `(fold c ...)` needs
+///      `(Foldable %c)`.
+///   2. It calls a *constrained function* and passes a type variable where that
+///      function's constrained parameter goes — calling `count` at `%c` needs
+///      whatever `count` needs of it. The constraint has to be re-advertised
+///      here, because the dictionary can only come from our own caller.
+let collectTraitConstraints (env: Env) (body: TypedExpr) : TraitConstraint list =
+    let registry = env.Registry
+
+    let traitOf methodName =
+        registry.Traits
+        |> Map.tryPick (fun traitName info ->
+            if Map.containsKey methodName info.Signatures then Some traitName else None)
+
     let step (acc: Set<string * string>) (expr: TypedExpr) =
         match expr.Node with
-        | TApply({ Node = TIdent(methodName, _); Type = TFun(argTypes, _) }, _, _) when not argTypes.IsEmpty ->
-            let traitOpt =
-                registry.Traits
-                |> Map.tryPick (fun traitName info ->
-                    if Map.containsKey methodName info.Signatures then Some traitName else None)
-
-            match traitOpt with
+        | TApply({ Node = TIdent(calleeName, tArgs); Type = calleeType }, _, _) ->
+            match traitOf calleeName with
             | Some traitName ->
-                match prune registry argTypes[0] with
-                | TVar varName -> Set.add (traitName, varName) acc
+                match calleeType with
+                | TFun(receiverType :: _, _) ->
+                    match prune registry receiverType with
+                    | TVar varName -> Set.add (traitName, varName) acc
+                    | _ -> acc
                 | _ -> acc
-            | None -> acc
+            | None ->
+                // `tArgs` is positionally aligned with the callee's scheme
+                // variables, so it says what each of them was instantiated to
+                // at this call site.
+                match Map.tryFind calleeName env.Bindings with
+                | Some binding ->
+                    let (Scheme(schemeVars, constraints, _)) = binding.Scheme
+
+                    if constraints.IsEmpty || schemeVars.Length <> tArgs.Length then
+                        acc
+                    else
+                        let varSubst = List.zip schemeVars tArgs |> Map.ofList
+
+                        constraints
+                        |> List.fold
+                            (fun acc c ->
+                                let instantiated =
+                                    match c.TargetType with
+                                    | TVar v -> Map.tryFind v varSubst |> Option.defaultValue c.TargetType
+                                    | t -> t
+
+                                // A concrete instantiation resolves to a real
+                                // impl at this call site and needs nothing from
+                                // our caller.
+                                match prune registry instantiated with
+                                | TVar varName -> Set.add (c.TraitName, varName) acc
+                                | _ -> acc)
+                            acc
+                | None -> acc
         | _ -> acc
 
     TypeVisitor.foldExpr step Set.empty body
@@ -197,6 +239,11 @@ let rec resolveTypeAnnotation (registry: TraitRegistry) (ptype: FType) : HMType 
         let retType = resolveTypeAnnotation registry ret
         let allArgTypes = mandatoryTypes @ keywordTypes @ restArrayType
         TFun(allArgTypes, retType)
+    // (assoc Trait item 'col) — an associated type projected out of an
+    // implementor. Written by the export-metadata serializer rather than by
+    // hand: inside a `def/trait` an associated type is named directly.
+    | TApp("assoc", [ TName(traitName, _); TName(assocName, _); implType ], _) ->
+        TAssoc(traitName, assocName, resolveTypeAnnotation registry implType)
     | TApp(name, args, _) ->
         let resolvedArgs = args |> List.map (resolveTypeAnnotation registry)
         match Map.tryFind name registry.Aliases with
@@ -958,7 +1005,7 @@ let rec checkDecl (env: Env) (sigs: Map<string, HMType * FType option * (string 
         let (Scheme(vars, _, schemeType)) = scheme
 
         // Collect trait constraints from the body and merge with explicit ones
-        let inferredConstraints = collectTraitConstraints env.Registry typedBody
+        let inferredConstraints = collectTraitConstraints env typedBody
         let allConstraints =
             let seen = System.Collections.Generic.HashSet<string * string>()
             [ for c in explicitConstraints @ inferredConstraints do
@@ -1177,6 +1224,29 @@ let rec checkDecl (env: Env) (sigs: Map<string, HMType * FType option * (string 
 
         regEnv, sigs, [ TImpl(traitName, targetType, hmAssocBindings, typedMethods, r) ]
 
+    | DImplExtern(traitName, targetTypeExpr, assocBindings, r) ->
+        // A bodyless implementation, read back from a compiled module's
+        // metadata. Only the registry needs to learn about it: the methods are
+        // already compiled into the assembly that declared it, so there is
+        // nothing to type-check and nothing to emit.
+        let targetType = resolveTypeAnnotation env.Registry targetTypeExpr
+
+        let typeKey =
+            match targetType with
+            | TCon(name, _) -> name
+            | _ -> failwithf $"Trait implementations require concrete target types at %s{Lexer.formatPos r}"
+
+        if not (Map.containsKey traitName env.Registry.Traits) then
+            failwithf
+                $"Unknown trait '%s{traitName}' in imported implementation at %s{Lexer.formatPos r}"
+
+        let hmAssocBindings =
+            assocBindings
+            |> List.map (fun (name, fType) -> name, resolveTypeAnnotation env.Registry fType)
+            |> Map.ofList
+
+        addImplementation traitName typeKey targetType hmAssocBindings env, sigs, []
+
 /// Type-checks a group of declarations that share a signature scope: a module
 /// body, or a whole program.
 ///
@@ -1215,6 +1285,60 @@ and private checkDeclGroup
     // 3. Inject the group's signatures into the environment for out-of-order inference
     let combinedSigs = Map.fold (fun acc k v -> Map.add k v acc) sigs explicitSigs
 
+    // 3b. Bind every function the group declares *before* checking any of them,
+    // so that a call may precede the definition it names — which is what makes
+    // two top-level functions able to call each other.
+    //
+    // Only functions, and only ones with a signature. A `def` is an
+    // initialization in order, so letting a later one be referenced early would
+    // promise a value that does not exist yet; and a declared signature is what
+    // makes the forward binding trustworthy — it is the type the definition is
+    // then checked against, not a guess. Anything defined here is re-bound with
+    // its inferred scheme as the fold reaches it.
+    let declaredFunctions =
+        decls
+        |> List.choose (function
+            | DDefun(name, _, _, _) -> Some name
+            | _ -> None)
+        |> Set.ofList
+
+    let envWithForwardDecls =
+        explicitSigs
+        |> Map.fold
+            (fun (acc: Env) name (hmType, ftypeOpt, constraintPairs) ->
+                if not (Set.contains name declaredFunctions) then
+                    acc
+                else
+                    let (Scheme(vars, _, schemeType)) = generalize acc hmType
+
+                    let constraints =
+                        constraintPairs
+                        |> List.map (fun (traitName, varName) ->
+                            { TraitName = traitName; TargetType = TVar varName })
+
+                    let bound =
+                        addBinding
+                            name
+                            { Scheme = Scheme(vars, constraints, schemeType)
+                              IsMutable = false }
+                            acc
+
+                    // Keyword and rest parameters need their metadata just as
+                    // early: a forward call that passes a keyword argument, or
+                    // omits an optional one, has nothing to resolve against
+                    // without it.
+                    match ftypeOpt with
+                    | Some(TArrow(mandatory, keywords, restOpt, _, _)) ->
+                        let funMeta =
+                            { MandatoryCount = mandatory.Length
+                              KeywordParams =
+                                keywords |> List.map (fun (n, ft) -> n, resolveTypeAnnotation acc.Registry ft)
+                              RestParam = restOpt |> Option.map (resolveTypeAnnotation acc.Registry) }
+
+                        { bound with FunMetas = Map.add name funMeta bound.FunMetas }
+                    | _ -> bound)
+            env
+
     // 4. Standard sequential typechecking pass
     let finalEnv, finalSigs, typedDecls =
         decls
@@ -1222,7 +1346,7 @@ and private checkDeclGroup
             (fun (currEnv, currSigs, accDecls) d ->
                 let nextEnv, nextSigs, tDecls = checkDecl currEnv currSigs d
                 (nextEnv, nextSigs, tDecls @ accDecls))
-            (env, combinedSigs, [])
+            (envWithForwardDecls, combinedSigs, [])
 
     finalEnv, finalSigs, List.rev typedDecls
 

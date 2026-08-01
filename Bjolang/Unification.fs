@@ -49,10 +49,17 @@ let instantiate
     (registry: TraitRegistry)
     (Scheme(boundVars, constraints, t))
     : HMType * HMType list * TraitConstraint list =
+    let boundVars = List.distinct boundVars
+
     let boundSubst =
         boundVars |> List.map (fun name -> name, freshMeta ()) |> Map.ofList
 
-    let boundFreshTypes = boundSubst |> Map.toList |> List.map snd
+    // Positionally aligned with the scheme's own variable list, which is what a
+    // caller needs to answer "what was `'c` instantiated to here?" — the
+    // dictionary a trait constraint requires is chosen by that answer. Taking
+    // them out of the map instead ordered them alphabetically, so `fold`'s
+    // ['col; 'acc] came back as ['acc; 'col].
+    let boundFreshTypes = boundVars |> List.map (fun name -> Map.find name boundSubst)
 
     let rec walk node =
         match prune registry node with
