@@ -1,0 +1,26 @@
+(def/trait (Foldable %col)
+  (type %item)
+  (: fold (-> %col %acc (-> %acc %item %acc) %acc)))
+
+
+(def/impl (Foldable (List %a))
+  (type %item %a)
+  (defun (fold col acc f)
+    (list-foldl col acc f)))
+
+(def/impl (Foldable (Vec %a))
+  (type %item %a)
+  (defun (fold col acc f)
+    (vec-fold col acc f)))
+
+(defun (main)
+  (def lst (Cons 1 (Cons 2 Nil)))
+  (def v [1 2 3])
+  (def s "test")
+
+  ;; These should compile to generic C# calls: 
+  ;; Foldable_List<int>.Instance.fold(...)
+  (fold lst 0 +)
+  
+  ;; Foldable_Vec<int>.Instance.fold(...)
+  (fold v 0 +))
