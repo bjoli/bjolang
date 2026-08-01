@@ -67,6 +67,7 @@ let mapChildren (f: TypedExpr -> TypedExpr) (expr: TypedExpr) : TypedExpr =
         | TLetMutable(name, value, body) -> TLetMutable(name, f value, f body)
         | TSet(name, value) -> TSet(name, f value)
         | TIf(c, t, e) -> TIf(f c, f t, f e)
+        | TWhen(c, body, negated) -> TWhen(f c, f body, negated)
         | TTryFinally(body, cleanup) -> TTryFinally(f body, f cleanup)
         | TMatch(target, clauses) -> TMatch(f target, List.map mapClause clauses)
         | TInterfaceCall(iType, mName, dict, args) -> TInterfaceCall(iType, mName, f dict, List.map f args)

@@ -6,6 +6,7 @@
     </PropertyGroup>
 
     <ItemGroup>
+        <Compile Include="Paths.fs"/>
         <Compile Include="Lexer.fs"/>
         <Compile Include="Parser.fs"/>
         <Compile Include="LetRecify.fs"/>

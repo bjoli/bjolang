@@ -110,7 +110,7 @@ public static class BjolangRuntime {
     public static Collections.RrbList<T> vecsubfilter<T>(Collections.RrbList<T> list, Func<T, bool> predicate) => Collections.RrbFun.Filter(list, predicate);
 
     [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.AggressiveInlining)]
-    public static TState vecsubfold<T, TState>(Collections.RrbList<T> list, TState seed, Func<TState, T, TState> func) => Collections.RrbFun.Fold(list, seed, func);
+    public static TState vecsubfold<T, TState>(Func<TState, T, TState> func, TState seed, Collections.RrbList<T> list) => Collections.RrbFun.Fold(list, seed, func);
 
     [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.AggressiveInlining)]
     public static T vecsubreduce<T>(Collections.RrbList<T> list, Func<T, T, T> func) => Collections.RrbFun.Reduce(list, func);
@@ -210,10 +210,10 @@ public static class BjolangRuntime {
     public static SchemeList.SchemeList<T> listsubfilter<T>(SchemeList.SchemeList<T> list, Func<T, bool> predicate) => SchemeList.SchemeList.Filter(list, predicate);
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public static TState listsubfoldl<T, TState>(SchemeList.SchemeList<T> list, TState initial, Func<TState, T, TState> folder) => SchemeList.SchemeList.Fold(list, initial, folder);
+    public static TState listsubfoldl<T, TState>(Func<TState, T, TState> folder, TState initial, SchemeList.SchemeList<T> list) => SchemeList.SchemeList.Fold(list, initial, folder);
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public static TState listsubfoldr<T, TState>(SchemeList.SchemeList<T> list, TState initial, Func<T, TState, TState> folder) => SchemeList.SchemeList.FoldRight(list, initial, folder);
+    public static TState listsubfoldr<T, TState>(Func<T, TState, TState> folder, TState initial, SchemeList.SchemeList<T> list) => SchemeList.SchemeList.FoldRight(list, initial, folder);
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static void listsubforsubeach<T>(SchemeList.SchemeList<T> list, Action<T> action) => SchemeList.SchemeList.ForEach(list, action);

@@ -80,8 +80,11 @@ let prelude : Env =
         ("list-reverse", {Scheme = Scheme(["a"], [], makeFunType [makeListType (TVar "a")] (makeListType (TVar "a"))); IsMutable = false })
         ("list-map", {Scheme = Scheme(["a"; "b"], [], makeFunType [makeListType (TVar "a"); makeFunType [TVar "a"] (TVar "b")] (makeListType (TVar "b"))); IsMutable = false })
         ("list-filter", {Scheme = Scheme(["a"], [], makeFunType [makeListType (TVar "a"); makeFunType [TVar "a"] boolType] (makeListType (TVar "a"))); IsMutable = false })
-        ("list-foldl", {Scheme = Scheme(["a"; "b"], [], makeFunType [makeListType (TVar "a"); TVar "b"; makeFunType [TVar "b"; TVar "a"] (TVar "b")] (TVar "b")); IsMutable = false })
-        ("list-foldr", {Scheme = Scheme(["a"; "b"], [], makeFunType [makeListType (TVar "a"); TVar "b"; makeFunType [TVar "a"; TVar "b"] (TVar "b")] (TVar "b")); IsMutable = false })
+        // Folds take the function first, then the identity, then the
+        // collection: the two parts that describe *how* to fold stay together
+        // at the call site instead of being split by the data.
+        ("list-foldl", {Scheme = Scheme(["a"; "b"], [], makeFunType [makeFunType [TVar "b"; TVar "a"] (TVar "b"); TVar "b"; makeListType (TVar "a")] (TVar "b")); IsMutable = false })
+        ("list-foldr", {Scheme = Scheme(["a"; "b"], [], makeFunType [makeFunType [TVar "a"; TVar "b"] (TVar "b"); TVar "b"; makeListType (TVar "a")] (TVar "b")); IsMutable = false })
         ("list-for-each", {Scheme = Scheme(["a"], [], makeFunType [makeListType (TVar "a"); makeFunType [TVar "a"] voidType] voidType); IsMutable = false })
         ("list-ref", {Scheme = Scheme(["a"], [], makeFunType [makeListType (TVar "a"); intType] (TVar "a")); IsMutable = false })
         ("list-count", {Scheme = Scheme(["a"], [], makeFunType [makeListType (TVar "a")] intType); IsMutable = false })
@@ -101,7 +104,7 @@ let prelude : Env =
         ("vec-split", {Scheme = Scheme(["a"], [], makeFunType [makeVecType (TVar "a"); intType] (TTuple [makeVecType (TVar "a"); makeVecType (TVar "a")])); IsMutable = false })
         ("vec-map", {Scheme = Scheme(["a"; "b"], [], makeFunType [makeVecType (TVar "a"); makeFunType [TVar "a"] (TVar "b")] (makeVecType (TVar "b"))); IsMutable = false })
         ("vec-filter", {Scheme = Scheme(["a"], [], makeFunType [makeVecType (TVar "a"); makeFunType [TVar "a"] boolType] (makeVecType (TVar "a"))); IsMutable = false })
-        ("vec-fold", {Scheme = Scheme(["a"; "b"], [], makeFunType [makeVecType (TVar "a"); TVar "b"; makeFunType [TVar "b"; TVar "a"] (TVar "b")] (TVar "b")); IsMutable = false })
+        ("vec-fold", {Scheme = Scheme(["a"; "b"], [], makeFunType [makeFunType [TVar "b"; TVar "a"] (TVar "b"); TVar "b"; makeVecType (TVar "a")] (TVar "b")); IsMutable = false })
         ("vec-reduce", {Scheme = Scheme(["a"], [], makeFunType [makeVecType (TVar "a"); makeFunType [TVar "a"; TVar "a"] (TVar "a")] (TVar "a")); IsMutable = false })
         ("vec-for-each", {Scheme = Scheme(["a"], [], makeFunType [makeVecType (TVar "a"); makeFunType [TVar "a"] voidType] voidType); IsMutable = false })
         ("vec-for-each/range", {Scheme = Scheme(["a"], [], makeFunType [makeVecType (TVar "a"); makeFunType [TVar "a"] voidType; intType; intType] voidType); IsMutable = false })

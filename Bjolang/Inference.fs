@@ -582,6 +582,20 @@ let rec infer (env: Env) (expr: Expr) : HMType * TypedExpr =
           Range = r
           Node = TIf(tCond, tTrue, tFalse) }
 
+    | EWhen(cond, body, negated, r) ->
+        let condType, tCond = infer env cond
+        unify env.Registry condType TypeConstants.boolType
+
+        // The body is evaluated for its effect and its value thrown away, so it
+        // constrains nothing: there is no other arm for it to agree with, and
+        // the form itself yields nothing.
+        let _, tBody = infer env body
+
+        TypeConstants.voidType,
+        { Type = TypeConstants.voidType
+          Range = r
+          Node = TWhen(tCond, tBody, negated) }
+
     | EQuotedSymbol(sym, r) ->
         let t = TCon("Bjolang.Symbol", [])
 

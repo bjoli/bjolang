@@ -126,7 +126,11 @@ let resolveImportPath (basePath: string) (importSpec: ImportSpec) : string optio
         if System.IO.File.Exists(dllPath) then Some dllPath
         else Some rawPath
     | ModulePath p -> 
-        let libPath = Path.GetFullPath(Path.Combine(Environment.CurrentDirectory, "lib"))
+        // Anchored to the installation, never to the working directory: a
+        // module import means the same file no matter where the compiler is
+        // invoked from, so the compiled standard library is always the one
+        // that gets linked instead of being rebuilt from source per caller.
+        let libPath = Paths.libDir
         let relPath = Path.Combine(Array.ofList p)
         let dllPath = Path.GetFullPath(Path.Combine(libPath, relPath + ".dll"))
         let bjoPath = Path.GetFullPath(Path.Combine(libPath, relPath + ".bjo"))

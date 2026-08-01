@@ -1,14 +1,14 @@
 (def/trait (Foldable %col)
   (type %item)
-  (: fold (-> %col %acc (-> %acc %item %acc) %acc)))
+  (: fold (-> (-> %acc %item %acc) %acc %col %acc)))
 
 
 (def/impl (Foldable (List %a))
   (type %item %a)
-  (defun (fold col acc f)
-    (list-foldl col acc f)))
+  (defun (fold f acc col)
+    (list-foldl f acc col)))
 
 (def/impl (Foldable (Vec %a))
   (type %item %a)
-  (defun (fold col acc f)
-    (vec-fold col acc f)))
+  (defun (fold f acc col)
+    (vec-fold f acc col)))

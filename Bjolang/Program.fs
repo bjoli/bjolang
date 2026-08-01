@@ -11,8 +11,11 @@ let printUsage () =
     printfn ""
     printfn "Options:"
     printfn "  --lib       Compile the source as a library (.dll) instead of an executable"
-    printfn "  --debug     Dump the typed AST to ast_dump.txt and the generated C# to out.cs"
+    printfn "  -d, --debug Build unoptimized, with debug symbols, and dump the typed AST to"
+    printfn "              ast_dump.txt and the generated C# to out.cs"
     printfn "  --help      Show this help message"
+    printfn ""
+    printfn "Without -d the output is optimized; a debug build runs several times slower."
 
 let rec parseArgs (args: string list) (opts: CompilerOptions) =
     match args with
@@ -21,6 +24,7 @@ let rec parseArgs (args: string list) (opts: CompilerOptions) =
         printUsage ()
         exit 0
     | "--lib" :: rest -> parseArgs rest { opts with IsLibrary = true }
+    | "-d" :: rest
     | "--debug" :: rest -> parseArgs rest { opts with Debug = true }
     | arg :: rest when not (arg.StartsWith("-")) ->
         // If it doesn't start with '-', assume it's the input file
@@ -227,38 +231,99 @@ let main argv =
                 | None -> "other"
 
             let mainModuleClass = Path.GetFileNameWithoutExtension(inputFilePath) |> Codegen.moduleClassName
-            let entryPointCode = 
-                if isLibrary then ""
-                elif mainArgKind = "list_string" then
-                    $"\npublic static class BjolangEntryPoint {{\n" +
-                    $"    public static void Main(string[] args) {{\n" +
+
+            let runtimeDllPath = Path.Combine(Paths.runtimeDir, "BjolangRuntime.dll")
+            let collectionsDllPath = Path.Combine(Paths.runtimeDir, "Collections.dll")
+            let schemeListDllPath = Path.Combine(Paths.runtimeDir, "SchemeList.dll")
+
+            // Everything this program links against, where it really lives.
+            // Nothing is ever copied next to the output: an assembly has one
+            // home, and a program built from it points back at that home.
+            let linkedAssemblies =
+                (Paths.runtimeAssemblies @ dllDeps)
+                |> List.filter File.Exists
+                |> List.map Path.GetFullPath
+                |> List.distinct
+
+            // The directories the running program has to probe to find those
+            // assemblies. The default load context only looks beside the
+            // executable, so the entry point installs a resolver that looks
+            // here instead.
+            let probeDirs =
+                linkedAssemblies
+                |> List.map Path.GetDirectoryName
+                |> List.distinct
+
+            let resolverCode =
+                if isLibrary || probeDirs.IsEmpty then ""
+                else
+                    let dirLiterals =
+                        probeDirs
+                        |> List.map (fun d -> "@\"" + d.Replace("\"", "\"\"") + "\"")
+                        |> String.concat ", "
+
+                    "    private static readonly string[] BjolangProbeDirs = new string[] { " + dirLiterals + " };\n" +
+                    "    private static void InstallAssemblyResolver() {\n" +
+                    "        System.Runtime.Loader.AssemblyLoadContext.Default.Resolving += (context, name) => {\n" +
+                    "            var libOverride = System.Environment.GetEnvironmentVariable(\"BJOLANG_LIB\");\n" +
+                    "            if (!string.IsNullOrEmpty(libOverride)) {\n" +
+                    "                var overridden = System.IO.Path.Combine(libOverride, \"std\", name.Name + \".dll\");\n" +
+                    "                if (System.IO.File.Exists(overridden)) return context.LoadFromAssemblyPath(overridden);\n" +
+                    "            }\n" +
+                    "            foreach (var dir in BjolangProbeDirs) {\n" +
+                    "                var candidate = System.IO.Path.Combine(dir, name.Name + \".dll\");\n" +
+                    "                if (System.IO.File.Exists(candidate)) return context.LoadFromAssemblyPath(candidate);\n" +
+                    "            }\n" +
+                    "            return null;\n" +
+                    "        };\n" +
+                    "    }\n"
+
+            // `Main` itself must not touch a single type from a linked
+            // assembly: the JIT would then have to load that assembly before
+            // the resolver is in place. All real work lives in `Run`, which is
+            // not compiled until it is called.
+            let runBody =
+                if mainArgKind = "list_string" then
                     $"        SchemeList.SchemeList<string> bjoArgs = SchemeList.SchemeList.Empty<string>();\n" +
                     $"        for (int i = args.Length - 1; i >= 0; i--) {{\n" +
                     $"            bjoArgs = SchemeList.SchemeList.Cons(args[i], bjoArgs);\n" +
                     $"        }}\n" +
-                    $"        %s{mainModuleClass}.main(bjoArgs);\n" +
-                    $"    }}\n" +
-                    $"}}\n"
+                    $"        %s{mainModuleClass}.main(bjoArgs);\n"
                 elif mainArgKind = "no_args" then
-                    $"\npublic static class BjolangEntryPoint {{ public static void Main(string[] args) {{ %s{mainModuleClass}.main(); }} }}\n"
+                    $"        %s{mainModuleClass}.main();\n"
                 else
-                    $"\npublic static class BjolangEntryPoint {{ public static void Main(string[] args) {{ %s{mainModuleClass}.main(0); }} }}\n"
+                    $"        %s{mainModuleClass}.main(0);\n"
+
+            let entryPointCode =
+                if isLibrary then ""
+                else
+                    "\npublic static class BjolangEntryPoint {\n" +
+                    resolverCode +
+                    "    public static void Main(string[] args) {\n" +
+                    (if resolverCode = "" then "" else "        InstallAssemblyResolver();\n") +
+                    "        Run(args);\n" +
+                    "    }\n" +
+                    "    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]\n" +
+                    "    private static void Run(string[] args) {\n" +
+                    runBody +
+                    "    }\n" +
+                    "}\n"
+
             let fullCode = csCode + entryPointCode
 
             let tmpDir = Path.Combine(Path.GetTempPath(), "Bjolang_" + System.Guid.NewGuid().ToString("N"))
             Directory.CreateDirectory(tmpDir) |> ignore
             
             let projType = if isLibrary then "Library" else "Exe"
-            let runtimeDllPath = Path.GetFullPath("BjolangRuntime/bin/Release/net10.0/BjolangRuntime.dll")
-            let collectionsDllPath = Path.GetFullPath("BjolangRuntime/bin/Release/net10.0/Collections.dll")
-            let schemeListDllPath = Path.GetFullPath("BjolangRuntime/bin/Release/net10.0/SchemeList.dll")
-            
 
+            // `Private` false keeps MSBuild from copying the referenced
+            // assemblies into the output directory. They are resolved from
+            // where they were built, at runtime, by the entry point's resolver.
             let dllReferences =
                 dllDeps
                 |> List.map (fun dllPath ->
                     let name = Path.GetFileNameWithoutExtension(dllPath)
-                    $"    <Reference Include=\"{name}\">\n      <HintPath>{dllPath}</HintPath>\n    </Reference>")
+                    $"    <Reference Include=\"{name}\">\n      <HintPath>{dllPath}</HintPath>\n      <Private>false</Private>\n    </Reference>")
                 |> String.concat "\n"
                 
             let csprojContent = $"""<Project Sdk="Microsoft.NET.Sdk">
@@ -271,12 +336,15 @@ let main argv =
   <ItemGroup>
     <Reference Include="BjolangRuntime">
       <HintPath>{runtimeDllPath}</HintPath>
+      <Private>false</Private>
     </Reference>
     <Reference Include="Collections">
       <HintPath>{collectionsDllPath}</HintPath>
+      <Private>false</Private>
     </Reference>
     <Reference Include="SchemeList">
       <HintPath>{schemeListDllPath}</HintPath>
+      <Private>false</Private>
     </Reference>
 {dllReferences}
   </ItemGroup>
@@ -311,14 +379,23 @@ let main argv =
                                 |> String.concat " "
                             
                             let userRefs =
-                                ([runtimeDllPath; collectionsDllPath; schemeListDllPath] @ dllDeps)
-                                |> List.filter File.Exists
-                                |> List.map (fun p -> $"\"-r:{Path.GetFullPath(p)}\"")
+                                linkedAssemblies
+                                |> List.map (fun p -> $"\"-r:{p}\"")
                                 |> String.concat " "
                                 
                             let csFile = Path.Combine(tmpDir, "Program.cs")
                             let targetPath = Path.GetFullPath(outputFilePath)
-                            let cscArgs = $"exec \"{cscDll}\" -noconfig -nullable:enable -target:{target} -out:\"{targetPath}\" \"{csFile}\" {userRefs} {bclRefs}"
+                            // Optimization is not free to leave off: without
+                            // `-optimize+` Roslyn marks the assembly as
+                            // debuggable, which tells the JIT to leave it
+                            // alone, and the same generated C# then runs
+                            // several times slower. It is off only under `-d`,
+                            // where stepping through the code matters more than
+                            // how fast it runs.
+                            let codeGenArgs =
+                                if options.Debug then "-optimize- -debug:portable" else "-optimize+"
+
+                            let cscArgs = $"exec \"{cscDll}\" -noconfig -nullable:enable {codeGenArgs} -target:{target} -out:\"{targetPath}\" \"{csFile}\" {userRefs} {bclRefs}"
                             let psi = System.Diagnostics.ProcessStartInfo("dotnet", cscArgs)
                             psi.UseShellExecute <- false
                             psi.RedirectStandardOutput <- true
@@ -328,35 +405,42 @@ let main argv =
                             let stderr = p.StandardError.ReadToEnd()
                             p.WaitForExit()
                             if p.ExitCode = 0 then
-                                let outputDir = Path.GetDirectoryName(targetPath)
                                 let assemblyBaseName = Path.GetFileNameWithoutExtension(targetPath)
+
+                                // An optimized build has no symbols, so a
+                                // leftover one from an earlier `-d` build would
+                                // describe code that no longer exists. Its
+                                // absence is also how a caller can tell which
+                                // way this binary was built.
+                                if not options.Debug then
+                                    let stalePdb = Path.ChangeExtension(targetPath, ".pdb")
+                                    if File.Exists(stalePdb) then
+                                        try File.Delete(stalePdb) with | _ -> ()
                                 if not isLibrary then
                                     let runtimeConfigPath = Path.ChangeExtension(targetPath, ".runtimeconfig.json")
                                     let runtimeConfigContent = "{\n  \"runtimeOptions\": {\n    \"tfm\": \"net10.0\",\n    \"framework\": {\n      \"name\": \"Microsoft.NETCore.App\",\n      \"version\": \"10.0.0\"\n    }\n  }\n}"
                                     File.WriteAllText(runtimeConfigPath, runtimeConfigContent)
-                                // Build deps.json so .NET can resolve our runtime DLLs
-                                let allDeps = [runtimeDllPath; collectionsDllPath; schemeListDllPath] @ dllDeps |> List.filter File.Exists
-                                let depEntries =
-                                    allDeps |> List.map (fun dllPath ->
-                                        let name = Path.GetFileNameWithoutExtension(dllPath)
-                                        let ver = "1.0.0.0"
-                                        let fileName = Path.GetFileName(dllPath)
-                                        $"\"{name}/{ver}\": {{ \"runtime\": {{ \"{fileName}\": {{ \"assemblyVersion\": \"{ver}\", \"fileVersion\": \"{ver}\" }} }} }}")
-                                let depNames =
-                                    allDeps |> List.map (fun dllPath ->
-                                        let name = Path.GetFileNameWithoutExtension(dllPath)
-                                        $"\"{name}\": \"1.0.0.0\"")
-                                let libEntries =
-                                    allDeps |> List.map (fun dllPath ->
-                                        let name = Path.GetFileNameWithoutExtension(dllPath)
-                                        $"\"{name}/1.0.0.0\": {{ \"type\": \"reference\", \"serviceable\": false, \"sha512\": \"\" }}")
-                                let depsJson = "{\n  \"runtimeTarget\": { \"name\": \".NETCoreApp,Version=v10.0\", \"signature\": \"\" },\n  \"compilationOptions\": {},\n  \"targets\": {\n    \".NETCoreApp,Version=v10.0\": {\n      \"" + assemblyBaseName + "/1.0.0\": {\n        \"dependencies\": { " + (String.concat ", " depNames) + " },\n        \"runtime\": { \"" + assemblyBaseName + ".dll\": {} }\n      },\n      " + (String.concat ",\n      " depEntries) + "\n    }\n  },\n  \"libraries\": {\n    \"" + assemblyBaseName + "/1.0.0\": { \"type\": \"project\", \"serviceable\": false, \"sha512\": \"\" },\n    " + (String.concat ",\n    " libEntries) + "\n  }\n}"
-                                let depsJsonPath = Path.ChangeExtension(targetPath, ".deps.json")
-                                File.WriteAllText(depsJsonPath, depsJson)
-                                // Copy runtime DLLs next to the output so the exe can find them
-                                for dllPath in allDeps do
-                                    let destPath = Path.Combine(outputDir, Path.GetFileName(dllPath))
-                                    try File.Copy(dllPath, destPath, true) with | _ -> ()
+
+                                    // The manifest names only the program
+                                    // itself. Listing a dependency here would
+                                    // make the host demand a copy of it beside
+                                    // the executable — an asset path in a
+                                    // deps.json is always resolved against the
+                                    // application directory, which is exactly
+                                    // what forced the standard library to be
+                                    // duplicated into every output directory.
+                                    // The entry point's resolver loads them
+                                    // from where they live instead.
+                                    let depsJson =
+                                        "{\n  \"runtimeTarget\": { \"name\": \".NETCoreApp,Version=v10.0\", \"signature\": \"\" },\n  \"compilationOptions\": {},\n  \"targets\": {\n    \".NETCoreApp,Version=v10.0\": {\n      \""
+                                        + assemblyBaseName
+                                        + "/1.0.0\": {\n        \"runtime\": { \""
+                                        + assemblyBaseName
+                                        + ".dll\": {} }\n      }\n    }\n  },\n  \"libraries\": {\n    \""
+                                        + assemblyBaseName
+                                        + "/1.0.0\": { \"type\": \"project\", \"serviceable\": false, \"sha512\": \"\" }\n  }\n}"
+                                    let depsJsonPath = Path.ChangeExtension(targetPath, ".deps.json")
+                                    File.WriteAllText(depsJsonPath, depsJson)
                                 printfn $"Successfully built %s{outputFilePath}"
                                 try Directory.Delete(tmpDir, true) with | _ -> ()
                                 Some 0
@@ -368,9 +452,10 @@ let main argv =
             | Some code -> code
             | None ->
                 let projPath = Path.Combine(tmpDir, "Project.csproj")
+                let configuration = if options.Debug then "Debug" else "Release"
                 let psi = new System.Diagnostics.ProcessStartInfo(
                     FileName = "dotnet",
-                    Arguments = $"build \"%s{projPath}\" -c Release -o \"%s{outDir}\" /p:AssemblyName=%s{assemblyName}",
+                    Arguments = $"build \"%s{projPath}\" -c %s{configuration} -o \"%s{outDir}\" /p:AssemblyName=%s{assemblyName}",
                     UseShellExecute = false
                 )
                 let p = System.Diagnostics.Process.Start(psi)

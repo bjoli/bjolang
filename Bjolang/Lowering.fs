@@ -54,10 +54,30 @@ module DictionaryLowering =
 
             let node =
                 match traitMethodOpt with
-                | Some(traitName, _) ->
-                    let targetObj = args.Head
+                | Some(traitName, info) ->
+                    // The implementor is wherever the trait's own signature put
+                    // it: the parameter written as the trait variable. Reading
+                    // argument zero tied dispatch to one particular parameter
+                    // order, so `(fold f acc col)` had no receiver to dispatch on.
+                    let implementorIndex =
+                        let sameVar (a: string) (b: string) = a.TrimStart('\'') = b.TrimStart('\'')
+
+                        match Map.tryFind methodName info.Signatures with
+                        | Some(TFun(paramTypes, _)) ->
+                            paramTypes
+                            |> List.tryFindIndex (function
+                                | TVar v -> sameVar v info.ImplementorVar
+                                | _ -> false)
+                            |> Option.defaultValue 0
+                        | _ -> 0
+
+                    if implementorIndex >= args.Length || implementorIndex >= argTypes.Length then
+                        failwithf
+                            $"Trait method '%s{methodName}' is called without its %s{traitName} implementor at line %d{expr.Range.Start.Line}"
+
+                    let targetObj = args[implementorIndex]
                     let loweredArgs = args |> List.map recurse
-                    let receiverType = prune env.Registry argTypes[0]
+                    let receiverType = prune env.Registry argTypes[implementorIndex]
 
                     match prune env.Registry targetObj.Type with
                     | TCon(targetTypeName, tconArgs) ->

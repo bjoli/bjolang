@@ -79,8 +79,18 @@ for bjo_file in $TEST_FILES; do
     fi
     
     # 3. Run
-    echo "  Running..."
-    dotnet "$exe_file"
+    #
+    # A test that reads from stdin gets its input from a `.in` file sitting
+    # next to the source. Everything else is run against /dev/null: an
+    # unattended suite must never be able to block waiting for a terminal.
+    input_file="${bjo_file%.bjo}.in"
+    if [ -f "$input_file" ]; then
+        echo "  Running (stdin from $(basename "$input_file"))..."
+        dotnet "$exe_file" < "$input_file"
+    else
+        echo "  Running..."
+        dotnet "$exe_file" < /dev/null
+    fi
     run_status=$?
     
     if [ $run_status -ne 0 ]; then

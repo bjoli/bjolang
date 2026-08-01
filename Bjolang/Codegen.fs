@@ -281,6 +281,9 @@ let rec isStatementShaped (expr: TypedExpr) : bool =
     // hoists can safely go ahead of the conditional.
     | TIf (_, t, f) -> isVoidType expr.Type || containsHoist t || containsHoist f
 
+    // One-armed and void: there is no C# expression with that shape.
+    | TWhen _ -> true
+
     // A `switch` expression cannot yield void, cannot contain the `continue` or
     // `goto` a jump compiles to, and gives its arms and guards no statement
     // position of their own.
@@ -604,6 +607,7 @@ let rec generateExpr (ctx: CodegenContext) (expr: TypedExpr) : unit =
     | TLetTuple _
     | TLetMutable _
     | TSet _
+    | TWhen _
     | TTryFinally _
     | TLoop _
     | TRecur _ ->
@@ -942,6 +946,25 @@ and generateBlock (ctx: CodegenContext) (target: BlockTarget) (expr: TypedExpr) 
         withIndent ctx (fun c -> generateBlock c armTarget f)
         indent ctx; appendLine ctx "}"
 
+    | TWhen (cond, body, negated) ->
+        emitStatement ctx (fun c ->
+            indent c
+            append c (if negated then "if (!(" else "if (")
+            generateExpr c cond
+            appendLine c (if negated then ")) {" else ") {"))
+
+        // The body runs for its effect: whatever it evaluates to is discarded.
+        withIndent ctx (fun c -> generateBlock c Discard body)
+        indent ctx; appendLine ctx "}"
+
+        // `when` yields void, like `set!`, so the enclosing target still has to
+        // be discharged.
+        match target with
+        | Return -> indent ctx; appendLine ctx "return;"
+        | Assign _
+        | DeclareAndAssign _
+        | Discard -> ()
+
     | TThrow msgExpr ->
         // A `throw` never reaches the declaration's use, but C# still wants the
         // variable to exist for the statements that follow.
@@ -989,7 +1012,13 @@ and private emitTerminal (ctx: CodegenContext) (target: BlockTarget) (valueType:
             emit ctx; appendLine ctx ";"
         else
             append ctx $"%s{varType} %s{varName} = "; emit ctx; appendLine ctx ";"
-    | Discard -> emit ctx; appendLine ctx ";"
+    | Discard ->
+        // C# has no expression statement for an arbitrary value, so a discarded
+        // one is assigned to `_`. A void value is already a statement.
+        if isVoid then
+            emit ctx; appendLine ctx ";"
+        else
+            append ctx "_ = "; emit ctx; appendLine ctx ";"
 
 and private generateMatch
     (ctx: CodegenContext)
@@ -1120,10 +1149,12 @@ and private generateRecur
             codegenError expr.Range.Start.Line "internal error: a loop jump was emitted with no loop in scope"
 
     // A jump discards the enclosing function's remaining work, so it is only
-    // meaningful where that function's value is produced. Under `Assign` the
-    // variable would be left unset and the following `break` unreachable.
+    // meaningful where that function's value is produced — or where no value is
+    // wanted at all, as in the body of a `when`. Under `Assign` the variable
+    // would be left unset and the following `break` unreachable.
     match target with
-    | Return -> ()
+    | Return
+    | Discard -> ()
     | _ ->
         codegenError
             expr.Range.Start.Line

@@ -125,6 +125,10 @@ and TExprNode =
     | TLetMutable of string * TypedExpr * TypedExpr
     | TSet of string * TypedExpr
     | TIf of TypedExpr * TypedExpr * TypedExpr
+    /// A one-armed conditional: `(when cond body)`, or `(unless cond body)`
+    /// when the flag is set. Always of type void — the body runs for its
+    /// effect and its value is discarded.
+    | TWhen of TypedExpr * TypedExpr * bool
     | TTryFinally of TypedExpr * TypedExpr
     | TMatch of TypedExpr * TMatchClause list
     | TInterfaceCall of HMType * string * TypedExpr * TypedExpr list

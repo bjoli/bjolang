@@ -269,6 +269,12 @@ let rec private lowerExpr (targets: LoopTarget list) (inTail: bool) (expr: Typed
         { expr with
             Node = TIf(notTail c, inherits t, inherits f) }
 
+    // A `when` in tail position leaves its body in tail position too: the value
+    // is discarded either way, and a jump never produces one.
+    | TWhen(c, body, negated) ->
+        { expr with
+            Node = TWhen(notTail c, inherits body, negated) }
+
     | TLetMutable(n, v, b) ->
         { expr with
             Node = TLetMutable(n, notTail v, lowerExpr (shadow [ n ]) inTail b) }

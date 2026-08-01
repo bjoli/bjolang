@@ -69,6 +69,9 @@ and Expr =
     | ELetMutable of string * FType option * Expr * Expr * Range
     | ESet of string * Expr * Range
     | EIf of Expr * Expr * Expr * Range
+    /// `(when cond body...)`, and with the flag set, `(unless cond body...)`:
+    /// a conditional with only one arm, evaluated for effect.
+    | EWhen of Expr * Expr * bool * Range
     | EFun of string list * Expr * Range
     | ERecord of (string * Expr) list * Range
     | ERecordUpdate of string * (string * Expr) list * Range
@@ -382,16 +385,21 @@ let rec parseExpr (s: SExpr) : Expr =
                 | [ cond; t; f ] -> EIf(parseExpr cond, parseExpr t, parseExpr f, r)
                 | _ -> failwith "Invalid if syntax"
 
+            // `when` and `unless` are one-armed: there is no second branch for
+            // the body's type to agree with, so they are statements rather than
+            // expressions. Desugaring them into `if` with an empty tuple as the
+            // missing arm made every body that was not itself an empty tuple a
+            // type error — which is to say every body anyone would write.
             | "when" ->
                 match args with
                 | cond :: bodyExprs when not bodyExprs.IsEmpty ->
-                    EIf(parseExpr cond, parseBody bodyExprs listRange, ETuple([], listRange), listRange)
+                    EWhen(parseExpr cond, parseBody bodyExprs listRange, false, listRange)
                 | _ -> failwithf $"Invalid when syntax at line %d{r.Start.Line}. Expected: (when cond body...)"
 
             | "unless" ->
                 match args with
                 | cond :: bodyExprs when not bodyExprs.IsEmpty ->
-                    EIf(parseExpr cond, ETuple([], listRange), parseBody bodyExprs listRange, listRange)
+                    EWhen(parseExpr cond, parseBody bodyExprs listRange, true, listRange)
                 | _ -> failwithf $"Invalid unless syntax at line %d{r.Start.Line}. Expected: (unless cond body...)"
 
             | "and" ->

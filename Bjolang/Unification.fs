@@ -101,6 +101,23 @@ let bindMeta (registry: TraitRegistry) (m: MetaVar) (t: HMType) =
         else
             m.Value <- Some t
 
+/// Does this type still hide an associated-type projection whose implementor is
+/// unknown? `prune` resolves a projection as soon as the implementor is
+/// concrete, so what is left is a projection waiting on a meta variable —
+/// something else in the same call has to pin it down first.
+let rec private awaitsImplementor (registry: TraitRegistry) (t: HMType) : bool =
+    match prune registry t with
+    | TAssoc(_, _, impl) ->
+        match prune registry impl with
+        | TMeta _ -> true
+        | _ -> false
+    | TCon(_, args)
+    | TTuple args -> List.exists (awaitsImplementor registry) args
+    | TFun(args, ret) ->
+        List.exists (awaitsImplementor registry) args
+        || awaitsImplementor registry ret
+    | _ -> false
+
 let rec unify (registry: TraitRegistry) (t1: HMType) (t2: HMType) =
     let t1, t2 = prune registry t1, prune registry t2
 
@@ -111,7 +128,21 @@ let rec unify (registry: TraitRegistry) (t1: HMType) (t2: HMType) =
     | TCon(name1, args1), TCon(name2, args2) when name1 = name2 && args1.Length = args2.Length ->
         List.iter2 (unify registry) args1 args2
     | TFun(args1, ret1), TFun(args2, ret2) when args1.Length = args2.Length ->
-        List.iter2 (unify registry) args1 args2
+        // An argument whose type waits on an implementor is checked last. In
+        // `(fold + 0 v)` the folding function's type mentions `%item`, which is
+        // `Foldable`'s associated type: it cannot be compared against `+`'s
+        // `int` until `v` has said which implementation is in play. Parameter
+        // order should not decide whether a program type-checks.
+        let ready, waiting =
+            List.zip args1 args2
+            |> List.partition (fun (a, b) -> not (awaitsImplementor registry a || awaitsImplementor registry b))
+
+        for (a, b) in ready do
+            unify registry a b
+
+        for (a, b) in waiting do
+            unify registry a b
+
         unify registry ret1 ret2
     | TTuple args1, TTuple args2 when args1.Length = args2.Length -> List.iter2 (unify registry) args1 args2
     | TAssoc(tn1, an1, impl1), TAssoc(tn2, an2, impl2) when tn1 = tn2 && an1 = an2 -> unify registry impl1 impl2

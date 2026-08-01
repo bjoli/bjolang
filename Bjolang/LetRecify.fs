@@ -90,6 +90,10 @@ let rec exprFreeVars (isGuarded: bool) (bound: Set<string>) (expr: Expr) : Map<s
         let tfv = exprFreeVars isGuarded bound trueB
         let ffv = exprFreeVars isGuarded bound falseB
         mergeVarUseMaps (mergeVarUseMaps cfv tfv) ffv
+    | EWhen(cond, body, _, _) ->
+        let cfv = exprFreeVars isGuarded bound cond
+        let bfv = exprFreeVars isGuarded bound body
+        mergeVarUseMaps cfv bfv
     | EFun(args, body, _) -> exprFreeVars true (Set.union bound (Set.ofList args)) body
     | ERecord(fields, _) ->
         fields
@@ -226,6 +230,8 @@ let rec letrecifyExpr (expr: Expr) : Expr =
     | ELetTuple(names, value, body, r) -> ELetTuple(names, letrecifyExpr value, letrecifyExpr body, r)
 
     | EIf(cond, t, f, r) -> EIf(letrecifyExpr cond, letrecifyExpr t, letrecifyExpr f, r)
+
+    | EWhen(cond, body, negated, r) -> EWhen(letrecifyExpr cond, letrecifyExpr body, negated, r)
 
     | EFun(args, body, r) -> EFun(args, letrecifyExpr body, r)
 
