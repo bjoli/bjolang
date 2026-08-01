@@ -1,0 +1,107 @@
+* Bjolang Prelude
+
+The prelude contains the default environment available to all Bjolang programs. These procedures are automatically in scope.
+
+** Core Values and Constants
+- ~true~ : Boolean true
+- ~false~ : Boolean false
+
+** I/O
+- ~(display x)~ : Prints ~x~ to standard output without a newline.
+- ~(displayln x)~ : Prints ~x~ to standard output with a newline.
+- ~(print x)~ : Generic print utilizing the ~->str~ trait.
+- ~(println x)~ : Generic println utilizing the ~->str~ trait.
+- ~(read-line)~ : Reads a line of text from standard input.
+- ~(newline)~ : Prints a newline character.
+
+** Math Operators
+Standard polymorphic math operators (deferred to C# for resolution):
+- ~(+ a b)~
+- ~(- a b)~
+- ~(* a b)~
+- ~(/ a b)~
+- ~(% a b)~
+
+** Comparison
+- ~(= a b)~
+- ~(< a b)~
+- ~(> a b)~
+- ~(<= a b)~
+- ~(>= a b)~
+- ~(eq? a b)~ : Pointer/Reference equality (structural for value types).
+- ~(equal? a b)~ : Structural/Generic equality.
+
+** String Operations
+- ~(string-append a b)~ : Concatenates strings ~a~ and ~b~.
+- ~(string-length s)~ : Returns the length of string ~s~.
+
+** Conversions
+- ~(byte->string b)~
+- ~(int->string i)~ (also ~number->string~)
+- ~(long->string l)~
+- ~(double->string d)~
+- ~(string->int s)~
+- ~(string->double s)~
+
+** Lists (~SchemeList~)
+Built-in functional linked lists.
+- ~(Cons head tail)~, ~(cons head tail)~ : Constructs a list.
+- ~(Nil)~, ~(list-empty)~ : Returns an empty list.
+- ~(list-head lst)~ : Returns the first element.
+- ~(list-tail lst)~ : Returns the rest of the list.
+- ~(list-empty? lst)~ : Returns true if the list is empty.
+- ~(list-length lst)~, ~(list-count lst)~ : Returns the number of elements.
+- ~(list-reverse lst)~ : Reverses the list.
+- ~(list-map lst f)~ : Maps function ~f~ over the list.
+- ~(list-filter lst f)~ : Filters elements satisfying ~f~.
+- ~(list-foldl f init lst)~ : Left fold; ~f~ receives ~(acc item)~.
+- ~(list-foldr f init lst)~ : Right fold; ~f~ receives ~(item acc)~.
+- ~(list-for-each lst f)~ : Applies ~f~ to each element for side effects.
+- ~(list-ref lst index)~ : Gets the element at ~index~.
+
+** Vectors (~Vec~ / ~RrbList~)
+Persistent immutable vectors.
+- ~(vec-empty)~ : Returns an empty vector.
+- ~(vec-get vec index)~ : Gets the element at ~index~.
+- ~(vec-set vec index value)~ : Returns a new vector with ~value~ at ~index~.
+- ~(vec-add vec item)~ : Returns a new vector with ~item~ appended.
+- ~(vec-insert vec index item)~ : Returns a new vector with ~item~ inserted at ~index~.
+- ~(vec-remove-at vec index)~ : Returns a new vector with the element at ~index~ removed.
+- ~(vec-pop vec)~ : Returns a new vector with the last element removed.
+- ~(vec-pop-first vec)~ : Returns a new vector with the first element removed.
+- ~(vec-slice vec start count)~ : Returns a sub-vector.
+- ~(vec-merge vec other)~ : Concatenates two vectors.
+- ~(vec-merge/pure vec other)~ : Concatenates two vectors (pure).
+- ~(vec-split vec index)~ : Splits the vector into two vectors at ~index~.
+- ~(vec-map vec f)~ : Maps ~f~ over the vector.
+- ~(vec-filter vec f)~ : Filters the vector.
+- ~(vec-fold f init vec)~ : Left fold; ~f~ receives ~(acc item)~.
+- ~(vec-reduce vec f)~ : Reduces the vector.
+- ~(vec-for-each vec f)~ : Applies ~f~ for side effects.
+- ~(vec-for-each/range vec f start count)~ : Applies ~f~ over a range.
+- ~(vec-iter vec f)~ : Iterates with early exit (returns true if all elements matched).
+- ~(vec-count vec)~ : Returns the size of the vector.
+- ~(vec-contains vec item)~ : Checks if ~item~ is in the vector.
+- ~(vec-compact vec)~ : Compacts the vector's internal structure.
+
+** Vector Builders
+Mutable builders for efficiently constructing vectors.
+- ~(vecbuilder-empty)~ : Creates an empty builder.
+- ~(vec->vecbuilder vec)~ : Creates a builder from a vector.
+- ~(vecbuilder-add! builder item)~ : Mutates the builder by appending ~item~.
+- ~(vecbuilder-set! builder index item)~ : Mutates the builder by setting ~item~ at ~index~.
+- ~(vecbuilder-get builder index)~ : Gets the element at ~index~.
+- ~(vecbuilder-count builder)~ : Returns the size.
+- ~(vecbuilder->vec builder)~ : Freezes the builder into an immutable vector.
+
+** Iterators
+Standard iterator protocol for collections.
+- ~(iterate col)~ : Returns an iterator for the collection.
+- ~(done? iter)~ : Returns true if the iterator is exhausted.
+- ~(current iter)~ : Returns the current element.
+- ~(next iter)~ : Advances the iterator.
+
+** Traits
+- ~->str~ : Trait for string representation with method ~(->str x)~. Implemented for ~string~, ~int~, ~double~, ~byte~, ~long~.
+- ~Iterator~ : Trait for iterators.
+- ~Iterable~ : Trait for iterable collections.

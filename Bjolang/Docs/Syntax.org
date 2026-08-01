@@ -1,0 +1,106 @@
+* Syntax
+
+** Literals
+- Numbers: ~42~, ~-100~, ~3.14159~
+- Strings: ~"hello world"~
+- Booleans: ~true~, ~false~
+- Characters: ~#\a~, ~#\newline~
+
+** Identifiers
+Identifiers may contain most characters except ~_~, and may not start with a digit. 
+Examples: ~my-var~, ~+~, ~string->int~, ~empty?~
+
+** Naming conventions
+Bjolang has some naming conventions, mostly taken from Scheme:
+*** Predicates
+Predicates end with ~?~. ~IsEmpty~ becomes ~empty?~. Examples: ~list-empty?~, ~eq?~.
+*** Mutation
+Mutating procedures end with a bang (~!~). ~(vec-set vec index value)~ for immutable updates, but ~(vecbuilder-set! builder index value)~ for mutable/non-linear updates.
+*** Conversions
+Conversions are denoted using ~->~. Example: ~int->string~, ~vec->vecbuilder~.
+
+** Casing
+Variables or functions starting with a character must start with a lower case char.
+Types always start with uppercase characters. (e.g. ~List~, ~Vec~, ~Int32~, ~String~)
+
+** Comments
+Line comments start with ~;;~.
+#+BEGIN_SRC scheme
+;; This is a comment
+#+END_SRC
+
+** Definitions
+Functions are defined using ~defun~.
+#+BEGIN_SRC scheme
+(defun (add x y)
+  (+ x y))
+#+END_SRC
+
+Type annotations for top-level definitions use ~:~.
+#+BEGIN_SRC scheme
+(: add (-> int int int))
+(defun (add x y) (+ x y))
+#+END_SRC
+
+** Control Flow
+Standard ~if~ expressions:
+#+BEGIN_SRC scheme
+(if (< x 0)
+    "negative"
+    "positive")
+#+END_SRC
+
+~when~ and ~unless~ are one-armed conditionals, and take a body of any number of
+forms:
+#+BEGIN_SRC scheme
+(when (> x 100)
+  (displayln "large")
+  (record x))
+
+(unless (list-empty? xs)
+  (process xs))
+#+END_SRC
+
+They are *statements*, not expressions: the body runs for its effect, whatever
+it evaluates to is discarded, and the form itself has type ~void~. With no
+second arm there is nothing for the body's type to agree with, so this is the
+only consistent reading — use ~if~ when you want a value.
+
+** Local Bindings
+Use ~let~ to bind local variables.
+#+BEGIN_SRC scheme
+(let ((x 10)
+      (y 20))
+  (+ x y))
+#+END_SRC
+
+** Loops
+A ~let~ with a name binds a procedure to call for the next iteration:
+#+BEGIN_SRC scheme
+(let loop ((a 0))
+  (when (< a 3)
+    (println a)
+    (loop (+ a 1))))
+#+END_SRC
+
+A call to that name in tail position compiles to a jump rather than a call, so
+a named ~let~ runs in constant stack space however long it iterates.
+
+** Traits and Implementations
+Bjolang supports generic traits and implementations. A trait is parameterised by
+exactly *one* implementor variable; every other type it needs is an associated
+type, declared with ~(type %name)~ and pinned down by each implementation.
+#+BEGIN_SRC scheme
+(def/trait (Foldable %col)
+  (type %item)
+  (: fold (-> (-> %acc %item %acc) %acc %col %acc)))
+
+(def/impl (Foldable (List %a))
+  (type %item %a)
+  (defun (fold f acc col)
+    (list-foldl f acc col)))
+#+END_SRC
+
+An associated type is what lets ~fold~ speak about the element type of a
+collection it has not been told the element type of: ~%item~ is whatever the
+implementation for ~(List %a)~ says it is.
