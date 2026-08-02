@@ -22,6 +22,9 @@ type LoopScope = {
     /// `goto case` binds to the *nearest* enclosing switch, so a jump from
     /// inside a nested one has to go through the discriminant instead.
     NestedSwitches: int
+    /// When true, this is a flattened inlined loop. Non-recur terminals break
+    /// out of the while loop instead of returning.
+    IsInlineLoop: bool
 }
 
 type CodegenContext = {
@@ -836,8 +839,59 @@ and generateBlock (ctx: CodegenContext) (target: BlockTarget) (expr: TypedExpr) 
     | TLoop (members, bodyOpt) ->
         match bodyOpt with
         | Some body ->
-            generateLoopGroup ctx members body
-            generateBlock ctx target body
+            // Check if this is a single-entry flat loop (like a named-let):
+            // A single member whose loop name is immediately called with initial arguments in `body`,
+            // and the loop name is not referenced as a first-class value or called non-tail-recursively.
+            let flatLoopInfo =
+                match members, body.Node with
+                | [ member_ ], TApply({ Node = TIdent(calleeName, _) }, initArgs, _)
+                    when calleeName = member_.LoopName && initArgs.Length = member_.Slots.Length ->
+                    let freeRefs = LoopLowering.referencedNames member_.Body
+                    if not (freeRefs.Contains member_.LoopName) then
+                        Some (member_, initArgs)
+                    else
+                        None
+                | _ -> None
+
+            match flatLoopInfo with
+            | Some (member_, initArgs) ->
+                // Flat loop path: emit slot variables, evaluate initial args, and run while(true) inline!
+                for (slotName, slotType) in member_.Slots do
+                    indent ctx; appendLine ctx $"{typeToString slotType} {sanitizeIdent slotName};"
+
+                let temps = initArgs |> List.map (fun _ -> freshName "__init")
+                for arg, tmp in List.zip initArgs temps do
+                    emitStatement ctx (fun c ->
+                        indent c
+                        append c $"var {tmp} = "
+                        generateExpr c arg
+                        appendLine c ";")
+
+                let slots = member_.Slots |> List.map (fst >> sanitizeIdent)
+                for slot, tmp in List.zip slots temps do
+                    indent ctx; appendLine ctx $"{slot} = {tmp};"
+
+                let loopTarget =
+                    match target with
+                    | DeclareAndAssign (varType, varName) ->
+                        indent ctx; appendLine ctx $"{varType} {varName};"
+                        Assign varName
+                    | _ -> target
+
+                let inner =
+                    { ctx with
+                        Loop = Some { Members = members; Merged = false; StateVar = ""; NestedSwitches = 0; IsInlineLoop = true } }
+
+                indent inner; appendLine inner "while (true) {"
+                withIndent inner (fun c2 ->
+                    emitIterationCopies c2 member_
+                    generateBlock c2 loopTarget member_.Body)
+                indent inner; appendLine inner "}"
+
+            | None ->
+                // General letrec / mutually-recursive / escaping loop: emit as local functions
+                generateLoopGroup ctx members body
+                generateBlock ctx target body
         | None ->
             codegenError
                 expr.Range.Start.Line
@@ -889,7 +943,13 @@ and generateBlock (ctx: CodegenContext) (target: BlockTarget) (expr: TypedExpr) 
         | Return -> indent ctx; appendLine ctx "return;"
         | Assign _
         | DeclareAndAssign _
-        | Discard -> ()
+        | Discard ->
+            let isInline =
+                match ctx.Loop with
+                | Some { IsInlineLoop = true } -> true
+                | _ -> false
+            if isInline then
+                indent ctx; appendLine ctx "break;"
 
     | TLetTuple (names, value, body) ->
         let tmp = freshName "__tuple"
@@ -963,7 +1023,13 @@ and generateBlock (ctx: CodegenContext) (target: BlockTarget) (expr: TypedExpr) 
         | Return -> indent ctx; appendLine ctx "return;"
         | Assign _
         | DeclareAndAssign _
-        | Discard -> ()
+        | Discard ->
+            let isInline =
+                match ctx.Loop with
+                | Some { IsInlineLoop = true } -> true
+                | _ -> false
+            if isInline then
+                indent ctx; appendLine ctx "break;"
 
     | TThrow msgExpr ->
         // A `throw` never reaches the declaration's use, but C# still wants the
@@ -994,6 +1060,11 @@ and generateBlock (ctx: CodegenContext) (target: BlockTarget) (expr: TypedExpr) 
 /// to be discharged.
 and private emitTerminal (ctx: CodegenContext) (target: BlockTarget) (valueType: HMType) (emit: CodegenContext -> unit) : unit =
     let isVoid = isVoidType valueType
+    let isInline =
+        match ctx.Loop with
+        | Some { IsInlineLoop = true } -> true
+        | _ -> false
+
     indent ctx
     match target with
     | Return ->
@@ -1005,20 +1076,32 @@ and private emitTerminal (ctx: CodegenContext) (target: BlockTarget) (valueType:
     | Assign name ->
         if isVoid then
             emit ctx; appendLine ctx ";"
+            if isInline then
+                indent ctx; appendLine ctx "break;"
         else
             append ctx $"%s{name} = "; emit ctx; appendLine ctx ";"
+            if isInline then
+                indent ctx; appendLine ctx "break;"
     | DeclareAndAssign (varType, varName) ->
         if isVoid then
             emit ctx; appendLine ctx ";"
+            if isInline then
+                indent ctx; appendLine ctx "break;"
         else
             append ctx $"%s{varType} %s{varName} = "; emit ctx; appendLine ctx ";"
+            if isInline then
+                indent ctx; appendLine ctx "break;"
     | Discard ->
         // C# has no expression statement for an arbitrary value, so a discarded
         // one is assigned to `_`. A void value is already a statement.
         if isVoid then
             emit ctx; appendLine ctx ";"
+            if isInline then
+                indent ctx; appendLine ctx "break;"
         else
             append ctx "_ = "; emit ctx; appendLine ctx ";"
+            if isInline then
+                indent ctx; appendLine ctx "break;"
 
 and private generateMatch
     (ctx: CodegenContext)
@@ -1148,17 +1231,9 @@ and private generateRecur
         | None ->
             codegenError expr.Range.Start.Line "internal error: a loop jump was emitted with no loop in scope"
 
-    // A jump discards the enclosing function's remaining work, so it is only
-    // meaningful where that function's value is produced — or where no value is
-    // wanted at all, as in the body of a `when`. Under `Assign` the variable
-    // would be left unset and the following `break` unreachable.
-    match target with
-    | Return
-    | Discard -> ()
-    | _ ->
-        codegenError
-            expr.Range.Start.Line
-            "this jump is not in the value position of its loop, so the loop's result would be left unset"
+    // A jump discards the enclosing block's remaining work. Under any target
+    // (Return, Discard, Assign, DeclareAndAssign), the slot variables are updated
+    // and the loop continues to the next iteration.
 
     let member_ = loop.Members[index]
     let slots = member_.Slots |> List.map (fst >> sanitizeIdent)
@@ -1211,7 +1286,7 @@ and private generateFunctionBody (ctx: CodegenContext) (body: TypedExpr) : unit 
         withIndent ctx (fun c ->
             let inner =
                 { c with
-                    Loop = Some { Members = [ member_ ]; Merged = false; StateVar = ""; NestedSwitches = 0 } }
+                    Loop = Some { Members = [ member_ ]; Merged = false; StateVar = ""; NestedSwitches = 0; IsInlineLoop = false } }
 
             emitIterationCopies inner member_
             generateBlock inner Return member_.Body)
@@ -1287,7 +1362,7 @@ and private generateSingleLoop
     withIndent ctx (fun c ->
         let inner =
             { c with
-                Loop = Some { Members = members; Merged = false; StateVar = ""; NestedSwitches = 0 } }
+                Loop = Some { Members = members; Merged = false; StateVar = ""; NestedSwitches = 0; IsInlineLoop = false } }
 
         if loops then
             indent inner; appendLine inner "while (true) {"
@@ -1342,7 +1417,7 @@ and private generateMergedLoop (ctx: CodegenContext) (members: TLoopMember list)
                 withIndent cs (fun cb ->
                     let inner =
                         { cb with
-                            Loop = Some { Members = members; Merged = true; StateVar = stateVar; NestedSwitches = 0 } }
+                            Loop = Some { Members = members; Merged = true; StateVar = stateVar; NestedSwitches = 0; IsInlineLoop = false } }
 
                     emitIterationCopies inner member_
                     generateBlock inner Return member_.Body)
