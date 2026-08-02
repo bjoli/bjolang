@@ -22,9 +22,16 @@ type LoopScope = {
     /// `goto case` binds to the *nearest* enclosing switch, so a jump from
     /// inside a nested one has to go through the discriminant instead.
     NestedSwitches: int
-    /// When true, this is a flattened inlined loop. Non-recur terminals break
-    /// out of the while loop instead of returning.
+    /// When true, this is a flattened inlined loop. Non-recur terminals leave
+    /// the `while` loop instead of returning.
     IsInlineLoop: bool
+    /// A label emitted just after an inlined loop, for exits that `break`
+    /// cannot express because a `switch` stands in the way.
+    ExitLabel: string
+    /// Set when something actually jumped to `ExitLabel`. A label C# can see no
+    /// jump to is a warning, so it is only emitted once it has been used —
+    /// which is known only after the body has been generated.
+    ExitLabelUsed: bool ref
 }
 
 type CodegenContext = {
@@ -40,6 +47,11 @@ type CodegenContext = {
     Loop: LoopScope option
     /// Type parameters the enclosing method or class already introduced.
     TypeParams: Set<string>
+    /// True inside the iterator method a `seq` was emitted as. `yield` is a
+    /// property of the *method* it appears in, not of the lexical form, so any
+    /// construct that opens a new C# method — a lambda, a local function, a
+    /// non-inlined loop member — clears this.
+    InSeq: bool
 }
 
 let inline append (ctx: CodegenContext) (s: string) =
@@ -82,6 +94,9 @@ let mapPrimitiveType (name: string) =
     | "Vec" -> "Collections.RrbList"
     | "VecBuilder" -> "Collections.RrbBuilder"
     | "List" -> "SchemeList.SchemeList"
+    // A `seq` is a C# iterator, so its type is the one C# iterators produce.
+    | "Seq" -> "System.Collections.Generic.IEnumerable"
+    | "Option" -> "BjolangRuntime.Option"
     | _ -> name
 
 let sanitizeIdent (s: string) =
@@ -178,11 +193,23 @@ let rec collectTypeVars (t: HMType) : string list =
     | TAssoc (_, assocName, TVar implVar) -> [ assocTypeVar implVar assocName ]
     | TAssoc (_, _, implType) -> collectTypeVars implType
 
+/// What is to become of the value a block produces.
+///
+/// Every case but `Effect` describes a *terminal* position: once the value is
+/// discharged, the block is over, and inside an inlined loop that means leaving
+/// the loop. `Effect` is the other thing a block can be — one statement among
+/// several, after which control simply continues — and the two must not be
+/// confused. Spelling both as `Discard` made every intermediate `(println x)`
+/// in a named `let` compile to `println(x); break;`.
 type BlockTarget =
     | Return
     | Assign of string
     | DeclareAndAssign of string * string
+    /// Terminal, but the value is thrown away.
     | Discard
+    /// Not terminal: run it for its effect, then fall through to the statements
+    /// that follow.
+    | Effect
 
 let rec serializeHMType (t: HMType) : string =
     match t with
@@ -275,7 +302,12 @@ let rec isStatementShaped (expr: TypedExpr) : bool =
     | TTryFinally _
     | TVecMake _
     | TLoop _
-    | TRecur _ -> true
+    | TRecur _
+    // A C# iterator is a *method*: the body has to be emitted as one, and this
+    // node's value is a call to it.
+    | TSeq _
+    | TYield _
+    | TYieldFrom _ -> true
 
     // A conditional stays `c ? t : f` as long as it yields a value and neither
     // arm needs statements. Hoisting out of an arm would evaluate it
@@ -308,7 +340,10 @@ let rec isStatementShaped (expr: TypedExpr) : bool =
 and containsHoist (expr: TypedExpr) : bool =
     isStatementShaped expr
     || match expr.Node with
-       | TLambda _ -> false
+       // Both open a block of their own, so nothing inside can need a statement
+       // position out here.
+       | TLambda _
+       | TSeq _ -> false
        | _ -> TypeVisitor.children expr |> List.exists containsHoist
 
 /// Translates a typed pattern into C# pattern syntax.
@@ -318,6 +353,16 @@ let rec generatePattern (ctx: CodegenContext) (pat: TypedPattern) : unit =
     | TPIdent name -> append ctx $"var {sanitizeIdent name}"
     | TPInt value -> append ctx value
     | TPString value -> append ctx $"\"%s{escapeStringLiteral value}\""
+    // `Option` is the runtime's `Option<T>` struct — a flag and a value rather
+    // than a pair of subclasses — so its constructors match as property
+    // patterns. The type is left off: the scrutinee already has it, and a type
+    // pattern naming a struct's own type reads as a tautology.
+    | TPConstruct ("None", _) -> append ctx "{ Tag: 0 }"
+    | TPConstruct ("Some", [ inner ]) ->
+        append ctx "{ Tag: 1, Value: "
+        generatePattern ctx inner
+        append ctx " }"
+
     | TPConstruct (name, args) ->
         // Cons/Nil are now builtins backed by SchemeList.Cons<T>/SchemeList.Nil<T>,
         // not union cases, so they need special-case pattern generation.
@@ -416,6 +461,11 @@ let rec generateExpr (ctx: CodegenContext) (expr: TypedExpr) : unit =
         | "Nil" ->
             let elemTypeStr = elementTypeString expr.Type
             append ctx $"Nil<%s{elemTypeStr}>()"
+        // Like `Nil`, a nullary constructor rather than a bare name: written
+        // plain it would be a method group.
+        | "None" ->
+            let elemTypeStr = elementTypeString expr.Type
+            append ctx $"None<%s{elemTypeStr}>()"
         | "Cons" ->
             match expr.Type with
             | TFun (argTypes, _) ->
@@ -471,8 +521,9 @@ let rec generateExpr (ctx: CodegenContext) (expr: TypedExpr) : unit =
         append ctx (args |> List.map sanitizeIdent |> String.concat ", ")
         append ctx ") => {\n"
         // A lambda is its own function scope: it has no access to the enclosing
-        // loop's slots, and a `continue` inside it would bind to nothing.
-        let inner = { ctx with Prelude = None; Loop = None }
+        // loop's slots, a `continue` inside it would bind to nothing, and it
+        // cannot be an iterator, so it cannot yield either.
+        let inner = { ctx with Prelude = None; Loop = None; InSeq = false }
         withIndent inner (fun c -> generateBlock c Return body)
         indent ctx; append ctx "}"
 
@@ -613,7 +664,10 @@ let rec generateExpr (ctx: CodegenContext) (expr: TypedExpr) : unit =
     | TWhen _
     | TTryFinally _
     | TLoop _
-    | TRecur _ ->
+    | TRecur _
+    | TSeq _
+    | TYield _
+    | TYieldFrom _ ->
         // Statement-shaped: `needsHoist` has already routed these away.
         codegenError expr.Range.Start.Line "internal error: statement-shaped node reached expression emission"
 
@@ -631,7 +685,9 @@ and private hoistToTemp (ctx: CodegenContext) (prelude: ResizeArray<string>) (ex
     let inner = { ctx with Builder = scratch; Prelude = None }
 
     if isVoidType expr.Type then
-        generateBlock inner Discard expr
+        // Whatever follows in the enclosing expression still has to run, so this
+        // is an intermediate statement rather than a block's last word.
+        generateBlock inner Effect expr
     else
         generateBlock inner (DeclareAndAssign(typeToString expr.Type, tmp)) expr
 
@@ -876,17 +932,44 @@ and generateBlock (ctx: CodegenContext) (target: BlockTarget) (expr: TypedExpr) 
                     | DeclareAndAssign (varType, varName) ->
                         indent ctx; appendLine ctx $"{varType} {varName};"
                         Assign varName
+                    // The loop's own value is dropped, but its body still has to
+                    // leave the `while (true)` when it stops jumping — which is
+                    // exactly what `Discard` means inside an inlined loop.
+                    | Effect -> Discard
                     | _ -> target
+
+                let exitLabel = freshName "__exit"
+                let exitLabelUsed = ref false
 
                 let inner =
                     { ctx with
-                        Loop = Some { Members = members; Merged = false; StateVar = ""; NestedSwitches = 0; IsInlineLoop = true } }
+                        Loop =
+                            Some
+                                { Members = members
+                                  Merged = false
+                                  StateVar = ""
+                                  NestedSwitches = 0
+                                  IsInlineLoop = true
+                                  ExitLabel = exitLabel
+                                  ExitLabelUsed = exitLabelUsed } }
 
-                indent inner; appendLine inner "while (true) {"
-                withIndent inner (fun c2 ->
+                // Whether the label is needed is only known once the body has
+                // been generated, and it has to appear *after* the loop — so
+                // the loop is built aside and appended once the answer is in.
+                let scratch = StringBuilder()
+                let buffered = { inner with Builder = scratch }
+
+                indent buffered; appendLine buffered "while (true) {"
+                withIndent buffered (fun c2 ->
                     emitIterationCopies c2 member_
                     generateBlock c2 loopTarget member_.Body)
-                indent inner; appendLine inner "}"
+                indent buffered; appendLine buffered "}"
+
+                ctx.Builder.Append(scratch) |> ignore
+
+                if exitLabelUsed.Value then
+                    // A label needs a statement; an empty one will do.
+                    indent ctx; appendLine ctx $"%s{exitLabel}: ;"
 
             | None ->
                 // General letrec / mutually-recursive / escaping loop: emit as local functions
@@ -915,7 +998,9 @@ and generateBlock (ctx: CodegenContext) (target: BlockTarget) (expr: TypedExpr) 
             generateLocalFunction ctx name lambdaArgs argTypes retType lambdaBody value.Type
         | None ->
             if isVoidType value.Type then
-                generateBlock ctx Discard value
+                // `(begin a b)` is `TLet ("_", …, a, b)`: `a` runs, then `b`. The
+                // block is not over, so this is an `Effect`, not a `Discard`.
+                generateBlock ctx Effect value
             else
                 generateBlock ctx (DeclareAndAssign(typeToString value.Type, sanitizeIdent name)) value
 
@@ -939,17 +1024,61 @@ and generateBlock (ctx: CodegenContext) (target: BlockTarget) (expr: TypedExpr) 
         generateBlock ctx (Assign(sanitizeIdent name)) value
         // `set!` itself yields void, so the enclosing target still has to be
         // discharged.
-        match target with
-        | Return -> indent ctx; appendLine ctx "return;"
-        | Assign _
-        | DeclareAndAssign _
-        | Discard ->
-            let isInline =
-                match ctx.Loop with
-                | Some { IsInlineLoop = true } -> true
-                | _ -> false
-            if isInline then
-                indent ctx; appendLine ctx "break;"
+        dischargeVoid ctx target
+
+    | TSeq body ->
+        // A C# iterator has to be a method, and a lambda cannot be one, so the
+        // body becomes a local function and this node's value is a call to it.
+        // Nothing is enumerated until that sequence is consumed.
+        let iterator = freshName "__seq"
+
+        indent ctx
+        appendLine ctx $"%s{typeToString expr.Type} %s{iterator}() {{"
+        withIndent { ctx with Prelude = None; Loop = None; InSeq = true } (fun c ->
+            generateBlock c Effect body
+            // Also what makes this an iterator at all when the body happens to
+            // contain no `yield` — without one C# would read it as an ordinary
+            // method that never returns a value.
+            indent c
+            appendLine c "yield break;")
+        indent ctx
+        appendLine ctx "}"
+
+        emitTerminal ctx target expr.Type (fun c -> append c $"%s{iterator}()")
+
+    | TYield value ->
+        requireSeqScope ctx expr "yield"
+
+        emitStatement ctx (fun c ->
+            indent c
+            append c "yield return "
+            generateExpr c value
+            appendLine c ";")
+
+        dischargeVoid ctx target
+
+    | TYieldFrom source ->
+        requireSeqScope ctx expr "yield-from"
+
+        // `foreach` rather than a bare re-yield: the elements have to be pulled
+        // out one at a time and handed on individually, so that the consumer
+        // sees one flat sequence and each source is disposed when it is done.
+        let element = freshName "__yielded"
+
+        emitStatement ctx (fun c ->
+            indent c
+            append c $"foreach (var %s{element} in "
+            generateExpr c source
+            appendLine c ") {")
+
+        withIndent ctx (fun c ->
+            indent c
+            appendLine c $"yield return %s{element};")
+
+        indent ctx
+        appendLine ctx "}"
+
+        dischargeVoid ctx target
 
     | TLetTuple (names, value, body) ->
         let tmp = freshName "__tuple"
@@ -972,7 +1101,9 @@ and generateBlock (ctx: CodegenContext) (target: BlockTarget) (expr: TypedExpr) 
         indent ctx; appendLine ctx "try {"
         withIndent ctx (fun c -> generateBlock c bodyTarget body)
         indent ctx; appendLine ctx "} finally {"
-        withIndent ctx (fun c -> generateBlock c Discard cleanup)
+        // Cleanup runs for its effect and control leaves the `finally` on its
+        // own; it must not try to break or return out of one.
+        withIndent ctx (fun c -> generateBlock c Effect cleanup)
         indent ctx; appendLine ctx "}"
 
     | TVecMake items ->
@@ -1013,23 +1144,14 @@ and generateBlock (ctx: CodegenContext) (target: BlockTarget) (expr: TypedExpr) 
             generateExpr c cond
             appendLine c (if negated then ")) {" else ") {"))
 
-        // The body runs for its effect: whatever it evaluates to is discarded.
-        withIndent ctx (fun c -> generateBlock c Discard body)
+        // The body runs for its effect: whatever it evaluates to is discarded,
+        // and control then continues after the `if`.
+        withIndent ctx (fun c -> generateBlock c Effect body)
         indent ctx; appendLine ctx "}"
 
         // `when` yields void, like `set!`, so the enclosing target still has to
         // be discharged.
-        match target with
-        | Return -> indent ctx; appendLine ctx "return;"
-        | Assign _
-        | DeclareAndAssign _
-        | Discard ->
-            let isInline =
-                match ctx.Loop with
-                | Some { IsInlineLoop = true } -> true
-                | _ -> false
-            if isInline then
-                indent ctx; appendLine ctx "break;"
+        dischargeVoid ctx target
 
     | TThrow msgExpr ->
         // A `throw` never reaches the declaration's use, but C# still wants the
@@ -1052,6 +1174,52 @@ and generateBlock (ctx: CodegenContext) (target: BlockTarget) (expr: TypedExpr) 
     // supplies the hoisting buffer that `generateExpr` may need.
     | _ -> emitStatement ctx (fun c -> emitTerminal c target expr.Type (fun c2 -> generateExpr c2 expr))
 
+/// Rejects a `yield` that did not end up inside the iterator method its `seq`
+/// was emitted as.
+///
+/// Inference scopes `yield` lexically, but C# scopes it per *method*, and the
+/// two disagree wherever a form inside a `seq` needs a method of its own: a
+/// lambda, or a loop whose name escapes and so cannot be inlined. Emitting a
+/// `yield return` there would produce C# that does not compile, with the error
+/// pointing at generated code the author never wrote.
+and private requireSeqScope (ctx: CodegenContext) (expr: TypedExpr) (formName: string) : unit =
+    if not ctx.InSeq then
+        codegenError
+            expr.Range.Start.Line
+            $"'%s{formName}' is inside a function of its own — a lambda, or a loop that is used as a value — rather than directly in the body of its (seq ...); move it into the sequence's own body"
+
+/// Leaves an inlined loop, if that is what reaching this point means.
+///
+/// `break` binds to the nearest enclosing breakable statement. A `match` is
+/// emitted as a `switch`, so from inside one a `break` leaves the switch and
+/// drops back into the loop it was supposed to end — which is not a compile
+/// error but an infinite loop. A `goto` to a label after the loop means the
+/// same thing from any depth, so that is what a nested exit uses.
+and private exitInlineLoop (ctx: CodegenContext) : unit =
+    match ctx.Loop with
+    | Some ({ IsInlineLoop = true } as loop) ->
+        indent ctx
+
+        if loop.NestedSwitches = 0 then
+            appendLine ctx "break;"
+        else
+            loop.ExitLabelUsed.Value <- true
+            appendLine ctx $"goto %s{loop.ExitLabel};"
+    | _ -> ()
+
+/// Discharges `target` after a form that has already emitted all of its own
+/// statements and produced no value.
+and private dischargeVoid (ctx: CodegenContext) (target: BlockTarget) : unit =
+    match target with
+    // Not terminal: the statements that follow still have to run.
+    | Effect -> ()
+    | Return ->
+        indent ctx
+        appendLine ctx (if ctx.InSeq then "yield break;" else "return;")
+    | Assign _
+    | DeclareAndAssign _
+    | Discard -> exitInlineLoop ctx
+
 /// Discharges `target` with an already-formed C# expression fragment.
 ///
 /// A void-typed value cannot be assigned or returned in C#, so under every
@@ -1060,48 +1228,43 @@ and generateBlock (ctx: CodegenContext) (target: BlockTarget) (expr: TypedExpr) 
 /// to be discharged.
 and private emitTerminal (ctx: CodegenContext) (target: BlockTarget) (valueType: HMType) (emit: CodegenContext -> unit) : unit =
     let isVoid = isVoidType valueType
-    let isInline =
-        match ctx.Loop with
-        | Some { IsInlineLoop = true } -> true
-        | _ -> false
 
     indent ctx
     match target with
+    | Effect ->
+        // Not terminal, so no `break` and no `return`: whatever follows in the
+        // enclosing block still has to run.
+        if isVoid then
+            emit ctx; appendLine ctx ";"
+        else
+            append ctx "_ = "; emit ctx; appendLine ctx ";"
     | Return ->
         if isVoid then
             emit ctx; appendLine ctx ";"
-            indent ctx; appendLine ctx "return;"
+            indent ctx
+            appendLine ctx (if ctx.InSeq then "yield break;" else "return;")
         else
             append ctx "return "; emit ctx; appendLine ctx ";"
     | Assign name ->
         if isVoid then
             emit ctx; appendLine ctx ";"
-            if isInline then
-                indent ctx; appendLine ctx "break;"
         else
             append ctx $"%s{name} = "; emit ctx; appendLine ctx ";"
-            if isInline then
-                indent ctx; appendLine ctx "break;"
+        exitInlineLoop ctx
     | DeclareAndAssign (varType, varName) ->
         if isVoid then
             emit ctx; appendLine ctx ";"
-            if isInline then
-                indent ctx; appendLine ctx "break;"
         else
             append ctx $"%s{varType} %s{varName} = "; emit ctx; appendLine ctx ";"
-            if isInline then
-                indent ctx; appendLine ctx "break;"
+        exitInlineLoop ctx
     | Discard ->
         // C# has no expression statement for an arbitrary value, so a discarded
         // one is assigned to `_`. A void value is already a statement.
         if isVoid then
             emit ctx; appendLine ctx ";"
-            if isInline then
-                indent ctx; appendLine ctx "break;"
         else
             append ctx "_ = "; emit ctx; appendLine ctx ";"
-            if isInline then
-                indent ctx; appendLine ctx "break;"
+        exitInlineLoop ctx
 
 and private generateMatch
     (ctx: CodegenContext)
@@ -1286,7 +1449,7 @@ and private generateFunctionBody (ctx: CodegenContext) (body: TypedExpr) : unit 
         withIndent ctx (fun c ->
             let inner =
                 { c with
-                    Loop = Some { Members = [ member_ ]; Merged = false; StateVar = ""; NestedSwitches = 0; IsInlineLoop = false } }
+                    Loop = Some { Members = [ member_ ]; Merged = false; StateVar = ""; NestedSwitches = 0; IsInlineLoop = false; ExitLabel = ""; ExitLabelUsed = ref false } }
 
             emitIterationCopies inner member_
             generateBlock inner Return member_.Body)
@@ -1360,9 +1523,12 @@ and private generateSingleLoop
     appendLine ctx ") {"
 
     withIndent ctx (fun c ->
+        // A local function is a method of its own: it can neither jump into the
+        // enclosing loop nor yield into the enclosing sequence.
         let inner =
             { c with
-                Loop = Some { Members = members; Merged = false; StateVar = ""; NestedSwitches = 0; IsInlineLoop = false } }
+                InSeq = false
+                Loop = Some { Members = members; Merged = false; StateVar = ""; NestedSwitches = 0; IsInlineLoop = false; ExitLabel = ""; ExitLabelUsed = ref false } }
 
         if loops then
             indent inner; appendLine inner "while (true) {"
@@ -1417,7 +1583,8 @@ and private generateMergedLoop (ctx: CodegenContext) (members: TLoopMember list)
                 withIndent cs (fun cb ->
                     let inner =
                         { cb with
-                            Loop = Some { Members = members; Merged = true; StateVar = stateVar; NestedSwitches = 0; IsInlineLoop = false } }
+                            InSeq = false
+                            Loop = Some { Members = members; Merged = true; StateVar = stateVar; NestedSwitches = 0; IsInlineLoop = false; ExitLabel = ""; ExitLabelUsed = ref false } }
 
                     emitIterationCopies inner member_
                     generateBlock inner Return member_.Body)
@@ -1486,8 +1653,8 @@ and private generateLocalFunction
         append ctx (sanitizeIdent argName)
     appendLine ctx ") {"
     // A local function is a new function scope: it cannot jump into the
-    // enclosing loop.
-    withIndent { ctx with Loop = None } (fun c -> generateBlock c Return lambdaBody)
+    // enclosing loop, nor yield into the enclosing sequence.
+    withIndent { ctx with Loop = None; InSeq = false } (fun c -> generateBlock c Return lambdaBody)
     indent ctx
     appendLine ctx "}"
 
@@ -1846,7 +2013,8 @@ let generateProgram (exportMetadata: string) (metadataDeps: string list) (linked
           GlobalBindings = globalBindings
           Prelude = None
           Loop = None
-          TypeParams = Set.empty }
+          TypeParams = Set.empty
+          InSeq = false }
 
     appendLine ctx "using System;"
     appendLine ctx "using static BjolangRuntime;"

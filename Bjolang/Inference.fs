@@ -91,6 +91,39 @@ let rec applyTypeSubst (subst: Map<string, HMType>) (t: HMType) =
     | TAssoc(tn, an, impl) -> TAssoc(tn, an, applyTypeSubst subst impl)
     | _ -> t
 
+/// The environment slot a `seq` records its element type in, so that the
+/// `yield`s in its body have something to unify against.
+///
+/// A `yield` belongs to the nearest enclosing `seq`, which is precisely ordinary
+/// lexical scoping — so it is expressed as an ordinary binding rather than as a
+/// side channel, and a nested `seq` shadows the outer one for free. The name
+/// contains a space, which no token can, so nothing in source can collide with
+/// it or read it.
+let private seqElementSlot = " seq-element"
+
+let private withSeqElement (elemType: HMType) (env: Env) : Env =
+    { env with
+        Bindings =
+            Map.add
+                seqElementSlot
+                { Scheme = Scheme([], [], elemType); IsMutable = false }
+                env.Bindings }
+
+/// Leaves the enclosing `seq`, if any. A lambda body is compiled as a function
+/// of its own and cannot be resumed, so it cannot yield into the sequence it
+/// happens to be written inside.
+let private withoutSeqElement (env: Env) : Env =
+    { env with Bindings = Map.remove seqElementSlot env.Bindings }
+
+let private currentSeqElement (env: Env) (formName: string) (r: Range) : HMType =
+    match Map.tryFind seqElementSlot env.Bindings with
+    | Some binding ->
+        let (Scheme(_, _, t)) = binding.Scheme
+        t
+    | None ->
+        failwithf
+            $"Type Error: '%s{formName}' only means something inside a (seq ...) body, and there is none here, at %s{Lexer.formatPos r}"
+
 let rec checkPattern (env: Env) (expectedType: HMType) (pat: Pattern) : TypedPattern * Map<string, HMType> =
     match pat with
     | PWildcard r ->
@@ -242,6 +275,10 @@ let rec resolveTypeAnnotation (registry: TraitRegistry) (ptype: FType) : HMType 
     // (assoc Trait item 'col) — an associated type projected out of an
     // implementor. Written by the export-metadata serializer rather than by
     // hand: inside a `def/trait` an associated type is named directly.
+    // `(Tuple a b)` is the tuple type, not a one-off constructor named "Tuple".
+    // It is also what `serializeHMType` writes for a `TTuple`, so without this
+    // no exported signature mentioning a tuple could be read back.
+    | TApp("Tuple", args, _) -> TTuple(args |> List.map (resolveTypeAnnotation registry))
     | TApp("assoc", [ TName(traitName, _); TName(assocName, _); implType ], _) ->
         TAssoc(traitName, assocName, resolveTypeAnnotation registry implType)
     | TApp(name, args, _) ->
@@ -316,7 +353,7 @@ let rec infer (env: Env) (expr: Expr) : HMType * TypedExpr =
                         { Scheme = Scheme([], [], t)
                           IsMutable = false }
                         acc)
-                env
+                (withoutSeqElement env)
 
         let bodyType, typedBody = infer localEnv body
         let funType = TFun(argTypes, bodyType)
@@ -686,6 +723,41 @@ let rec infer (env: Env) (expr: Expr) : HMType * TypedExpr =
         { Type = bodyType
           Range = r
           Node = TTryFinally(tBody, tCleanup) }
+
+    | ESeq(body, r) ->
+        let elemType = freshMeta ()
+
+        // The body is run for its yields; whatever its last form evaluates to is
+        // discarded, exactly as in `when`. A sequence's *value* is its elements,
+        // so there is nothing for the body's own type to agree with.
+        let _, tBody = infer (withSeqElement elemType env) body
+
+        let seqType = TCon("Seq", [ elemType ])
+
+        seqType,
+        { Type = seqType
+          Range = r
+          Node = TSeq tBody }
+
+    | EYield(value, r) ->
+        let elemType = currentSeqElement env "yield" r
+        let valueType, tValue = infer env value
+        unify env.Registry valueType elemType
+
+        TypeConstants.voidType,
+        { Type = TypeConstants.voidType
+          Range = r
+          Node = TYield tValue }
+
+    | EYieldFrom(source, r) ->
+        let elemType = currentSeqElement env "yield-from" r
+        let sourceType, tSource = infer env source
+        unify env.Registry sourceType (TCon("Seq", [ elemType ]))
+
+        TypeConstants.voidType,
+        { Type = TypeConstants.voidType
+          Range = r
+          Node = TYieldFrom tSource }
 
 
     | EMatch(target, clauses, r) ->

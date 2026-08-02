@@ -130,6 +130,14 @@ and TExprNode =
     /// effect and its value is discarded.
     | TWhen of TypedExpr * TypedExpr * bool
     | TTryFinally of TypedExpr * TypedExpr
+    /// A lazy sequence, of type `Seq 'a`. Its body is a *function scope*: it
+    /// runs when the sequence is enumerated, not where the form appears, so no
+    /// tail call inside it belongs to the enclosing function's loop.
+    | TSeq of TypedExpr
+    /// Produce one element of the enclosing `TSeq`. Always void.
+    | TYield of TypedExpr
+    /// Produce every element of another sequence in turn. Always void.
+    | TYieldFrom of TypedExpr
     | TMatch of TypedExpr * TMatchClause list
     | TInterfaceCall of HMType * string * TypedExpr * TypedExpr list
     | TThrow of TypedExpr

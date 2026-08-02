@@ -167,11 +167,172 @@ public static class BjolangRuntime {
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static int arraysublength<T>(T[] arr) => arr.Length;
 
-    public struct Option<T> {
+    /// An optional value. Originally only the carrier for an omitted keyword
+    /// argument, which is why it is a struct: `default` is `None`, so an
+    /// unsupplied parameter costs nothing. It is also Bjolang's `(Option %a)`,
+    /// whose `Some`/`None` compile to the factories below and whose patterns
+    /// compile to property patterns over `IsSome`/`Value`.
+    public struct Option<T> : IEquatable<Option<T>> {
         public readonly bool IsSome;
         public readonly T Value;
         public Option(T value) { IsSome = true; Value = value; }
         public static implicit operator Option<T>(T value) => new Option<T>(value);
+
+        /// What `Some` and `None` patterns actually test, and an `int` on
+        /// purpose. Matching on `IsSome` directly would give C# two arms that
+        /// between them cover a `bool`, so it would rule the generated
+        /// match-failure arm unreachable and refuse to compile the switch.
+        public int Tag => IsSome ? 1 : 0;
+
+        // Without these, `equal?` on an Option would fall back to ValueType's
+        // reflective structural comparison.
+        public bool Equals(Option<T> other) =>
+            IsSome == other.IsSome
+            && (!IsSome || EqualityComparer<T>.Default.Equals(Value, other.Value));
+
+        public override bool Equals(object? obj) => obj is Option<T> other && Equals(other);
+        public override int GetHashCode() => IsSome ? HashCode.Combine(true, Value) : 0;
+        public override string ToString() => IsSome ? $"(Some {Value})" : "None";
+    }
+
+    // --- Option constructors and accessors ---
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static Option<T> Some<T>(T value) => new Option<T>(value);
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static Option<T> None<T>() => default;
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static bool some_QMARK<T>(Option<T> option) => option.IsSome;
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static bool none_QMARK<T>(Option<T> option) => !option.IsSome;
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static T optionsubget<T>(Option<T> option) =>
+        option.IsSome ? option.Value : throw new InvalidOperationException("option-get on None");
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static T optionsubgetsubor<T>(Option<T> option, T fallback) =>
+        option.IsSome ? option.Value : fallback;
+
+    // --- Seq (IEnumerable) ---
+    //
+    // Every one of these that returns a sequence is itself an iterator, so it
+    // does no work until its result is enumerated and it never holds more than
+    // one element at a time. That is the whole point of `seq`: `(seq-head
+    // (seq-map f xs))` calls `f` once, whatever the length of `xs`.
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static IEnumerable<T> seqsubempty<T>() => Array.Empty<T>();
+
+    public static bool seqsubempty_QMARK<T>(IEnumerable<T> source) {
+        foreach (var _ in source) return false;
+        return true;
+    }
+
+    public static T seqsubhead<T>(IEnumerable<T> source) {
+        foreach (var item in source) return item;
+        throw new InvalidOperationException("seq-head of an empty sequence");
+    }
+
+    public static IEnumerable<T> seqsubtail<T>(IEnumerable<T> source) {
+        var seenAny = false;
+        foreach (var item in source) {
+            if (!seenAny) { seenAny = true; continue; }
+            yield return item;
+        }
+        if (!seenAny) throw new InvalidOperationException("seq-tail of an empty sequence");
+    }
+
+    public static IEnumerable<U> seqsubmap<T, U>(IEnumerable<T> source, Func<T, U> selector) {
+        foreach (var item in source) yield return selector(item);
+    }
+
+    public static IEnumerable<T> seqsubfilter<T>(IEnumerable<T> source, Func<T, bool> predicate) {
+        foreach (var item in source) if (predicate(item)) yield return item;
+    }
+
+    public static TState seqsubfold<T, TState>(Func<TState, T, TState> folder, TState initial, IEnumerable<T> source) {
+        var acc = initial;
+        foreach (var item in source) acc = folder(acc, item);
+        return acc;
+    }
+
+    // The generator answers, for a given state, whether there is another
+    // element and what the state after it is. `None` ends the sequence.
+    public static IEnumerable<T> seqsubunfold<T, TState>(
+        Func<TState, Option<ValueTuple<T, TState>>> generator,
+        TState seed) {
+
+        var state = seed;
+        while (true) {
+            var step = generator(state);
+            if (!step.IsSome) yield break;
+            yield return step.Value.Item1;
+            state = step.Value.Item2;
+        }
+    }
+
+    public static IEnumerable<T> seqsubtake<T>(IEnumerable<T> source, int count) {
+        if (count <= 0) yield break;
+        var taken = 0;
+        foreach (var item in source) {
+            yield return item;
+            if (++taken >= count) yield break;
+        }
+    }
+
+    public static IEnumerable<T> seqsubskip<T>(IEnumerable<T> source, int count) {
+        var skipped = 0;
+        foreach (var item in source) {
+            if (skipped < count) { skipped++; continue; }
+            yield return item;
+        }
+    }
+
+    public static IEnumerable<T> seqsubappend<T>(IEnumerable<T> first, IEnumerable<T> second) {
+        foreach (var item in first) yield return item;
+        foreach (var item in second) yield return item;
+    }
+
+    public static void seqsubforsubeach<T>(IEnumerable<T> source, Action<T> action) {
+        foreach (var item in source) action(item);
+    }
+
+    public static int seqsubcount<T>(IEnumerable<T> source) {
+        var count = 0;
+        foreach (var _ in source) count++;
+        return count;
+    }
+
+    /// `start` inclusive, `stop` exclusive.
+    public static IEnumerable<int> seqsubrange(int start, int stop) {
+        for (var i = start; i < stop; i++) yield return i;
+    }
+
+    // --- Seq conversions ---
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static IEnumerable<T> listsubgtseq<T>(SchemeList.SchemeList<T> list) => list;
+
+    public static SchemeList.SchemeList<T> seqsubgtlist<T>(IEnumerable<T> source) {
+        // A cons list is built back to front, so the sequence has to be drained
+        // first. This is the point at which a sequence stops being lazy.
+        var buffer = new List<T>(source);
+        var result = SchemeList.SchemeList.Empty<T>();
+        for (var i = buffer.Count - 1; i >= 0; i--) result = SchemeList.SchemeList.Cons(buffer[i], result);
+        return result;
+    }
+
+    public static IEnumerable<T> vecsubgtseq<T>(Collections.RrbList<T> vec) {
+        var count = Collections.RrbFun.Count(vec);
+        for (var i = 0; i < count; i++) yield return Collections.RrbFun.Get(vec, i);
+    }
+
+    public static Collections.RrbList<T> seqsubgtvec<T>(IEnumerable<T> source) {
+        var builder = Collections.RrbBuilderFun.Empty<T>();
+        foreach (var item in source) builder = Collections.RrbBuilderFun.Add(builder, item);
+        return Collections.RrbBuilderFun.ToImmutable(builder);
     }
 
     // --- List (SchemeList) Wrappers ---

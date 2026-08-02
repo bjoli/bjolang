@@ -80,6 +80,13 @@ and Expr =
     | EVec of Expr list * Range
     | EMatch of Expr * (Pattern * Expr option * Expr) list * Range
     | ETryFinally of Expr * Expr * Range
+    /// `(seq body...)`: a lazy sequence. The body is not a value — it is run,
+    /// one `yield` at a time, by whoever enumerates the sequence.
+    | ESeq of Expr * Range
+    /// `(yield v)`: hand `v` to the enclosing `seq`'s consumer.
+    | EYield of Expr * Range
+    /// `(yield-from s)`: hand over every element of `s` in turn.
+    | EYieldFrom of Expr * Range
 
 and DefunArg =
     | MandatoryArg of string
@@ -401,6 +408,24 @@ let rec parseExpr (s: SExpr) : Expr =
                 | cond :: bodyExprs when not bodyExprs.IsEmpty ->
                     EWhen(parseExpr cond, parseBody bodyExprs listRange, true, listRange)
                 | _ -> failwithf $"Invalid unless syntax at line %d{r.Start.Line}. Expected: (unless cond body...)"
+
+            // A `seq` body is a block like any other, but it is *not* run where
+            // it is written: the form evaluates to a sequence, and the body runs
+            // a `yield` at a time as that sequence is consumed.
+            | "seq" ->
+                match args with
+                | [] -> failwithf $"Invalid seq syntax at line %d{r.Start.Line}. Expected: (seq body...)"
+                | bodyExprs -> ESeq(parseBody bodyExprs listRange, listRange)
+
+            | "yield" ->
+                match args with
+                | [ value ] -> EYield(parseExpr value, listRange)
+                | _ -> failwithf $"Invalid yield syntax at line %d{r.Start.Line}. Expected: (yield value)"
+
+            | "yield-from" ->
+                match args with
+                | [ source ] -> EYieldFrom(parseExpr source, listRange)
+                | _ -> failwithf $"Invalid yield-from syntax at line %d{r.Start.Line}. Expected: (yield-from seq)"
 
             | "and" ->
                 let rec buildAnd items =

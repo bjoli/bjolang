@@ -196,7 +196,8 @@ let private normalizeRecur
 let rec containsRecur (expr: TypedExpr) : bool =
     match expr.Node with
     | TRecur _ -> true
-    | TLambda _ -> false
+    | TLambda _
+    | TSeq _ -> false
     | TLoop(_, bodyOpt) -> bodyOpt |> Option.map containsRecur |> Option.defaultValue false
     | _ -> TypeVisitor.children expr |> List.exists containsRecur
 
@@ -206,7 +207,8 @@ let rec recurTargetsIn (expr: TypedExpr) : Set<int> =
     match expr.Node with
     | TRecur(index, args) ->
         args |> List.fold (fun acc a -> Set.union acc (recurTargetsIn a)) (Set.singleton index)
-    | TLambda _ -> Set.empty
+    | TLambda _
+    | TSeq _ -> Set.empty
     | TLoop(_, bodyOpt) ->
         bodyOpt |> Option.map recurTargetsIn |> Option.defaultValue Set.empty
     | _ ->
@@ -300,6 +302,13 @@ let rec private lowerExpr (targets: LoopTarget list) (inTail: bool) (expr: Typed
     | TLambda(args, b) ->
         { expr with
             Node = TLambda(args, newScope b) }
+
+    // A sequence's body becomes an iterator method of its own, so a call in its
+    // tail position is a call there — not a jump into the loop this `seq` was
+    // written inside, which by then has long since returned.
+    | TSeq b ->
+        { expr with
+            Node = TSeq(newScope b) }
 
     | TLet(n, isFun, args, v, b) ->
         let loweredValue = if isFun then newScope v else notTail v

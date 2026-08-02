@@ -9,10 +9,12 @@ let makeFunType args ret = TFun (args, ret)
 let makeVecType a = TCon("Vec", [a])
 let makeVecBuilderType a = TCon("VecBuilder", [a])
 let makeListType a = TCon("List", [a])
+let makeSeqType a = TCon("Seq", [a])
+let makeOptionType a = TCon("Option", [a])
 
 let emptyRegistry : TraitRegistry =
     { LocalTraits = Set.empty
-      LocalTypes = Set.ofList ["List"; "Vec"; "VecBuilder"]
+      LocalTypes = Set.ofList ["List"; "Vec"; "VecBuilder"; "Seq"; "Option"]
       Traits = Map.empty
       Implementations = Map.empty
       Aliases = Map.empty
@@ -112,6 +114,41 @@ let prelude : Env =
         ("vec-count", {Scheme = Scheme(["a"], [], makeFunType [makeVecType (TVar "a")] intType); IsMutable = false })
         ("vec-contains", {Scheme = Scheme(["a"], [], makeFunType [makeVecType (TVar "a"); TVar "a"] boolType); IsMutable = false })
         ("vec-compact", {Scheme = Scheme(["a"], [], makeFunType [makeVecType (TVar "a")] (makeVecType (TVar "a"))); IsMutable = false })
+
+        // Option
+        ("Some", {Scheme = Scheme(["a"], [], makeFunType [TVar "a"] (makeOptionType (TVar "a"))); IsMutable = false })
+        ("None", {Scheme = Scheme(["a"], [], makeOptionType (TVar "a")); IsMutable = false })
+        ("some?", {Scheme = Scheme(["a"], [], makeFunType [makeOptionType (TVar "a")] boolType); IsMutable = false })
+        ("none?", {Scheme = Scheme(["a"], [], makeFunType [makeOptionType (TVar "a")] boolType); IsMutable = false })
+        ("option-get", {Scheme = Scheme(["a"], [], makeFunType [makeOptionType (TVar "a")] (TVar "a")); IsMutable = false })
+        ("option-get-or", {Scheme = Scheme(["a"], [], makeFunType [makeOptionType (TVar "a"); TVar "a"] (TVar "a")); IsMutable = false })
+
+        // Seq operations. A Seq is lazy: nothing below that returns one does any
+        // work until the result is consumed.
+        ("seq-empty", {Scheme = Scheme(["a"], [], makeFunType [] (makeSeqType (TVar "a"))); IsMutable = false })
+        ("seq-empty?", {Scheme = Scheme(["a"], [], makeFunType [makeSeqType (TVar "a")] boolType); IsMutable = false })
+        ("seq-head", {Scheme = Scheme(["a"], [], makeFunType [makeSeqType (TVar "a")] (TVar "a")); IsMutable = false })
+        ("seq-tail", {Scheme = Scheme(["a"], [], makeFunType [makeSeqType (TVar "a")] (makeSeqType (TVar "a"))); IsMutable = false })
+        ("seq-map", {Scheme = Scheme(["a"; "b"], [], makeFunType [makeSeqType (TVar "a"); makeFunType [TVar "a"] (TVar "b")] (makeSeqType (TVar "b"))); IsMutable = false })
+        ("seq-filter", {Scheme = Scheme(["a"], [], makeFunType [makeSeqType (TVar "a"); makeFunType [TVar "a"] boolType] (makeSeqType (TVar "a"))); IsMutable = false })
+        // Folds take the function first, then the identity, then the
+        // collection, as `list-foldl` and `vec-fold` do.
+        ("seq-fold", {Scheme = Scheme(["a"; "b"], [], makeFunType [makeFunType [TVar "b"; TVar "a"] (TVar "b"); TVar "b"; makeSeqType (TVar "a")] (TVar "b")); IsMutable = false })
+        // The generator maps a state to the next element and the state after
+        // it, or to None to stop.
+        ("seq-unfold", {Scheme = Scheme(["a"; "s"], [], makeFunType [makeFunType [TVar "s"] (makeOptionType (TTuple [TVar "a"; TVar "s"])); TVar "s"] (makeSeqType (TVar "a"))); IsMutable = false })
+        ("seq-take", {Scheme = Scheme(["a"], [], makeFunType [makeSeqType (TVar "a"); intType] (makeSeqType (TVar "a"))); IsMutable = false })
+        ("seq-skip", {Scheme = Scheme(["a"], [], makeFunType [makeSeqType (TVar "a"); intType] (makeSeqType (TVar "a"))); IsMutable = false })
+        ("seq-append", {Scheme = Scheme(["a"], [], makeFunType [makeSeqType (TVar "a"); makeSeqType (TVar "a")] (makeSeqType (TVar "a"))); IsMutable = false })
+        ("seq-for-each", {Scheme = Scheme(["a"], [], makeFunType [makeSeqType (TVar "a"); makeFunType [TVar "a"] voidType] voidType); IsMutable = false })
+        ("seq-count", {Scheme = Scheme(["a"], [], makeFunType [makeSeqType (TVar "a")] intType); IsMutable = false })
+        ("seq-range", {Scheme = Scheme([], [], makeFunType [intType; intType] (makeSeqType intType)); IsMutable = false })
+
+        // Seq conversions
+        ("list->seq", {Scheme = Scheme(["a"], [], makeFunType [makeListType (TVar "a")] (makeSeqType (TVar "a"))); IsMutable = false })
+        ("seq->list", {Scheme = Scheme(["a"], [], makeFunType [makeSeqType (TVar "a")] (makeListType (TVar "a"))); IsMutable = false })
+        ("vec->seq", {Scheme = Scheme(["a"], [], makeFunType [makeVecType (TVar "a")] (makeSeqType (TVar "a"))); IsMutable = false })
+        ("seq->vec", {Scheme = Scheme(["a"], [], makeFunType [makeSeqType (TVar "a")] (makeVecType (TVar "a"))); IsMutable = false })
 
         // VecBuilder operations
         ("vecbuilder-empty", {Scheme = Scheme(["a"], [], makeFunType [] (makeVecBuilderType (TVar "a"))); IsMutable = false })

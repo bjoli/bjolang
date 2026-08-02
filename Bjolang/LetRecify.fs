@@ -139,6 +139,12 @@ let rec exprFreeVars (isGuarded: bool) (bound: Set<string>) (expr: Expr) : Map<s
         mergeVarUseMaps tfv vfv
     | ETryFinally(body, cleanup, _) ->
         mergeVarUseMaps (exprFreeVars isGuarded bound body) (exprFreeVars isGuarded bound cleanup)
+    // A `seq` body is deferred exactly as a lambda body is: nothing in it runs
+    // until the sequence is consumed, so a reference from inside one is guarded
+    // and can point at a binding defined later in the same group.
+    | ESeq(body, _) -> exprFreeVars true bound body
+    | EYield(value, _)
+    | EYieldFrom(value, _) -> exprFreeVars isGuarded bound value
 
 /// Kosaraju's algorithm: compute SCCs of a graph, returned in reverse topological order.
 let computeSCCs (nodes: Set<string>) (edges: Map<string, Map<string, bool>>) : Set<string> list =
@@ -254,6 +260,10 @@ let rec letrecifyExpr (expr: Expr) : Expr =
     | ESet(name, value, r) -> ESet(name, letrecifyExpr value, r)
 
     | ETryFinally(body, cleanup, r) -> ETryFinally(letrecifyExpr body, letrecifyExpr cleanup, r)
+
+    | ESeq(body, r) -> ESeq(letrecifyExpr body, r)
+    | EYield(value, r) -> EYield(letrecifyExpr value, r)
+    | EYieldFrom(value, r) -> EYieldFrom(letrecifyExpr value, r)
 
     | ELetRec(bindings, body, r) ->
         // 1. Optimize nested expressions within the bindings and the body first
