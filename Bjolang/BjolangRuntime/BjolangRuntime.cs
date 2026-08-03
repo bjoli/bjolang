@@ -207,6 +207,106 @@ public static class BjolangRuntime {
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static Collections.RrbList<T> vecbuildersubgtvec<T>(Collections.RrbBuilder<T> builder) => Collections.RrbBuilderFun.ToImmutable(builder);
 
+    // --- ListBuilder ---
+    //
+    // SchemeList has no builder of its own, and the obvious way to build one
+    // front-to-back — cons each element then reverse — allocates two cells per
+    // element. Buffering into a List<T> and handing the span to `Create`, which
+    // builds back-to-front in one pass, allocates one cell per element plus the
+    // buffer's amortized array.
+    public sealed class ListBuilder<T> {
+        public readonly List<T> Items = new List<T>();
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static ListBuilder<T> listbuildersubempty<T>() => new ListBuilder<T>();
+
+    // Returns the builder rather than void, so that it threads through a loop
+    // slot the same way an immutable accumulator does.
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static ListBuilder<T> listbuildersubadd_BANG<T>(ListBuilder<T> builder, T item) {
+        builder.Items.Add(item);
+        return builder;
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static int listbuildersubcount<T>(ListBuilder<T> builder) => builder.Items.Count;
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static SchemeList.SchemeList<T> listbuildersubgtlist<T>(ListBuilder<T> builder) =>
+        SchemeList.SchemeList.Create<T>(
+            System.Runtime.InteropServices.CollectionsMarshal.AsSpan(builder.Items));
+
+    // --- MapBuilder ---
+    //
+    // `MapBuilder` rather than `TransientMap`: it appends into a flat buffer and
+    // sorts by CHAMP hash once at the end, which is the fastest bulk path, and
+    // it has a public constructor. `TransientMap` is reachable only through
+    // `map.ToTransient()` and its constructor zeroes `_count` even for a
+    // non-empty root, so anything but `Empty.ToTransient()` builds a map whose
+    // `Count` is wrong.
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static Map.MapBuilder<TK, TV> mapbuildersubempty<TK, TV>() where TK : notnull =>
+        new Map.MapBuilder<TK, TV>();
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static Map.MapBuilder<TK, TV> mapbuildersubadd_BANG<TK, TV>(Map.MapBuilder<TK, TV> builder, TK key, TV value) where TK : notnull {
+        builder.Add(key, value);
+        return builder;
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static Map.Map<TK, TV> mapbuildersubgtmap<TK, TV>(Map.MapBuilder<TK, TV> builder) where TK : notnull =>
+        builder.ToImmutable();
+
+    // --- Cursors ---
+    //
+    // Both collections have an allocation-free *struct* enumerator, which is
+    // exactly what a loop cursor wants — but a struct held in a Bjolang binding
+    // is a value, and `MoveNext` on a value that was copied into a call advances
+    // the copy and not the loop. So the cursor a program holds is a small class
+    // with the enumerator as a *field*: one allocation per loop entry, none per
+    // element, and no boxing of the enumerator itself.
+    //
+    // `done?` is where the advancing happens, which the protocol allows for
+    // exactly this reason: it is called once per iteration, before `current`,
+    // and nothing peeks. `next` is then the identity.
+
+    public sealed class VecCursor<T> where T : notnull {
+        public Collections.RrbEnumerator<T> E;
+        public VecCursor(Collections.RrbList<T> list) { E = list.GetEnumerator(); }
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static VecCursor<T> vecsubcursor<T>(Collections.RrbList<T> list) where T : notnull =>
+        new VecCursor<T>(list);
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static bool vecsubcursorsubdone_QMARK<T>(VecCursor<T> cursor) where T : notnull =>
+        !cursor.E.MoveNext();
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static T vecsubcursorsubcurrent<T>(VecCursor<T> cursor) where T : notnull => cursor.E.Current;
+
+    public sealed class MapCursor<TK, TV> where TK : notnull {
+        public Map.MapEnumerator<TK, TV> E;
+        public MapCursor(Map.Map<TK, TV> map) { E = map.GetEnumerator(); }
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static MapCursor<TK, TV> mapsubcursor<TK, TV>(Map.Map<TK, TV> map) where TK : notnull =>
+        new MapCursor<TK, TV>(map);
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static bool mapsubcursorsubdone_QMARK<TK, TV>(MapCursor<TK, TV> cursor) where TK : notnull =>
+        !cursor.E.MoveNext();
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static ValueTuple<TK, TV> mapsubcursorsubcurrent<TK, TV>(MapCursor<TK, TV> cursor) where TK : notnull {
+        var kv = cursor.E.Current;
+        return new ValueTuple<TK, TV>(kv.Key, kv.Value);
+    }
+
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static T[] makesubarray<T>(int length) => new T[length];
 

@@ -88,6 +88,13 @@ let mapPrimitiveType (name: string) =
     | "System.Void" -> "void"
     | "System.Object" -> "object"
     | "Vec" -> "Collections.RrbList"
+    // Builders and cursors. All three live inside the runtime's static class,
+    // which `using static` also imports the nested types of — but a declaration
+    // spells the type out, so they are qualified here.
+    | "ListBuilder" -> "BjolangRuntime.ListBuilder"
+    | "MapBuilder" -> "Map.MapBuilder"
+    | "VecCursor" -> "BjolangRuntime.VecCursor"
+    | "MapCursor" -> "BjolangRuntime.MapCursor"
     | "VecBuilder" -> "Collections.RrbBuilder"
     | "List" -> "SchemeList.SchemeList"
     // A `seq` is a C# iterator, so its type is the one C# iterators produce.

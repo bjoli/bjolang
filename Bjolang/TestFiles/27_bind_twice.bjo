@@ -5,7 +5,7 @@
 ;; here would give code size exponential in nesting depth. The occurrence check
 ;; refuses, the argument is let-bound instead, and the compiler says so: the
 ;; result is correct, but a loop written through this monad will not be a loop.
-(import (std core))
+(import (std prelude))
 
 (def/trait (Monad (%m %a))
   (: pure (-> %a (%m %a)))

@@ -1,4 +1,4 @@
-(import (std core))
+(import (std prelude))
 
 ;; Functor is the same shape as bind: the hole occurs twice, at two different
 ;; arguments.

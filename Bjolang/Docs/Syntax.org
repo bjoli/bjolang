@@ -356,10 +356,17 @@ accumulates ~y~, and ~(folding 0 e)~ seeds with ~0~ and accumulates ~e~. Inside
 the loop an accumulator's name reads the value as of that point, which is what
 lets ~folding~ refer to what it has so far.
 
-The stock collectors are ~listing~, ~summing~, ~counting~ and ~folding~; the
-stock sequences are ~List~ and ~Vec~. A new one of either is an ordinary
-implementation of ~Iterable~ or ~Collector~ in ~(std iter)~ — the compiler knows
-only the clause keywords.
+The stock collectors are ~listing~, ~vecing~, ~mapping~, ~summing~, ~counting~
+and ~folding~; the stock sequences are ~List~, ~Vec~ and ~Map~. A new one of
+either is an ordinary implementation of ~Iterable~ or ~Collector~ in the
+prelude — the compiler knows only the clause keywords.
+
+Iterating a ~Map~ yields its pairs, so ~(loop (:for (Tuple k v) m) ...)~
+destructures them, and ~mapping~ takes such a pair whole. ~Vec~ and ~Map~ are
+walked with their own native enumerators rather than by index, and ~listing~,
+~vecing~ and ~mapping~ accumulate into the collections' builders — mutable
+accumulation, which is safe because a loop slot is used linearly and there is no
+way to resume a loop and meet the same accumulator twice.
 
 A loop compiles to a plain ~while~ with the whole cursor and collector protocol
 inlined away, and a compiler pass fails the build if one ever does not: leaving

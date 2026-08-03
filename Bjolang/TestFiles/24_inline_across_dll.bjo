@@ -3,7 +3,7 @@
 ;; The impl body calls `decorate`, which `boxed` imported from `third` — so the
 ;; spliced body has to name a module that this file never mentions. And it is
 ;; spliced next to a local called `decorate` that means something else entirely.
-(import (std core))
+(import (std prelude))
 (import "inc/boxed.bjo")
 
 (: shout (-> string string))

@@ -1,5 +1,4 @@
 (import (std prelude))
-(import (std list))
 
 (defun (main)
   ;; 1. Basic map operations

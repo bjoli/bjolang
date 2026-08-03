@@ -1,24 +1,33 @@
 * Bjolang - a language
 
-I think we have all had the thought: all programming languages suck in at least one way. Not all of us think it is a big deal, but some of us feel the urge to try our wings at designing a language. This is my almost 100% vibe coded try. Not really meant for real use, but to see if my thoughts made any sense.
+I think we have all had the thought: all programming languages suck in at least one way. Not all of us think it is a big deal, but some of us feel the urge to try our wings at designing a language. This is my 95% vibe coded try. Not really meant for real use, but to see if my thoughts made any sense.
 
 * Elevator pitch
 Bjolang is a scheme-inspired language with local HM type inference that compiles to constipated c#. It has traits instead of classes, meaning you don't ever have to think about two-way interop. The default data structures are immutable. A fast RRB tree (Vec), a very fast CHAMP (hash table), a linked list (List). There are more datastructures coming (ordered map, deque, queue).
 
-It also fakes Brand types by inlining traits when the trait in known at compile time, giving us among other things, a Monad trait. 
+It also fakes Brand/higher kinded types by inlining traits when the trait in known at compile time, giving us among other things, a Monad trait. 
 
 * Planned features
 
-For concurrency I will integrate a concurrentML because I made this language and async is no fun
-
-Loop facility based on goof-loop for guile scheme, because I made it and it is better than what most other languages have.
+For concurrency I will integrate a concurrentML because I made this language and async is no fun.
 
 No magic f#-esque record inference. Records will have named constructors.
+
+Dynamic environment, meaning we can do things like
+
+#+begin_src scheme
+(def my-port (string-port))
+(with-output-to-port my-port
+  (display "banana boat song!")) ;; displays nothing
+
+(display (string-port->string my-port))
+
+#+end_src
 
 * Limitations
 
 ** Entry point
-Since it compiles to c# it needs an entry point. That is the (defun (main args) ...) function
+Since it compiles to c# it needs an entry point. That is the (defun (main args) ...) function. 
 
 ** Tail recursion
 
@@ -42,12 +51,17 @@ Tail recursion does not work except for self recursion (including named lets) an
     (if (= 0 a)
         #t
         (odd? (- a 1))))
+
+  ;; This does SCC analysis and transforms the output to
+  ;; c# while and switch+goto
   (odd? 4000000)
      
   0)
 
 
-  ;; this stack overflows after a while if you call any of the functions
+  ;; this stack overflows after a while if you call any of
+  ;;the functions. The stack for each of these calls is tiny, but
+  ;; you will still only be able to test numbers up to about 100k.
   (: odd? (-> Int Bool)) ;; Every top level function needs a typedef
   (defun (odd? a)
     (if (= 0 a)
@@ -69,7 +83,8 @@ Tail recursion does not work except for self recursion (including named lets) an
 Bjolang has traits. Traits can be regular traits, which means they are usable on concrete types (fast calls) or in dynamic contexts (as fast as C# Interfaces). There are also inlinable traits. These are traits that only work when the type is known at compile time, and are inlined at the call site. This is because c# cannot represent something like the Monad trait with interfaces. Inlining solves this. These traits are painfully monomorphic.
 
 #+begin_src scheme
-;; The simplest kind of trait is something like a trait that turns anything into a string:
+;; The simplest kind of trait is something like a trait that
+;; turns any thing into a string:
 (def/trait (Printable %i)
   (: ->str (-> %i string)))
 
@@ -99,7 +114,8 @@ Bjolang has traits. Traits can be regular traits, which means they are usable on
 ;; type for which Foldable is defined.
 (fold #(+ % 1) 0 '(1 2 3 4))
 
-;; This is a "fake hkt" trait: it only works when types are know at compile time and in monomorphic functions.
+;; This is a "fake hkt" trait: it only works when types are
+;; know at compile time and in monomorphic functions.
 (def/trait (Functor (%f %a))
   (: fmap (-> (-> %a %b) (%f %a)  (%f %b))))
 
@@ -132,6 +148,8 @@ Bjolang has traits. Traits can be regular traits, which means they are usable on
 
 
 *** Do notation
+Look Ma, a Monad!
+
 #+BEGIN_SRC scheme
 (: calc (-> int (Option int)))
 (defun (calc n)
@@ -144,9 +162,9 @@ Bjolang has traits. Traits can be regular traits, which means they are usable on
 *** Immutable base data structures
  Bjolang's base data structures are all immutable and fast (yes, actually fast). These data structures are _not_ vibe coded like this project. Not only are they fast in their immutable versions, but they also have transient versions.
 
- The Vec type is an RRB vector. It compares favourably to the immutable vectors of clojure an  scala.
+ The Vec type is an RRB vector. It compares favourably to the immutable vectors of clojure an  scala. If you don't count the "slices" of clojure's vectors, it is a lot faster than clojure's vectors. The slices of scala's vectors has magic finger tree pixie dust, but other than that it competes (and often wins) wrt speed.
 
- The Map is a CHAMP that has transient operations and a builder. It compares favourably to the immutable map in c# or the hash map in language ext.
+ The Map is a CHAMP that has transient operations and a builder. It compares favourably to the immutable map in c# or the hash map in language-ext.
 
  #+begin_src scheme
 (defun (main args)

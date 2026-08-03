@@ -1,4 +1,4 @@
-(import (std core))
+(import (std prelude))
 
 ;; Regression test: a local binding that shadows an enclosing loop's name and is
 ;; called in tail position.

@@ -1,5 +1,0 @@
-;; std/list.bjo
-;; The List type is now built-in, backed by SchemeList<T>.
-;; Cons and Nil are available as built-in constructors.
-;; Operations are available as list-* builtins (list-head, list-tail, etc.)
-

@@ -1,11 +1,15 @@
 (import (std prelude))
 
-(: add-all (-> #:rest int int))
-(defun (add-all #:rest myarr)
-  (let loop ((a 0) (acc 0))
-    (if (= a (array-length myarr))
-        acc
-        (loop (+ a 1) (+ acc (array-ref myarr a))))))
+(: erathostenes (-> int (List int)))
+(defun (erathostenes n)
+  (def vec (make-vector n #t))
+  (loop (:for i (up-from 2 (:to n)))
+         (:when (vector-ref vec i))
+         (:acc lst (listing i))
+         (:for j (up-from (* 2 i) (:to n) (:by i)))
+         (:do (vector-set! vec j #f))))
 
 (defun (main args)
-  (println (add-all 1 2 3 4)))
+  (erathostenes 100)
+  0)
+

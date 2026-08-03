@@ -4,8 +4,7 @@
 ;; value, and had been failing with "Unbound variable: iterate" for long enough
 ;; to be skipped by the runner: the old trait's methods were never exported.
 ;; The protocol it now covers is the one `(loop ...)` is built on.
-(import (std core))
-(import (std iter))
+(import (std prelude))
 
 ;; A List's cursor is the list itself.
 (: sum-list (-> (List int) int))

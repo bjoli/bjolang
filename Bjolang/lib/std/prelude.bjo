@@ -1,17 +1,222 @@
 ;; std/prelude.bjo
 ;; Standard library entry point
+(export
+  ;; Foldable
+  fold
+  ;; Monad
+  bind pure
+  ;; Iterable
+  current done? next start
+  ;; Collecter
+  init step finish
 
-(import
-    (std core)
-    (std iter))
-(re-export print println ->str)
-(export fold)
+  print println ->str )
+
+
+
 
 (include "Foldable.protobjo")
+(include "Monad.protobjo")
 
-;; The aggregate surface of the standard library. Names listed here are visible
-;; to anything that imports (std prelude); nothing else is.
+;; Type to String Trait
+(def/trait (->str %a)
+  (: ->str (-> %a string)))
 
-;; Placeholder so the aggregate module has a body.
-(: noop (-> int))
-(defun (noop) 0)
+;; Implementations for standard scalars
+(def/impl (->str string)
+  (defun (->str s) s))
+
+(def/impl (->str int)
+  (defun (->str n) (int->string n)))
+
+(def/impl (->str double)
+  (defun (->str n) (double->string n)))
+
+(def/impl (->str byte)
+  (defun (->str n) (byte->string n)))
+
+(def/impl (->str long)
+  (defun (->str n) (long->string n)))
+
+(def/impl (->str Keyword)
+  (defun (->str k) (keyword->string k)))
+
+(def/impl (->str Symbol)
+  (defun (->str s) (symbol->string s)))
+
+
+
+;; Generic display functions utilizing the ->str trait
+;; Currently commented out as implicit dictionary passing for generic functions is not yet supported.
+(: print (-> %a void))
+(defun (print x)
+  (display (->str x)))
+
+(: println (-> %a void))
+(defun (println x)
+  (displayln (->str x)))
+
+
+;; ---------------------------------------------------------------------------
+;; Iterable
+;; ---------------------------------------------------------------------------
+
+;; A first-order trait with two associated types. It does *not* abstract over a
+;; constructor variable — a sequence is never returned at a new element type —
+;; so it is an ordinary interface trait rather than an inline-only one.
+;;
+;; Every method takes the sequence *and* the cursor. Folding the sequence into
+;; the cursor instead would make a vector's cursor a (vector, index) pair rather
+;; than a bare int; passing `s` everywhere keeps the cursor minimal. `s` is
+;; loop-invariant, bound once in the prologue, and substituted away by the
+;; inliner, so the arguments that go unread cost nothing.
+;;
+;; The protocol's contract:
+;;   1. `done?` is called exactly once per iteration. Nothing peeks and nothing
+;;      tests at both top and bottom, which is what lets `done?` be effectful.
+;;   2. `current` is called only when the preceding `done?` returned false.
+;;   3. The cursor is used linearly: never copied, stepped twice, or captured.
+;;   4. `start` is called once per entry to the level owning the cursor.
+(def/trait (Iterable %s)
+  (type %elem)
+  (type %cursor)
+  (: start (-> %s %cursor))
+  (: done? (-> %s %cursor bool))
+  (: current (-> %s %cursor %elem))
+  (: next (-> %s %cursor %cursor)))
+
+(def/impl (Iterable (List %a))
+  (type %elem %a)
+  (type %cursor (List %a))
+  (defun (start s) s)
+  (defun (done? s c) (list-empty? c))
+  (defun (current s c) (list-head c))
+  (defun (next s c) (list-tail c)))
+
+;; A Vec is a tree, so indexing it is O(log32 n) and walking it by index pays
+;; that on every element. Its native enumerator descends once and then walks
+;; leaves, so the cursor is one of those instead.
+;;
+;; The cursor advances in `done?`, which is what the contract above is written
+;; to allow: `done?` runs exactly once per iteration, before `current`, and
+;; nothing peeks. `next` is then the identity. The cursor is used linearly, so
+;; handing back the same one is the point rather than a hazard.
+;;
+;; The enumerator itself is a struct, and a struct in a Bjolang binding is a
+;; value — `MoveNext` on one that had been copied into a call would advance the
+;; copy. So the cursor is a small class holding the enumerator as a field: one
+;; allocation on entering the loop, none per element, and no boxing.
+(def/impl (Iterable (Vec %a))
+  (type %elem %a)
+  (type %cursor (VecCursor %a))
+  (defun (start s) (vec-cursor s))
+  (defun (done? s c) (vec-cursor-done? c))
+  (defun (current s c) (vec-cursor-current c))
+  (defun (next s c) c))
+
+;; A Map's elements are its pairs, in the trie's own order.
+(def/impl (Iterable (Map %k %v))
+  (type %elem (Tuple %k %v))
+  (type %cursor (MapCursor %k %v))
+  (defun (start s) (map-cursor s))
+  (defun (done? s c) (map-cursor-done? c))
+  (defun (current s c) (map-cursor-current c))
+  (defun (next s c) c))
+
+;; ---------------------------------------------------------------------------
+;; Collector
+;; ---------------------------------------------------------------------------
+
+;; Also first-order with associated types, and it needs no bridge to a generic
+;; path: `init`/`step`/`finish` pass and return values with no cursor aliasing.
+(def/trait (Collector %c)
+  (type %elem)
+  (type %acc)
+  (type %out)
+  (: init (-> %c %acc))
+  (: step (-> %c %acc %elem %acc))
+  (: finish (-> %c %acc %out)))
+
+;; The stock collectors. Each one's *constructor* is the name written in an
+;; `:acc` clause, which is what makes a new accumulator an ordinary `Collector`
+;; impl rather than a change to the compiler.
+;;
+;; The type parameter on `Listing` and `Counting` is a phantom: it carries no
+;; value and exists only to pin `%elem`.
+
+(type (: (Listing %a) (Union listing)))
+
+;; Accumulated into a builder rather than consed and reversed: the latter
+;; allocates a cell per element on the way in and another on the way out, and
+;; the builder allocates one. The accumulator is mutated in place and handed
+;; back, which a loop slot carries exactly as it would an immutable value.
+(def/impl (Collector (Listing %a))
+  (type %elem %a)
+  (type %acc (ListBuilder %a))
+  (type %out (List %a))
+  (defun (init c) (listbuilder-empty))
+  (defun (step c acc x) (listbuilder-add! acc x))
+  (defun (finish c acc) (listbuilder->list acc)))
+
+;; The same, into a Vec — what to reach for when the result is going to be
+;; indexed rather than walked.
+(type (: (Vecing %a) (Union vecing)))
+
+(def/impl (Collector (Vecing %a))
+  (type %elem %a)
+  (type %acc (VecBuilder %a))
+  (type %out (Vec %a))
+  (defun (init c) (vecbuilder-empty))
+  (defun (step c acc x) (vecbuilder-add! acc x))
+  (defun (finish c acc) (vecbuilder->vec acc)))
+
+;; Collects pairs into a Map. Its elements are `(Tuple key value)`, which is
+;; exactly what iterating a Map yields — so
+;; `(loop (:for kv m) (:acc out (mapping kv)))` copies one.
+;;
+;; `MapBuilder` appends into a flat buffer and sorts by hash once at the end,
+;; which is a good deal faster than inserting into the trie a key at a time.
+(type (: (Mapping %k %v) (Union mapping)))
+
+(def/impl (Collector (Mapping %k %v))
+  (type %elem (Tuple %k %v))
+  (type %acc (MapBuilder %k %v))
+  (type %out (Map %k %v))
+  (defun (init c) (mapbuilder-empty))
+  (defun (step c acc kv)
+    (def (k v) kv)
+    (mapbuilder-add! acc k v))
+  (defun (finish c acc) (mapbuilder->map acc)))
+
+(type (: Summing (Union summing)))
+
+(def/impl (Collector Summing)
+  (type %elem int)
+  (type %acc int)
+  (type %out int)
+  (defun (init c) 0)
+  (defun (step c acc x) (+ acc x))
+  (defun (finish c acc) acc))
+
+(type (: (Counting %a) (Union counting)))
+
+(def/impl (Collector (Counting %a))
+  (type %elem %a)
+  (type %acc int)
+  (type %out int)
+  (defun (init c) 0)
+  (defun (step c acc x) (+ acc 1))
+  (defun (finish c acc) acc))
+
+;; `folding` is the primitive the others could all be written in terms of: the
+;; accumulator simply becomes the step expression's value. Its seed is a
+;; *construction* argument, so it is written `(folding seed expr)`.
+(type (: (Folding %a) (Union (folding %a))))
+
+(def/impl (Collector (Folding %a))
+  (type %elem %a)
+  (type %acc %a)
+  (type %out %a)
+  (defun (init c) (match c ((folding s) s)))
+  (defun (step c acc x) x)
+  (defun (finish c acc) acc))

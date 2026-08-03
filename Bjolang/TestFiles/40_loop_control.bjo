@@ -3,8 +3,8 @@
 ;; Every exit routes through the same finish block — exhaustion, `:break`, and a
 ;; named loop's final `:do` declining to iterate. Nothing bypasses it, which is
 ;; why an accumulator always arrives *finished*.
-(import (std core))
-(import (std iter))
+(import (std prelude))
+
 
 ;; ---------------------------------------------------------------------------
 ;; :break and :final

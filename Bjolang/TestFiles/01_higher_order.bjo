@@ -1,5 +1,5 @@
 
-(import (std list))
+(import (std prelude))
 
 (: id (-> %a %a))
 (defun (id x) x)

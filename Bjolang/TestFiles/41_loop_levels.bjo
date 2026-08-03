@@ -9,8 +9,9 @@
 ;; a subloop, back out of an exhausted one, and out of the whole loop from any
 ;; depth. Nesting the groups instead would put a cross-level jump in the wrong
 ;; switch.
-(import (std core))
-(import (std iter))
+
+
+(import (std prelude))
 
 (: build-to (-> int (List int)))
 (defun (build-to n)

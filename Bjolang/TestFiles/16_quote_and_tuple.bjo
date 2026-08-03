@@ -1,5 +1,4 @@
-(import (std core))
-(import (std list))
+(import (std prelude))
 
 ;; Exercises the quoted-list branch of Pipeline.read, which shares its range
 ;; computation and dot-to-Tuple rewrite with the plain parenthesized branch.

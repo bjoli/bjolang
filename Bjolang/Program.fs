@@ -495,8 +495,42 @@ let main argv =
                         | Some cscDll ->
                             let target = if isLibrary then "library" else "exe"
                             let runtimeDir = Path.GetDirectoryName(loc)
+
+                            // Reference assemblies, not the implementation ones.
+                            //
+                            // `typeof<obj>.Assembly.Location` sits in the shared
+                            // framework, where the core library is
+                            // `System.Private.CoreLib` — an implementation
+                            // detail. An assembly compiled against it records a
+                            // dependency on it by name, and anything that later
+                            // consumes that assembly through the ordinary
+                            // reference assemblies cannot resolve the types its
+                            // signatures mention: a trait whose associated type
+                            // is a tuple fails with "the type '(, )' is defined
+                            // in an assembly that is not referenced". That is
+                            // exactly the MSBuild path this function falls back
+                            // to, so the two builds have to agree on which
+                            // assemblies they mean.
+                            let bclDir =
+                                let refPack =
+                                    Path.Combine(
+                                        dotnetRoot,
+                                        "packs",
+                                        "Microsoft.NETCore.App.Ref",
+                                        Path.GetFileName(runtimeDir),
+                                        "ref"
+                                    )
+
+                                if Directory.Exists refPack then
+                                    // One target-framework directory inside.
+                                    match Directory.GetDirectories(refPack) |> Array.tryHead with
+                                    | Some tfmDir -> tfmDir
+                                    | None -> runtimeDir
+                                else
+                                    runtimeDir
+
                             let bclRefs =
-                                Directory.GetFiles(runtimeDir, "*.dll")
+                                Directory.GetFiles(bclDir, "*.dll")
                                 |> Array.map (fun p -> $"\"-r:{p}\"")
                                 |> String.concat " "
                             

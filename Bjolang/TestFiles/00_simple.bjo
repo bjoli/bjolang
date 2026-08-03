@@ -1,5 +1,5 @@
 
-(import (std list))
+(import (std prelude))
 
 (: match-list (-> (List string) string))
 (defun (match-list l)

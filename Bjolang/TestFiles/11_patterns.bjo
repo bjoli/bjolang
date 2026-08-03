@@ -1,4 +1,4 @@
-(import (std list))
+(import (std prelude))
 
 ;; Tail-recursive match: must compile to a switch STATEMENT with `continue`.
 (: sum-len (-> (List int) int int))

@@ -4,8 +4,8 @@
 ;; exit runs the same finish block. Sequences are extended by writing an
 ;; `Iterable` impl and accumulators by writing a `Collector` impl, so nothing
 ;; here is special-cased in the compiler beyond the clause syntax itself.
-(import (std core))
-(import (std iter))
+
+(import (std prelude))
 
 ;; ---------------------------------------------------------------------------
 ;; Sequences

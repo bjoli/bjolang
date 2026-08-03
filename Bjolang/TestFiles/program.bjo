@@ -1,4 +1,4 @@
-(import (std list))
+(import (std prelude))
 (import "dummy_lib")
 
 (: head (-> (List string) string))

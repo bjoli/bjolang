@@ -5,7 +5,7 @@
 ;; tuple emission. This is not an exotic corner: `()` in source parses as an
 ;; empty tuple, and so does a body with no forms in it, so a program can reach
 ;; it without ever writing `(Tuple)`.
-(import (std core))
+(import (std prelude))
 
 ;; As a value bound to a name.
 (: unit-value (-> (Tuple)))

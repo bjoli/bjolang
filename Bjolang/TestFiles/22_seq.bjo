@@ -1,5 +1,5 @@
 ;; Lazy sequences: (seq ...), (yield v), (yield-from s), and the seq-* library.
-(import (std core))
+(import (std prelude))
 
 ;; A `seq` body runs a `yield` at a time, as the sequence is consumed.
 (: countdown (-> int (Seq int)))

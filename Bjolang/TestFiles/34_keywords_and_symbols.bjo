@@ -1,5 +1,5 @@
 ;; Test for first-class Keywords and Symbols with runtime interning
-(import (std core))
+(import (std prelude))
 
 (: match-kw (-> Keyword int))
 (defun (match-kw k)

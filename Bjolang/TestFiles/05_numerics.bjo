@@ -1,3 +1,4 @@
+(import (std prelude))
 (defun (main args)
   ;; Casts
   (def byte-val (cast byte 255))
