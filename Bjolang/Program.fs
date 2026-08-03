@@ -351,6 +351,7 @@ let main argv =
             let runtimeDllPath = Path.Combine(Paths.runtimeDir, "BjolangRuntime.dll")
             let collectionsDllPath = Path.Combine(Paths.runtimeDir, "Collections.dll")
             let schemeListDllPath = Path.Combine(Paths.runtimeDir, "SchemeList.dll")
+            let mapDllPath = Path.Combine(Paths.runtimeDir, "Map.dll")
 
             // Everything this program links against, where it really lives.
             // Nothing is ever copied next to the output: an assembly has one
@@ -460,6 +461,10 @@ let main argv =
     </Reference>
     <Reference Include="SchemeList">
       <HintPath>{schemeListDllPath}</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="Map">
+      <HintPath>{mapDllPath}</HintPath>
       <Private>false</Private>
     </Reference>
 {dllReferences}

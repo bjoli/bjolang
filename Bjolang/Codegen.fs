@@ -93,6 +93,7 @@ let mapPrimitiveType (name: string) =
     // A `seq` is a C# iterator, so its type is the one C# iterators produce.
     | "Seq" -> "System.Collections.Generic.IEnumerable"
     | "Option" -> "BjolangRuntime.Option"
+    | "Map" -> "Map.Map"
     | _ -> name
 
 // Promoted to `Bjolang.Naming`, which the passes that run before code

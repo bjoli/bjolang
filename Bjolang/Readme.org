@@ -1,0 +1,141 @@
+* Bjolang - a language
+
+I think we have all had the thought: all programming languages suck in at least one way. Not all of us think it is a big deal, but some of us feel the urge to try our wings at designing a language. This is my almost 100% vibe coded try. Not really meant for real use, but to see if my thoughts made any sense.
+
+* Elevator pitch
+Bjolang is a scheme-inspired language with local HM type inference that compiles to constipated c#. It has traits instead of classes, meaning you don't ever have to think about two-way interop. The default data structures are immutable. A fast RRB tree (Vec), a very fast CHAMP (hash table), a linked list (List). There are more datastructures coming (ordered map, deque, queue).
+
+It also fakes Brand types by inlining traits when the trait in known at compile time, giving us among other things, a Monad trait. 
+
+* Planned features
+
+For concurrency I will integrate a concurrentML because I made this language and async is no fun
+
+Loop facility based on goof-loop for guile scheme.
+
+* Limitations
+
+** Entry point
+Since it compiles to c# it needs an entry point. That is the (defun (main args) ...) function
+
+** Tail recursion
+
+Tail recursion does not work except for self recursion (including named lets) and local mutual recursion.
+
+#+BEGIN_SRC scheme
+;; this works
+
+(defun (main args)
+
+  ;; A lazy sequence of fibonaccis
+  (def fibseq (seq   
+               (let loop ((a 0) (b 1))
+                 (yield a)
+                 (loop b (+ a b)))))
+  (defun (odd? a)
+    (match a
+      (0 #t)
+      (_ (even? (- a 1)))))
+  (defun (even=? a)
+    (if (= 0 a)
+        #t
+        (odd? (- a 1))))
+  (odd? 4000000)
+     
+  0)
+
+
+  ;; this stack overflows after a while if you call any of the functions
+  (: odd? (-> Int Bool)) ;; Every top level function needs a typedef
+  (defun (odd? a)
+    (if (= 0 a)
+        #t
+        (even? (- a 1))))
+
+  (: even? (-> Int Bool))
+  (defun (even? a)
+    (if (= 0 a)
+        #t
+        (odd? (- a 1))))
+
+
+
+#+END_SRC
+
+* Examples
+*** Traits
+Bjolang has traits. Traits can be regular traits, which means they are usable on concrete types (fast calls) or in dynamic contexts (as fast as C# Interfaces).
+
+#+begin_src scheme
+;; The simplest kind of trait is something like a trait that turns anything into a string:
+(def/trait (Printable %i)
+  (: ->str (-> %i string)))
+
+(def/impl (Printable int)
+  (defun (->str i) (int->string i)))
+
+;; More complex traits also work:
+(def/trait (Foldable %col)
+  ;; associated type
+  (type %item)
+  ;; fold is a function that takes:
+  ;; 1. a function that takes an accumulator type, an item type and
+  ;;    returns an item type.
+  ;; 2. an accumulator type
+  ;; 3. a collection type
+  ;; 4. and returns an accumulator type.
+  (: fold (-> (-> %acc %item %acc) %acc %col %acc)))
+
+;; Implement the trait for a List with a generic in it
+(def/impl (Foldable (List %a))
+  ;; the associated type %item is the same as the %a in the list
+  (type %item %a)
+  (defun (fold f acc col)
+    (list-foldl f acc col)))
+
+;; fold is now a function that works on a list and any other data
+;; type for which Foldable is defined.
+(fold #(+ % 1) 0 '(1 2 3 4))
+
+;; This is a "fake hkt" trait: it only works when types are know at compile time.
+(def/trait (Functor (%f %a))
+  (: fmap (-> (%f %a) (-> %a %b) (%f %b))))
+
+(def/impl (Functor (List %a))
+  (defun (fmap xs g) (list-map xs g)))
+
+(def/impl (Functor (Option %a))
+  (defun (fmap o g)
+    (match o ((Some v) (Some (g v))) (None None))))
+
+(defun (main args)
+  (def a-list '(1 2 3 4))
+  (def an-option (Option 5))
+  ;; these both work
+  (def b (fmap (fun (arg) (+ arg 1)) a-list))
+  (def c (fmap (fun (arg) (+ arg 1)) an-option))
+
+  (defun (bump bomp)
+    (fmap (fun (arg) (+ arg 1)) bomp))
+
+  ;; Works, BUT locks bump into the type (List int)
+  (def d (bump a-list))
+  ;; Which means this fails because any function written against
+  ;; an "inline" trait is going to be monomorphic. 
+  (def e (bump an-option))
+  
+  )
+
+#+end_src
+
+
+*** Do notation
+#+BEGIN_SRC scheme
+(: calc (-> int (Option int)))
+(defun (calc n)
+  (do (:bind half (safe-div n 2))
+      (:let  doubled (* half 2))
+      (:bind third (safe-div doubled 3))
+      (:return (+ doubled third))))
+#+END_SRC
+

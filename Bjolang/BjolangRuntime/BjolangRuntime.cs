@@ -384,5 +384,157 @@ public static class BjolangRuntime {
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static int listsubcount<T>(SchemeList.SchemeList<T> list) => SchemeList.SchemeList.Count(list);
+
+    // --- Map (CHAMP) Wrappers ---
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static Map.Map<TK, TV> mapsubempty<TK, TV>() where TK : notnull => Map.Map<TK, TV>.Empty;
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static TV mapsubref<TK, TV>(Map.Map<TK, TV> map, TK key) where TK : notnull => map.Get(key);
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static TV mapsubget<TK, TV>(Map.Map<TK, TV> map, TK key) where TK : notnull => map.Get(key);
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static TV mapsubgetsubor<TK, TV>(Map.Map<TK, TV> map, TK key, TV fallback) where TK : notnull =>
+        map.TryGetValue(key, out var val) ? val : fallback;
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static Option<TV> mapsubtrysubget<TK, TV>(Map.Map<TK, TV> map, TK key) where TK : notnull =>
+        map.TryGetValue(key, out var val) ? new Option<TV>(val) : default;
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static Map.Map<TK, TV> mapsubset<TK, TV>(Map.Map<TK, TV> map, TK key, TV value) where TK : notnull =>
+        map.Set(key, value);
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static Map.Map<TK, TV> mapsubadd<TK, TV>(Map.Map<TK, TV> map, TK key, TV value) where TK : notnull =>
+        map.Add(key, value);
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static Map.Map<TK, TV> mapsubremove<TK, TV>(Map.Map<TK, TV> map, TK key) where TK : notnull =>
+        map.Remove(key);
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static bool mapsubcontains_QMARK<TK, TV>(Map.Map<TK, TV> map, TK key) where TK : notnull =>
+        map.ContainsKey(key);
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static bool mapsubhassubkey_QMARK<TK, TV>(Map.Map<TK, TV> map, TK key) where TK : notnull =>
+        map.ContainsKey(key);
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static int mapsubcount<TK, TV>(Map.Map<TK, TV> map) where TK : notnull => map.Count;
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static bool mapsubempty_QMARK<TK, TV>(Map.Map<TK, TV> map) where TK : notnull => map.IsEmpty;
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static Map.Map<TK, TV> mapsubclear<TK, TV>(Map.Map<TK, TV> map) where TK : notnull => map.Clear();
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static IEnumerable<TK> mapsubkeys<TK, TV>(Map.Map<TK, TV> map) where TK : notnull => map.Keys;
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static IEnumerable<TV> mapsubvalues<TK, TV>(Map.Map<TK, TV> map) where TK : notnull => map.Values;
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static Map.Map<TK, TV> mapsubmerge<TK, TV>(Map.Map<TK, TV> map, Map.Map<TK, TV> other) where TK : notnull =>
+        map.Merge(other);
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static Map.Map<TK, TV> mapsubmergesubwith<TK, TV>(Map.Map<TK, TV> map, Map.Map<TK, TV> other, Func<TK, TV, TV, TV> resolver) where TK : notnull =>
+        map.Merge(other, resolver);
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static void mapsubforsubeach<TK, TV>(Map.Map<TK, TV> map, Action<TK, TV> action) where TK : notnull =>
+        map.ForEach(action);
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static bool mapsubiter<TK, TV>(Map.Map<TK, TV> map, Func<TK, TV, bool> action) where TK : notnull =>
+        map.Iter(action);
+
+    public static TState mapsubfold<TK, TV, TState>(Func<TState, TK, TV, TState> folder, TState initial, Map.Map<TK, TV> map) where TK : notnull {
+        var state = initial;
+        map.Iter((k, v) => {
+            state = folder(state, k, v);
+            return true;
+        });
+        return state;
+    }
+
+    public static Map.Map<TK, TV> mapsubfilter<TK, TV>(Map.Map<TK, TV> map, Func<TK, TV, bool> predicate) where TK : notnull {
+        var tmap = Map.Map<TK, TV>.Empty.ToTransient();
+        map.Iter((k, v) => {
+            if (predicate(k, v)) {
+                tmap.Set(k, v);
+            }
+            return true;
+        });
+        return tmap.ToImmutable();
+    }
+
+    public static Map.Map<TK, TV2> mapsubmap<TK, TV, TV2>(Map.Map<TK, TV> map, Func<TK, TV, TV2> mapper) where TK : notnull {
+        var tmap = Map.Map<TK, TV2>.Empty.ToTransient();
+        map.Iter((k, v) => {
+            tmap.Set(k, mapper(k, v));
+            return true;
+        });
+        return tmap.ToImmutable();
+    }
+
+    // --- Map Conversions ---
+    public static Map.Map<TK, TV> listsubgtmap<TK, TV>(SchemeList.SchemeList<ValueTuple<TK, TV>> list) where TK : notnull {
+        var tmap = Map.Map<TK, TV>.Empty.ToTransient();
+        var cur = list;
+        while (!SchemeList.SchemeList.IsEmpty(cur)) {
+            var head = SchemeList.SchemeList.Head(cur);
+            tmap.Set(head.Item1, head.Item2);
+            cur = SchemeList.SchemeList.Tail(cur);
+        }
+        return tmap.ToImmutable();
+    }
+
+    public static SchemeList.SchemeList<ValueTuple<TK, TV>> mapsubgtlist<TK, TV>(Map.Map<TK, TV> map) where TK : notnull {
+        var pairs = new List<ValueTuple<TK, TV>>(map.Count);
+        map.ForEach((k, v) => pairs.Add(new ValueTuple<TK, TV>(k, v)));
+        var result = SchemeList.SchemeList.Empty<ValueTuple<TK, TV>>();
+        for (int i = pairs.Count - 1; i >= 0; i--) {
+            result = SchemeList.SchemeList.Cons(pairs[i], result);
+        }
+        return result;
+    }
+
+    public static Map.Map<TK, TV> vecsubgtmap<TK, TV>(Collections.RrbList<ValueTuple<TK, TV>> vec) where TK : notnull {
+        var tmap = Map.Map<TK, TV>.Empty.ToTransient();
+        int count = Collections.RrbFun.Count(vec);
+        for (int i = 0; i < count; i++) {
+            var item = Collections.RrbFun.Get(vec, i);
+            tmap.Set(item.Item1, item.Item2);
+        }
+        return tmap.ToImmutable();
+    }
+
+    public static Collections.RrbList<ValueTuple<TK, TV>> mapsubgtvec<TK, TV>(Map.Map<TK, TV> map) where TK : notnull {
+        var builder = Collections.RrbBuilderFun.Empty<ValueTuple<TK, TV>>();
+        map.ForEach((k, v) => {
+            builder = Collections.RrbBuilderFun.Add(builder, new ValueTuple<TK, TV>(k, v));
+        });
+        return Collections.RrbBuilderFun.ToImmutable(builder);
+    }
+
+    public static Map.Map<TK, TV> seqsubgtmap<TK, TV>(IEnumerable<ValueTuple<TK, TV>> source) where TK : notnull {
+        var tmap = Map.Map<TK, TV>.Empty.ToTransient();
+        foreach (var (k, v) in source) {
+            tmap.Set(k, v);
+        }
+        return tmap.ToImmutable();
+    }
+
+    public static IEnumerable<ValueTuple<TK, TV>> mapsubgtseq<TK, TV>(Map.Map<TK, TV> map) where TK : notnull {
+        foreach (var kvp in map) {
+            yield return new ValueTuple<TK, TV>(kvp.Key, kvp.Value);
+        }
+    }
 }
 

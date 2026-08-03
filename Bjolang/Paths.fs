@@ -56,7 +56,7 @@ let libDir: string =
 /// The installation root: the directory `lib` sits in.
 let root: string = Path.GetFullPath(Path.Combine(libDir, ".."))
 
-let private runtimeAssemblyNames = [ "BjolangRuntime"; "Collections"; "SchemeList" ]
+let private runtimeAssemblyNames = [ "BjolangRuntime"; "Collections"; "SchemeList"; "Map" ]
 
 /// Directory holding the runtime support assemblies every compiled program
 /// links against.

@@ -11,10 +11,11 @@ let makeVecBuilderType a = TCon("VecBuilder", [a])
 let makeListType a = TCon("List", [a])
 let makeSeqType a = TCon("Seq", [a])
 let makeOptionType a = TCon("Option", [a])
+let makeMapType k v = TCon("Map", [k; v])
 
 let emptyRegistry : TraitRegistry =
     { LocalTraits = Set.empty
-      LocalTypes = Set.ofList ["List"; "Vec"; "VecBuilder"; "Seq"; "Option"]
+      LocalTypes = Set.ofList ["List"; "Vec"; "VecBuilder"; "Seq"; "Option"; "Map"]
       Traits = Map.empty
       TraitMethods = Map.empty
       Implementations = Map.empty
@@ -161,6 +162,38 @@ let prelude : Env =
         ("vecbuilder-get", {Scheme = Scheme(["a"], [], makeFunType [makeVecBuilderType (TVar "a"); intType] (TVar "a")); IsMutable = false })
         ("vecbuilder-count", {Scheme = Scheme(["a"], [], makeFunType [makeVecBuilderType (TVar "a")] intType); IsMutable = false })
         ("vecbuilder->vec", {Scheme = Scheme(["a"], [], makeFunType [makeVecBuilderType (TVar "a")] (makeVecType (TVar "a"))); IsMutable = false })
+
+        // Map (CHAMP) operations
+        ("map-empty", {Scheme = Scheme(["k"; "v"], [], makeFunType [] (makeMapType (TVar "k") (TVar "v"))); IsMutable = false })
+        ("map-ref", {Scheme = Scheme(["k"; "v"], [], makeFunType [makeMapType (TVar "k") (TVar "v"); TVar "k"] (TVar "v")); IsMutable = false })
+        ("map-get", {Scheme = Scheme(["k"; "v"], [], makeFunType [makeMapType (TVar "k") (TVar "v"); TVar "k"] (TVar "v")); IsMutable = false })
+        ("map-get-or", {Scheme = Scheme(["k"; "v"], [], makeFunType [makeMapType (TVar "k") (TVar "v"); TVar "k"; TVar "v"] (TVar "v")); IsMutable = false })
+        ("map-try-get", {Scheme = Scheme(["k"; "v"], [], makeFunType [makeMapType (TVar "k") (TVar "v"); TVar "k"] (makeOptionType (TVar "v"))); IsMutable = false })
+        ("map-set", {Scheme = Scheme(["k"; "v"], [], makeFunType [makeMapType (TVar "k") (TVar "v"); TVar "k"; TVar "v"] (makeMapType (TVar "k") (TVar "v"))); IsMutable = false })
+        ("map-add", {Scheme = Scheme(["k"; "v"], [], makeFunType [makeMapType (TVar "k") (TVar "v"); TVar "k"; TVar "v"] (makeMapType (TVar "k") (TVar "v"))); IsMutable = false })
+        ("map-remove", {Scheme = Scheme(["k"; "v"], [], makeFunType [makeMapType (TVar "k") (TVar "v"); TVar "k"] (makeMapType (TVar "k") (TVar "v"))); IsMutable = false })
+        ("map-contains?", {Scheme = Scheme(["k"; "v"], [], makeFunType [makeMapType (TVar "k") (TVar "v"); TVar "k"] boolType); IsMutable = false })
+        ("map-has-key?", {Scheme = Scheme(["k"; "v"], [], makeFunType [makeMapType (TVar "k") (TVar "v"); TVar "k"] boolType); IsMutable = false })
+        ("map-count", {Scheme = Scheme(["k"; "v"], [], makeFunType [makeMapType (TVar "k") (TVar "v")] intType); IsMutable = false })
+        ("map-empty?", {Scheme = Scheme(["k"; "v"], [], makeFunType [makeMapType (TVar "k") (TVar "v")] boolType); IsMutable = false })
+        ("map-clear", {Scheme = Scheme(["k"; "v"], [], makeFunType [makeMapType (TVar "k") (TVar "v")] (makeMapType (TVar "k") (TVar "v"))); IsMutable = false })
+        ("map-keys", {Scheme = Scheme(["k"; "v"], [], makeFunType [makeMapType (TVar "k") (TVar "v")] (makeSeqType (TVar "k"))); IsMutable = false })
+        ("map-values", {Scheme = Scheme(["k"; "v"], [], makeFunType [makeMapType (TVar "k") (TVar "v")] (makeSeqType (TVar "v"))); IsMutable = false })
+        ("map-merge", {Scheme = Scheme(["k"; "v"], [], makeFunType [makeMapType (TVar "k") (TVar "v"); makeMapType (TVar "k") (TVar "v")] (makeMapType (TVar "k") (TVar "v"))); IsMutable = false })
+        ("map-merge-with", {Scheme = Scheme(["k"; "v"], [], makeFunType [makeMapType (TVar "k") (TVar "v"); makeMapType (TVar "k") (TVar "v"); makeFunType [TVar "k"; TVar "v"; TVar "v"] (TVar "v")] (makeMapType (TVar "k") (TVar "v"))); IsMutable = false })
+        ("map-for-each", {Scheme = Scheme(["k"; "v"], [], makeFunType [makeMapType (TVar "k") (TVar "v"); makeFunType [TVar "k"; TVar "v"] voidType] voidType); IsMutable = false })
+        ("map-iter", {Scheme = Scheme(["k"; "v"], [], makeFunType [makeMapType (TVar "k") (TVar "v"); makeFunType [TVar "k"; TVar "v"] boolType] boolType); IsMutable = false })
+        ("map-fold", {Scheme = Scheme(["k"; "v"; "s"], [], makeFunType [makeFunType [TVar "s"; TVar "k"; TVar "v"] (TVar "s"); TVar "s"; makeMapType (TVar "k") (TVar "v")] (TVar "s")); IsMutable = false })
+        ("map-filter", {Scheme = Scheme(["k"; "v"], [], makeFunType [makeMapType (TVar "k") (TVar "v"); makeFunType [TVar "k"; TVar "v"] boolType] (makeMapType (TVar "k") (TVar "v"))); IsMutable = false })
+        ("map-map", {Scheme = Scheme(["k"; "v"; "v2"], [], makeFunType [makeMapType (TVar "k") (TVar "v"); makeFunType [TVar "k"; TVar "v"] (TVar "v2")] (makeMapType (TVar "k") (TVar "v2"))); IsMutable = false })
+
+        // Map conversions
+        ("list->map", {Scheme = Scheme(["k"; "v"], [], makeFunType [makeListType (TTuple [TVar "k"; TVar "v"])] (makeMapType (TVar "k") (TVar "v"))); IsMutable = false })
+        ("map->list", {Scheme = Scheme(["k"; "v"], [], makeFunType [makeMapType (TVar "k") (TVar "v")] (makeListType (TTuple [TVar "k"; TVar "v"]))); IsMutable = false })
+        ("vec->map", {Scheme = Scheme(["k"; "v"], [], makeFunType [makeVecType (TTuple [TVar "k"; TVar "v"])] (makeMapType (TVar "k") (TVar "v"))); IsMutable = false })
+        ("map->vec", {Scheme = Scheme(["k"; "v"], [], makeFunType [makeMapType (TVar "k") (TVar "v")] (makeVecType (TTuple [TVar "k"; TVar "v"]))); IsMutable = false })
+        ("seq->map", {Scheme = Scheme(["k"; "v"], [], makeFunType [makeSeqType (TTuple [TVar "k"; TVar "v"])] (makeMapType (TVar "k") (TVar "v"))); IsMutable = false })
+        ("map->seq", {Scheme = Scheme(["k"; "v"], [], makeFunType [makeMapType (TVar "k") (TVar "v")] (makeSeqType (TTuple [TVar "k"; TVar "v"]))); IsMutable = false })
       ]
       Registry = emptyRegistry
       FunMetas = Map.empty

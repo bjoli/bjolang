@@ -21,6 +21,41 @@ let rec collectPositionalArgs (expr: SExpr) : Set<int> =
         items |> List.map collectPositionalArgs |> Set.unionMany
     | _ -> Set.empty
 
+let desugarMapLiteral (headRange: Lexer.Range) (entriesSList: SExpr) : SExpr =
+    let listRange = getRange entriesSList
+    let entries =
+        match entriesSList with
+        | SList(items, _) -> items
+        | _ -> []
+
+    if List.isEmpty entries then
+        let mapEmptyToken = SAtom { Token = Lexer.Symbol "map-empty"; Range = headRange }
+        SList([ mapEmptyToken ], listRange)
+    else
+        let parsePair entry =
+            match entry with
+            | SList([ k; v ], er) -> (k, v, er)
+            | SList([ SAtom { Token = Lexer.Symbol "Tuple" }; k; v ], er) -> (k, v, er)
+            | SList([ SAtom { Token = Lexer.Symbol "vec-literal" }; k; v ], er) -> (k, v, er)
+            | bad ->
+                let er = getRange bad
+                failwithf "Invalid map entry at line %d, col %d. Expected (key value), [key value], or (key . value)" er.Start.Line er.Start.Column
+
+        let pairs = List.map parsePair entries
+        let nilToken = SAtom { Token = Lexer.Symbol "Nil"; Range = listRange }
+        let rec makeConsChain listPairs =
+            match listPairs with
+            | [] -> nilToken
+            | (k, v, er) :: rest ->
+                let tupleSExpr = SList([ SAtom { Token = Lexer.Symbol "Tuple"; Range = er }; k; v ], er)
+                let restChain = makeConsChain rest
+                let consToken = SAtom { Token = Lexer.Symbol "Cons"; Range = er }
+                SList([ consToken; tupleSExpr; restChain ], er)
+
+        let consChain = makeConsChain pairs
+        let listMapToken = SAtom { Token = Lexer.Symbol "list->map"; Range = headRange }
+        SList([ listMapToken; consChain ], listRange)
+
 let rec read (tokens: LexedToken list) : SExpr list * LexedToken list =
     let isDot = function SAtom { Token = Dot } -> true | _ -> false
 
@@ -70,8 +105,16 @@ let rec read (tokens: LexedToken list) : SExpr list * LexedToken list =
             let lambdaSExpr = SList([ funToken; paramList; bodySList ], getRange bodySList)
             loop (lambdaSExpr :: acc) afterList
 
+        // Map shorthand: #map((k1 v1) (k2 v2) ...) or #map[(k1 v1) (k2 v2) ...]
+        | { Token = Lexer.Symbol "#map"; Range = hr } :: { Token = LParen; Range = r } :: rest
+        | { Token = Lexer.Symbol "#map"; Range = hr } :: { Token = LBracket; Range = r } :: rest ->
+            let entriesSList, afterList = readForm r hr id rest
+            let mapSExpr = desugarMapLiteral hr entriesSList
+            loop (mapSExpr :: acc) afterList
+
         | { Token = LParen; Range = r } :: rest ->
             let node, afterList = readForm r r id rest
+            loop (node :: acc) afterList
             loop (node :: acc) afterList
 
         // Vec literal: [items...] → (vec-literal items...)
