@@ -279,6 +279,8 @@ are extended by writing trait implementations rather than by adding syntax.
 | ~(:acc name (coll ...) #:when c)~ | declare an accumulator; ~#:when~ gates the step  |
 | ~(:break cond)~                 | end the whole loop, before the rest of the iteration |
 | ~(:final cond)~                 | end it *after* the current iteration completes     |
+| ~(:end-subloop-if cond)~        | abandon this level, resume the enclosing one       |
+| ~(:subloop)~                    | nothing; it exists only to open a new level        |
 
 Each carries its own condition rather than being guarded by a preceding
 ~:when~ — clauses do not compose, so there is no bare ~(:break)~ to be reached
@@ -304,8 +306,45 @@ a jump, not a value: using it anywhere but tail position in that final ~:do~ is
 an error rather than a closure.
 
 Consecutive ~:for~ clauses advance in *lockstep* and are tested in clause order:
-when the first of them is done the loop is over, and no later ~done?~ runs. A
+when the first of them is done the level is over, and no later ~done?~ runs. A
 ~:for~ pattern only destructures and must always match — it is not a filter.
+
+*** Levels
+Levels are implicit: *a ~:for~ preceded by anything other than another ~:for~
+opens a new one*, and every other clause belongs to the level that was current at
+its own position. So clause order alone decides nesting, with no marker at the
+nesting site.
+#+BEGIN_SRC scheme
+;; lockstep — pairs up, ends with the shorter
+(loop (:for k keys) (:for v vals) (:acc out (listing (Tuple k v))))
+
+;; nested — a cartesian product
+(loop (:for x xs) (:subloop) (:for y ys) (:acc out (listing (Tuple x y))))
+
+;; also nested: a :let breaks adjacency just as well, and is the usual
+;; reason to — the inner sequence names the outer variable
+(loop (:for x xs) (:let n (size x)) (:for y (children x)) ...)
+#+END_SRC
+
+~(:subloop)~ emits nothing whatsoever. Its only role is to *not* be a ~:for~, so
+that the next one starts a level.
+
+Two consequences worth knowing. An ~:acc~ written above an inner ~:for~ belongs
+to the outer level and so steps once per *outer* iteration. And an accumulator
+declared inside a subloop persists across outer iterations — accumulators are
+hoisted, and nothing resets one on re-entry; code wanting that uses a mutable
+variable and does it by hand.
+
+~:when~ and ~:end-subloop-if~ are different jumps: ~:when~ skips one iteration of
+the level it appears in, while ~:end-subloop-if~ ends that level and resumes the
+enclosing one. At the outermost level there is nothing to resume, and rather than
+silently coinciding with ~:when~ it is an error.
+
+Every level compiles to a member of one flat group, so entering a subloop,
+returning from an exhausted one, and leaving the whole loop from any depth are
+all jumps within a single ~while~/~switch~ — no control flag is threaded, and an
+inner sequence is evaluated at the jump that enters its level rather than being
+hoisted.
 
 Every exit runs the finish block. ~=> expr~ sees each accumulator by name, bound
 to its *finished* value; with no ~=>~ the result is the single accumulator, or a

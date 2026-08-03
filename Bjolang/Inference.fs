@@ -913,6 +913,17 @@ let rec infer (env: Env) (expr: Expr) : HMType * TypedExpr =
                     if isFun then
                         let argTypes = args |> List.map (fun _ -> freshMeta ())
 
+                        // The member's *shape* is unified with whatever is known
+                        // of it before its body is checked, rather than only
+                        // after. In a mutually recursive group an earlier
+                        // member's call site has already said what this one's
+                        // arguments are, and a body that cannot see that is
+                        // checked against bare metavariables — which is fatal
+                        // rather than merely imprecise for an associated type,
+                        // since a projection needs a concrete head to resolve
+                        // against and cannot be deferred into a unification.
+                        unify env.Registry (TFun(argTypes, freshMeta ())) expectedType
+
                         let localEnv =
                             List.zip args argTypes
                             |> List.fold

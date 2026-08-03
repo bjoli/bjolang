@@ -453,6 +453,10 @@ type private LoopClause =
     /// Ends the whole loop when the condition holds, before the rest of the
     /// iteration runs. Routes through the finish block like every other exit.
     | LBreak of SExpr * Range
+    /// Abandons the current subloop and resumes the enclosing level's next
+    /// iteration — an early return from a subloop, not an iteration skip. The
+    /// same edge inner exhaustion takes.
+    | LEndSubloop of SExpr * Range
     /// Ends the loop *after* the current iteration completes.
     ///
     /// Not a mechanism of its own: it is a `:break` on a hidden accumulator
@@ -477,6 +481,9 @@ type private AccSlot =
       /// `:final`'s accumulator, which is not the author's and must not appear
       /// in the finish block's result.
       Hidden: bool
+      /// The level whose body steps it. Every accumulator is a slot on *every*
+      /// member — they are hoisted — but only one level runs its step.
+      Level: int
       Range: Range }
 
 /// A `(loop ...)` clause's own range, for diagnostics.
@@ -489,6 +496,7 @@ let private loopClauseRange (c: LoopClause) : Range =
     | LSubloop r
     | LAcc(_, _, _, r)
     | LBreak(_, r)
+    | LEndSubloop(_, r)
     | LFinal(_, r) -> r
 
 let rec parseExpr (s: SExpr) : Expr =
@@ -854,6 +862,12 @@ and private parseLoopClause (s: SExpr) : LoopClause =
 
     | SList([ SAtom { Token = Keyword "subloop" } ], r) -> LSubloop r
 
+    | SList(SAtom { Token = Keyword "end-subloop-if" } :: rest, r) ->
+        match rest with
+        | [ cond ] -> LEndSubloop(cond, r)
+        | _ ->
+            failwithf $"Invalid (:end-subloop-if ...) at line %d{r.Start.Line}. Expected: (:end-subloop-if cond)"
+
     | SList(SAtom { Token = Keyword "acc" } :: SAtom { Token = Symbol name } :: collector :: rest, r) ->
         let modifier =
             match rest with
@@ -880,12 +894,6 @@ and private parseLoopClause (s: SExpr) : LoopClause =
         match rest with
         | [ cond ] -> LFinal(cond, r)
         | _ -> failwithf $"Invalid (:final ...) at line %d{r.Start.Line}. Expected: (:final cond)"
-
-    // Named for what it will be, so that the message says "not yet" rather than
-    // "unknown".
-    | SList(SAtom { Token = Keyword "end-subloop-if" } :: _, r) ->
-        failwithf
-            $"(:end-subloop-if ...) at line %d{r.Start.Line} is not implemented yet: it abandons the current subloop, and nested levels are not supported. Use (:when ...) to skip an iteration or (:break ...) to leave the loop."
 
     | SList(SAtom { Token = Keyword k } :: _, r) ->
         failwithf $"Unknown (loop ...) clause ':%s{k}' at line %d{r.Start.Line}"
@@ -999,46 +1007,92 @@ and desugarLoop (allForms: SExpr list) (r: Range) : Expr =
 
     let clauses = clauseForms |> List.map parseLoopClause
 
-    // Level assignment. A `:for` preceded by anything other than a `:for` opens
-    // a new level; everything above it, `:acc` included, belongs to the level
-    // that was current at its own position.
-    clauses
-    |> List.iteri (fun i c ->
-        match c with
-        | LFor(_, _, cr) when i > 0 && (match clauses[i - 1] with LFor _ -> false | _ -> true) ->
-            failwithf
-                $"The (:for ...) at line %d{cr.Start.Line} opens a subloop, which is not implemented yet: a (:for ...) preceded by anything other than another (:for ...) starts a new level. Move it above the other clauses to iterate in lockstep."
-        | LSubloop sr ->
-            failwithf
-                $"(:subloop) at line %d{sr.Start.Line} is not implemented yet. It exists only to open a new level, and nested levels are not supported."
-        | _ -> ())
-
-    let fors =
-        clauses
-        |> List.choose (function
-            | LFor(p, sq, cr) -> Some(p, sq, cr)
-            | _ -> None)
-
-    if fors.IsEmpty then
+    match clauses with
+    | LFor _ :: _ -> ()
+    | c :: _ ->
+        let cr = loopClauseRange c
         failwithf
-            $"Invalid loop at line %d{r.Start.Line}: it has no (:for ...) clause, so nothing would ever end it."
+            $"A loop must begin with a (:for ...) at line %d{cr.Start.Line}: every other clause belongs to the level open at its position, and before the first (:for ...) there is none."
+    | [] -> ()
 
-    let others = clauses |> List.filter (function LFor _ -> false | _ -> true)
+    // Level assignment, in one left-to-right pass. A `:for` preceded by anything
+    // other than a `:for` opens a new level; every other clause belongs to the
+    // level that was current at its own position — so an `:acc` above an inner
+    // `:for`, or a `:let` between a `:subloop` and the `:for` it opens, stays in
+    // the enclosing level.
+    let levelOf =
+        let mutable current = -1
+        let mutable prevWasFor = false
 
-    // Names nothing else can mention. The accumulator keeps the *user's* name:
-    // it is in scope through the loop, and each `:acc` clause rebinds it, so a
-    // later clause reads the value as of its own position.
-    let seqNames = fors |> List.map (fun _ -> Gensym.fresh "loopseq")
-    let curNames = fors |> List.map (fun _ -> Gensym.fresh "loopcur")
-    let loopName = Gensym.fresh "looplevel"
+        clauses
+        |> List.map (fun c ->
+            match c with
+            | LFor _ ->
+                if not prevWasFor then current <- current + 1
+                prevWasFor <- true
+                current
+            | _ ->
+                prevWasFor <- false
+                current)
+
+    let maxLevel = List.max levelOf
 
     let call (name: string) (args: Expr list) (cr: Range) = EApp(EIdent(name, cr), args, cr)
 
-    // One slot per accumulator, in declaration order. `:final` contributes one
-    // of its own: a `folding` seeded with false, whose step is the test.
+    /// The names a `:for` or `:let` pattern binds.
+    let patternNames (pat: SExpr) =
+        match pat with
+        | SAtom { Token = Symbol n } -> [ n ]
+        | SList(SAtom { Token = Symbol "Tuple" } :: parts, _) ->
+            parts
+            |> List.choose (function
+                | SAtom { Token = Symbol n } -> Some n
+                | _ -> None)
+        | _ -> []
+
+    // One member per level, plus the names each of them needs.
+    let levels =
+        [ for i in 0..maxLevel ->
+            let mine = List.zip levelOf clauses |> List.filter (fst >> (=) i) |> List.map snd
+
+            let fors =
+                mine
+                |> List.choose (function
+                    | LFor(p, sq, cr) -> Some(p, sq, cr)
+                    | _ -> None)
+
+            // `:subloop` emits nothing. Its only role is to have not been a
+            // `:for`, which the pass above has already taken account of.
+            let others =
+                mine
+                |> List.filter (function
+                    | LFor _
+                    | LSubloop _ -> false
+                    | _ -> true)
+
+            let bound =
+                mine
+                |> List.collect (function
+                    | LFor(p, _, _) -> patternNames p
+                    | LLet(p, _, _) -> patternNames p
+                    | _ -> [])
+
+            {| Index = i
+               Fors = fors
+               Others = others
+               Bound = bound
+               SeqNames = fors |> List.map (fun _ -> Gensym.fresh "loopseq")
+               CurNames = fors |> List.map (fun _ -> Gensym.fresh "loopcur")
+               Member = Gensym.fresh "looplevel" |} ]
+
+    // One slot per accumulator, in declaration order across *every* level: an
+    // accumulator is hoisted, lives on all members, and is visible in the finish
+    // block. `:final` contributes one of its own: a `folding` seeded with false,
+    // whose step is the test.
     let accInfo =
-        others
-        |> List.choose (function
+        List.zip levelOf clauses
+        |> List.choose (fun (level, clause) ->
+            match clause with
             | LAcc(name, collector, modifier, cr) ->
                 let collectorExpr, stepForm = splitCollector collector
 
@@ -1049,6 +1103,7 @@ and desugarLoop (allForms: SExpr list) (r: Range) : Expr =
                       StepForm = stepForm
                       Modifier = modifier
                       Hidden = false
+                      Level = level
                       Range = cr }
 
             | LFinal(cond, cr) ->
@@ -1060,40 +1115,73 @@ and desugarLoop (allForms: SExpr list) (r: Range) : Expr =
                       CollectorExpr = call "folding" [ EIdent("false", cr) ] cr
                       StepForm = cond
                       Modifier = None
-                      Hidden = false
+                      Hidden = true
+                      Level = level
                       Range = cr }
-                |> Option.map (fun slot -> { slot with Hidden = true })
 
             | _ -> None)
 
     let accNames = accInfo |> List.map (fun slot -> slot.Name)
 
-    /// The jump back to the top: every cursor advanced, every accumulator passed
-    /// on as it stands at this point in the clause list.
+    /// The slot vector of level `i`, in emission order.
     ///
-    /// `overrides` replaces individual slots by name, for a named loop's
-    /// `(lp #:name expr)`. The vector is always complete: a `TRecur` carries one
-    /// argument per slot, so a partial update has to be filled in here.
-    let advanceWith (overrides: Map<string, Expr>) (cr: Range) =
-        let cursors =
-            List.map2 (fun sn cn -> call "next" [ EIdent(sn, cr); EIdent(cn, cr) ] cr) seqNames curNames
+    /// Every enclosing level's sequences and cursors are carried, because an
+    /// inner level has to be able to jump *back* to its parent with the parent's
+    /// cursors advanced — and every enclosing level's bindings too, because an
+    /// inner sequence or clause may name them and a member is a separate
+    /// function with no lexical view of its caller. Accumulators are on every
+    /// member: they are hoisted, and the finish block reads them wherever it is
+    /// reached from.
+    ///
+    /// Level 0's sequences are absent by design: they are loop-invariant, so
+    /// they sit in the prologue and are lexically in scope for the whole group.
+    let slotNames (i: int) : string list =
+        [ for j in 0..i do
+              if j > 0 then yield! levels[j].SeqNames
+              yield! levels[j].CurNames
+          for j in 0 .. i - 1 do
+              yield! levels[j].Bound
+          yield! accNames ]
 
-        let accs =
-            accNames
+    /// A jump to level `target`, filling every slot: with `overrides` where one
+    /// is given, and with whatever is in scope under that name otherwise.
+    ///
+    /// A `TRecur` carries one argument per slot, so a partial update has to be
+    /// completed here rather than left to the emitter.
+    let jump (target: int) (overrides: Map<string, Expr>) (cr: Range) =
+        let args =
+            slotNames target
             |> List.map (fun n ->
                 match Map.tryFind n overrides with
                 | Some e -> e
                 | None -> EIdent(n, cr))
 
-        EApp(EIdent(loopName, cr), cursors @ accs, cr)
+        EApp(EIdent(levels[target].Member, cr), args, cr)
 
-    let advance (cr: Range) = advanceWith Map.empty cr
+    /// Level `i`'s cursors, one step on.
+    let advanced (i: int) (cr: Range) =
+        List.map2
+            (fun sn cn -> cn, call "next" [ EIdent(sn, cr); EIdent(cn, cr) ] cr)
+            levels[i].SeqNames
+            levels[i].CurNames
+        |> Map.ofList
+
+    /// The next iteration of level `i`: its own cursors advanced, everything
+    /// else as it stands.
+    let advanceLevelWith (i: int) (extra: Map<string, Expr>) (cr: Range) =
+        let overrides = Map.fold (fun acc k v -> Map.add k v acc) (advanced i cr) extra
+        jump i overrides cr
+
+    let advanceLevel (i: int) (cr: Range) = advanceLevelWith i Map.empty cr
 
     // `done?` exactly once per iteration, in clause order, short-circuiting:
     // when one sequence is done the level is over and no later `done?` runs.
-    let exhausted =
+    let exhausted (i: int) =
         let tests =
-            List.map2 (fun sn cn -> call "done?" [ EIdent(sn, r); EIdent(cn, r) ] r) seqNames curNames
+            List.map2
+                (fun sn cn -> call "done?" [ EIdent(sn, r); EIdent(cn, r) ] r)
+                levels[i].SeqNames
+                levels[i].CurNames
 
         let rec anyOf ts =
             match ts with
@@ -1152,18 +1240,49 @@ and desugarLoop (allForms: SExpr list) (r: Range) : Expr =
 
         ELet(slot.Name, false, [], None, value, rest, cr)
 
-    // The clauses, in order, ending in the jump back to the top — unless a named
-    // loop's final `:do` has taken that edge over.
-    let rec buildClauses (cs: LoopClause list) (accsLeft: AccSlot list) =
-        match cs with
-        | [] -> advance r
+    /// Entering level `i` from its parent: its sequences are evaluated *here*,
+    /// because an inner sequence usually names an outer loop variable and so is
+    /// not loop-invariant; its cursors are freshly started from them.
+    ///
+    /// The sequences are bound to temporaries first — the jump needs their
+    /// values, and `start` needs them too, so evaluating the expression twice
+    /// would be both wrong and slow.
+    let enterLevel (i: int) (cr: Range) =
+        let temps = levels[i].Fors |> List.map (fun _ -> Gensym.fresh "loopenter")
 
-        | LLet(pat, value, cr) :: tl -> bindLoopPattern pat (parseExpr value) (buildClauses tl accsLeft) cr
+        let overrides =
+            (List.map2 (fun sn t -> sn, EIdent(t, cr)) levels[i].SeqNames temps)
+            @ (List.map2 (fun cn t -> cn, call "start" [ EIdent(t, cr) ] cr) levels[i].CurNames temps)
+            |> Map.ofList
+
+        List.foldBack
+            (fun (t, (_, sequence, fr)) acc -> ELetMono(t, parseExpr sequence, acc, fr))
+            (List.zip temps levels[i].Fors)
+            (jump i overrides cr)
+
+    /// Leaving level `i`: level 0 is the end of the loop, and any other level
+    /// hands back to its parent with the parent's cursors advanced — the same
+    /// edge an `:end-subloop-if` takes.
+    let exitLevel (i: int) (cr: Range) =
+        if i = 0 then finishBlock else advanceLevel (i - 1) cr
+
+    // The clauses of one level, in order. The last of them falls into the next
+    // level if there is one, and otherwise into the next iteration of this one —
+    // unless a named loop's final `:do` has taken that edge over.
+    let rec buildClauses (level: int) (cs: LoopClause list) (accsLeft: AccSlot list) =
+        let continueEdgeOf (cr: Range) =
+            if level < maxLevel then enterLevel (level + 1) cr else advanceLevel level cr
+
+        match cs with
+        | [] -> continueEdgeOf r
+
+        | LLet(pat, value, cr) :: tl ->
+            bindLoopPattern pat (parseExpr value) (buildClauses level tl accsLeft) cr
 
         // In a named loop the *final* `:do` owns the continue edge: if it tail
         // calls the loop, that is the jump, and if it completes without one the
         // loop leaves through the finish block like any other exit.
-        | [ LDo(exprs, cr) ] when userLoopName.IsSome ->
+        | [ LDo(exprs, cr) ] when userLoopName.IsSome && level = maxLevel ->
             let name = userLoopName.Value
             let statements = exprs |> List.take (exprs.Length - 1)
             let final = List.last exprs
@@ -1174,21 +1293,35 @@ and desugarLoop (allForms: SExpr list) (r: Range) : Expr =
                     rejectLoopName name parsed
                     ELet("_", false, [], None, parsed, acc, cr))
                 statements
-                (continueEdge name (parseExpr final) cr)
+                (continueEdge level name (parseExpr final) cr)
 
         | LDo(exprs, cr) :: tl ->
             List.foldBack
                 (fun e acc -> ELet("_", false, [], None, parseExpr e, acc, cr))
                 exprs
-                (buildClauses tl accsLeft)
+                (buildClauses level tl accsLeft)
 
-        // Skips the rest of *this* iteration. Clauses above it have already run,
-        // so an accumulator stepped before it keeps what it was given.
-        | LWhen(cond, cr) :: tl -> EIf(parseExpr cond, buildClauses tl accsLeft, advance cr, cr)
+        // Skips the rest of *this* iteration of *this* level. Clauses above it
+        // have already run, so an accumulator stepped before it keeps what it
+        // was given.
+        | LWhen(cond, cr) :: tl ->
+            EIf(parseExpr cond, buildClauses level tl accsLeft, advanceLevel level cr, cr)
 
-        // Leaves the whole loop, through the finish block. Accumulators stepped
-        // earlier in this iteration keep what they were given.
-        | LBreak(cond, cr) :: tl -> EIf(parseExpr cond, finishBlock, buildClauses tl accsLeft, cr)
+        // Abandons this level and resumes the enclosing one — an early return
+        // from a subloop, not an iteration skip. At level 0 the two would
+        // coincide, which is a coincidence rather than a definition.
+        | LEndSubloop(cond, cr) :: tl ->
+            if level = 0 then
+                failwithf
+                    $"(:end-subloop-if ...) at line %d{cr.Start.Line} is at the outermost level, where there is no enclosing loop to resume. Use (:when ...) to skip an iteration, or (:break ...) to leave the loop."
+
+            EIf(parseExpr cond, exitLevel level cr, buildClauses level tl accsLeft, cr)
+
+        // Leaves the whole loop from any level, through the finish block.
+        // Accumulators stepped earlier in this iteration keep what they were
+        // given.
+        | LBreak(cond, cr) :: tl ->
+            EIf(parseExpr cond, finishBlock, buildClauses level tl accsLeft, cr)
 
         // `:break` on the hidden accumulator, then the accumulator's own step —
         // in that order. The slot still holds the previous iteration's verdict
@@ -1200,14 +1333,14 @@ and desugarLoop (allForms: SExpr list) (r: Range) : Expr =
                 EIf(
                     EIdent(slot.Name, slot.Range),
                     finishBlock,
-                    stepAcc slot (buildClauses tl restAcc),
+                    stepAcc slot (buildClauses level tl restAcc),
                     slot.Range
                 )
             | [] -> failwith "internal error: :final without its accumulator"
 
         | LAcc _ :: tl ->
             match accsLeft with
-            | slot :: restAcc -> stepAcc slot (buildClauses tl restAcc)
+            | slot :: restAcc -> stepAcc slot (buildClauses level tl restAcc)
             | [] -> failwith "internal error: accumulator clause without its info"
 
         | (LFor _ | LSubloop _) :: _ -> failwith "internal error: clause should have been rejected"
@@ -1217,25 +1350,25 @@ and desugarLoop (allForms: SExpr list) (r: Range) : Expr =
     /// Every tail position either *is* a call to the loop — which becomes the
     /// jump, keeping it a tail call so it can be one — or is not, in which case
     /// it runs for its effect and the loop leaves through the finish block.
-    and continueEdge (name: string) (e: Expr) (cr: Range) : Expr =
+    and continueEdge (level: int) (name: string) (e: Expr) (cr: Range) : Expr =
         match e with
         | EApp(EIdent(n, ir), args, ar) when n = name ->
             for a in args do
                 rejectLoopName name a
 
-            advanceWith (parseOverrides name args ir) ar
+            advanceLevelWith level (parseOverrides name args ir) ar
 
         | EIf(cond, t, f, ir) ->
             rejectLoopName name cond
-            EIf(cond, continueEdge name t cr, continueEdge name f cr, ir)
+            EIf(cond, continueEdge level name t cr, continueEdge level name f cr, ir)
 
         | ELet(n, isFun, args, ann, value, body, ir) ->
             rejectLoopName name value
-            ELet(n, isFun, args, ann, value, continueEdge name body cr, ir)
+            ELet(n, isFun, args, ann, value, continueEdge level name body cr, ir)
 
         | ELetTuple(names, value, body, ir) ->
             rejectLoopName name value
-            ELetTuple(names, value, continueEdge name body cr, ir)
+            ELetTuple(names, value, continueEdge level name body cr, ir)
 
         // Anything else completes, and then the loop is over.
         | other ->
@@ -1278,37 +1411,57 @@ and desugarLoop (allForms: SExpr list) (r: Range) : Expr =
 
         go e
 
-    let bindCurrents (inner: Expr) =
+    let bindCurrents (i: int) (inner: Expr) =
         List.foldBack
             (fun ((pat, _, cr), (sn, cn)) acc ->
                 bindLoopPattern pat (call "current" [ EIdent(sn, cr); EIdent(cn, cr) ] cr) acc cr)
-            (List.zip fors (List.zip seqNames curNames))
+            (List.zip levels[i].Fors (List.zip levels[i].SeqNames levels[i].CurNames))
             inner
 
-    let body = EIf(exhausted, finishBlock, bindCurrents (buildClauses others accInfo), r)
+    // One member per level. Every level transition is a tail call by
+    // construction, and they are all in one group rather than nested: a jump
+    // across levels has to reach the *same* switch, and a nested group would
+    // bind it to the wrong one.
+    let members =
+        levels
+        |> List.map (fun lvl ->
+            let accsHere = accInfo |> List.filter (fun slot -> slot.Level = lvl.Index)
 
-    let slots = curNames @ accNames
+            let body =
+                EIf(
+                    exhausted lvl.Index,
+                    exitLevel lvl.Index r,
+                    bindCurrents lvl.Index (buildClauses lvl.Index lvl.Others accsHere),
+                    r
+                )
+
+            (lvl.Member, true, slotNames lvl.Index, None, body))
 
     let initialArgs =
-        (List.map2 (fun sn (_, _, cr) -> call "start" [ EIdent(sn, cr) ] cr) seqNames fors)
+        (levels[0].SeqNames
+         |> List.map (fun sn -> call "start" [ EIdent(sn, r) ] r))
         @ (accInfo |> List.map (fun slot -> call "init" [ EIdent(slot.Collector, slot.Range) ] slot.Range))
 
-    let level =
-        ELetRec([ (loopName, true, slots, None, body) ], EApp(EIdent(loopName, r), initialArgs, r), r)
+    let group =
+        ELetRec(members, EApp(EIdent(levels[0].Member, r), initialArgs, r), r)
 
     // The prologue. Everything loop-invariant is evaluated once, outside: the
-    // sequences and the collectors. `let/mono` rather than `let` because a
-    // collector is typically a bare nullary constructor, which `let` would
-    // generalize — and then its element type would never pin down.
+    // collectors, and level 0's sequences. An inner level's sequence usually
+    // names an outer loop variable, so it is evaluated at the entering jump
+    // instead — hoisting is per clause, not unconditional.
+    //
+    // `let/mono` rather than `let` because a collector is typically a bare
+    // nullary constructor, which `let` would generalize — and then its element
+    // type would never pin down.
     let withCollectors =
         List.foldBack
             (fun slot acc -> ELetMono(slot.Collector, slot.CollectorExpr, acc, slot.Range))
             accInfo
-            level
+            group
 
     List.foldBack
         (fun (sn, (_, sequence, cr)) acc -> ELetMono(sn, parseExpr sequence, acc, cr))
-        (List.zip seqNames fors)
+        (List.zip levels[0].SeqNames levels[0].Fors)
         withCollectors
 
 and parseBody (exprs: SExpr list) (fallbackRange: Range) : Expr =

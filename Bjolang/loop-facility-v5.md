@@ -87,9 +87,40 @@ and the auto-generated finish. Sequences are `List` and `Vec`; collectors are
   iteration and the semantics against `done?` need deciding, so the compiler
   refuses with a message naming the accumulators it *can* override.
 
-Still not implemented, and rejected with a message that says so rather than
-misbehaving: nested levels (a `:for` preceded by a non-`:for`), `:subloop`, and
-`:end-subloop-if`.
+**Nested levels are done**, covered by `TestFiles/41_loop_levels.bjo`, and with
+them `:subloop` and `:end-subloop-if`. The flat group of 5c is what is emitted:
+one `ELetRec` with a member per level, all mutually recursive — M_i enters
+M_{i+1} and M_{i+1} hands back to M_i — so `LetRecify` sees a single SCC and
+codegen emits one `while (true) switch` with `goto case` between levels and no
+calls at all. A three-level loop is three cases.
+
+Two things the spec did not settle, found by building it:
+
+- **Slot vectors have to carry the enclosing levels.** M_i's slots are every
+  level 0..i's cursors, *plus every enclosing level's bindings*, plus every
+  accumulator. The cursors because an inner level jumps back to its parent with
+  the parent's cursors advanced, and it cannot advance what it does not hold; the
+  bindings because a member is a separate function with no lexical view of its
+  caller, and an inner sequence or clause usually names an outer loop variable.
+  Level 0's sequences are the exception: they are loop-invariant, so they stay in
+  the prologue and are lexically in scope for the whole group.
+
+- **`ELetRec` had to unify a member's shape before checking its body.** An inner
+  level's sequence arrives as a *parameter*, so its type was a bare metavariable
+  while the body was inferred — and an associated-type projection needs a
+  concrete head, so `current` on it failed with `Cannot unify int with
+  TAssoc ("Iterable", "elem", TMeta ...)`. Inference now unifies
+  `TFun(argTypes, _)` with the member's expected type *before* inferring the
+  body, so the argument types an earlier member's call site already pinned reach
+  the later member. Members are emitted outermost-first, which is the order that
+  makes this fire.
+
+`M_exit` is still not a member: `:break` and level 0's exhaustion emit the finish
+block inline, so it is duplicated once per exit site. Making it a member is the
+remaining piece of 5c, and is now cheap — the group already has several members.
+
+Not implemented: overriding a `:for` variable from a named loop, which needs the
+`Option` element slot described above.
 
 ## Prerequisite status (audited against the tree)
 
