@@ -16,5 +16,6 @@
     <None Remove="SchemeList\**" />
     <ProjectReference Include="RrbList/src/Collections/Collections.csproj" />
     <ProjectReference Include="SchemeList/src/SchemeList/SchemeList.csproj" />
+    <ProjectReference Include="Map/Map/Map.csproj" />
   </ItemGroup>
 </Project>

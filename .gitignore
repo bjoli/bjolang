@@ -38,6 +38,11 @@ Bjolang/TestFiles/*.runtimeconfig.json
 Bjolang/TestFiles/lib/
 Bjolang/lib/*.exe
 Bjolang/lib/*.runtimeconfig.json
+Bjolang/TestFiles/**/*
+Bjolang/cs-snapshots/**/*
+
 
 # But make sure standard library source files are not ignored
 !Bjolang/lib/std/**/*.bjo
+!Bjolang/TestFiles/**/*.bjo
+*.diff

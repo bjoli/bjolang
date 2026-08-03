@@ -130,8 +130,8 @@ compile time.
 
 *** Library
 Operations that return a sequence are themselves lazy.
-| ~(seq-map s f)~           | each element through ~f~                      |
-| ~(seq-filter s pred)~     | the elements satisfying ~pred~                |
+| ~(seq-map f s)~           | each element through ~f~                      |
+| ~(seq-filter pred s)~     | the elements satisfying ~pred~                |
 | ~(seq-fold f init s)~     | left fold; consumes the sequence              |
 | ~(seq-unfold gen seed)~   | grow a sequence from a state                  |
 | ~(seq-head s)~            | first element; errors if empty                |
@@ -140,7 +140,7 @@ Operations that return a sequence are themselves lazy.
 | ~(seq-skip s n)~          | all but the first ~n~                         |
 | ~(seq-append a b)~        | ~a~ then ~b~                                  |
 | ~(seq-range start stop)~  | ~start~ inclusive to ~stop~ exclusive         |
-| ~(seq-for-each s action)~ | run ~action~ on each element                  |
+| ~(seq-for-each action s)~ | run ~action~ on each element                  |
 | ~(seq-count s)~           | number of elements; consumes the sequence     |
 | ~(seq-empty)~, ~(seq-empty? s)~ | the empty sequence, and the test        |
 

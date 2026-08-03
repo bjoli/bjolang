@@ -102,7 +102,7 @@ Bjolang has traits. Traits can be regular traits, which means they are usable on
   (: fmap (-> (%f %a) (-> %a %b) (%f %b))))
 
 (def/impl (Functor (List %a))
-  (defun (fmap xs g) (list-map xs g)))
+  (defun (fmap xs g) (list-map g xs)))
 
 (def/impl (Functor (Option %a))
   (defun (fmap o g)

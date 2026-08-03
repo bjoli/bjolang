@@ -30,14 +30,14 @@
   (println (map-ref merged "y"))
   (println (map-ref merged "z"))
 
-  (def merged-with (map-merge-with ma mb (fun (k v1 v2) (+ v1 v2))))
+  (def merged-with (map-merge-with (fun (k v1 v2) (+ v1 v2)) ma mb))
   (println (map-ref merged-with "y"))
 
-  (def doubled (map-map ma (fun (k v) (* v 2))))
+  (def doubled (map-map (fun (k v) (* v 2)) ma))
   (println (map-ref doubled "x"))
   (println (map-ref doubled "y"))
 
-  (def filtered (map-filter ma (fun (k v) (> v 1))))
+  (def filtered (map-filter (fun (k v) (> v 1)) ma))
   (println (map-count filtered))
   (println (map-ref filtered "y"))
 

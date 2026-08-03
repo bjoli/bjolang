@@ -104,25 +104,25 @@ public static class BjolangRuntime {
     public static ValueTuple<Collections.RrbList<T>, Collections.RrbList<T>> vecsubsplit<T>(Collections.RrbList<T> list, int index) => Collections.RrbFun.Split(list, index);
 
     [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.AggressiveInlining)]
-    public static Collections.RrbList<TResult> vecsubmap<T, TResult>(Collections.RrbList<T> list, Func<T, TResult> mapper) => Collections.RrbFun.Map(list, mapper);
+    public static Collections.RrbList<TResult> vecsubmap<T, TResult>(Func<T, TResult> mapper, Collections.RrbList<T> list) => Collections.RrbFun.Map(list, mapper);
 
     [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.AggressiveInlining)]
-    public static Collections.RrbList<T> vecsubfilter<T>(Collections.RrbList<T> list, Func<T, bool> predicate) => Collections.RrbFun.Filter(list, predicate);
+    public static Collections.RrbList<T> vecsubfilter<T>(Func<T, bool> predicate, Collections.RrbList<T> list) => Collections.RrbFun.Filter(list, predicate);
 
     [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.AggressiveInlining)]
     public static TState vecsubfold<T, TState>(Func<TState, T, TState> func, TState seed, Collections.RrbList<T> list) => Collections.RrbFun.Fold(list, seed, func);
 
     [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.AggressiveInlining)]
-    public static T vecsubreduce<T>(Collections.RrbList<T> list, Func<T, T, T> func) => Collections.RrbFun.Reduce(list, func);
+    public static T vecsubreduce<T>(Func<T, T, T> func, Collections.RrbList<T> list) => Collections.RrbFun.Reduce(list, func);
 
     [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.AggressiveInlining)]
-    public static void vecsubforsubeach<T>(Collections.RrbList<T> list, Action<T> action) => Collections.RrbFun.ForEach(list, action);
+    public static void vecsubforsubeach<T>(Action<T> action, Collections.RrbList<T> list) => Collections.RrbFun.ForEach(list, action);
 
     [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.AggressiveInlining)]
-    public static void vecsubforsubeachdivrange<T>(Collections.RrbList<T> list, Action<T> action, int index, int count) => Collections.RrbFun.ForEach(list, action, index, count);
+    public static void vecsubforsubeachdivrange<T>(Action<T> action, Collections.RrbList<T> list, int index, int count) => Collections.RrbFun.ForEach(list, action, index, count);
 
     [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.AggressiveInlining)]
-    public static bool vecsubiter<T>(Collections.RrbList<T> list, Func<T, bool> action) => Collections.RrbFun.Iter(list, action);
+    public static bool vecsubiter<T>(Func<T, bool> action, Collections.RrbList<T> list) => Collections.RrbFun.Iter(list, action);
 
     [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.AggressiveInlining)]
     public static int vecsubcount<T>(Collections.RrbList<T> list) => Collections.RrbFun.Count(list);
@@ -245,11 +245,11 @@ public static class BjolangRuntime {
         if (!seenAny) throw new InvalidOperationException("seq-tail of an empty sequence");
     }
 
-    public static IEnumerable<U> seqsubmap<T, U>(IEnumerable<T> source, Func<T, U> selector) {
+    public static IEnumerable<U> seqsubmap<T, U>(Func<T, U> selector, IEnumerable<T> source) {
         foreach (var item in source) yield return selector(item);
     }
 
-    public static IEnumerable<T> seqsubfilter<T>(IEnumerable<T> source, Func<T, bool> predicate) {
+    public static IEnumerable<T> seqsubfilter<T>(Func<T, bool> predicate, IEnumerable<T> source) {
         foreach (var item in source) if (predicate(item)) yield return item;
     }
 
@@ -296,7 +296,7 @@ public static class BjolangRuntime {
         foreach (var item in second) yield return item;
     }
 
-    public static void seqsubforsubeach<T>(IEnumerable<T> source, Action<T> action) {
+    public static void seqsubforsubeach<T>(Action<T> action, IEnumerable<T> source) {
         foreach (var item in source) action(item);
     }
 
@@ -365,10 +365,10 @@ public static class BjolangRuntime {
     public static SchemeList.SchemeList<T> listsubreverse<T>(SchemeList.SchemeList<T> list) => SchemeList.SchemeList.Reverse(list);
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public static SchemeList.SchemeList<U> listsubmap<T, U>(SchemeList.SchemeList<T> list, Func<T, U> selector) => SchemeList.SchemeList.Map(list, selector);
+    public static SchemeList.SchemeList<U> listsubmap<T, U>(Func<T, U> selector, SchemeList.SchemeList<T> list) => SchemeList.SchemeList.Map(list, selector);
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public static SchemeList.SchemeList<T> listsubfilter<T>(SchemeList.SchemeList<T> list, Func<T, bool> predicate) => SchemeList.SchemeList.Filter(list, predicate);
+    public static SchemeList.SchemeList<T> listsubfilter<T>(Func<T, bool> predicate, SchemeList.SchemeList<T> list) => SchemeList.SchemeList.Filter(list, predicate);
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static TState listsubfoldl<T, TState>(Func<TState, T, TState> folder, TState initial, SchemeList.SchemeList<T> list) => SchemeList.SchemeList.Fold(list, initial, folder);
@@ -377,7 +377,7 @@ public static class BjolangRuntime {
     public static TState listsubfoldr<T, TState>(Func<T, TState, TState> folder, TState initial, SchemeList.SchemeList<T> list) => SchemeList.SchemeList.FoldRight(list, initial, folder);
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public static void listsubforsubeach<T>(SchemeList.SchemeList<T> list, Action<T> action) => SchemeList.SchemeList.ForEach(list, action);
+    public static void listsubforsubeach<T>(Action<T> action, SchemeList.SchemeList<T> list) => SchemeList.SchemeList.ForEach(list, action);
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static T listsubref<T>(SchemeList.SchemeList<T> list, int index) => SchemeList.SchemeList.Item(list, index);
@@ -443,15 +443,15 @@ public static class BjolangRuntime {
         map.Merge(other);
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public static Map.Map<TK, TV> mapsubmergesubwith<TK, TV>(Map.Map<TK, TV> map, Map.Map<TK, TV> other, Func<TK, TV, TV, TV> resolver) where TK : notnull =>
+    public static Map.Map<TK, TV> mapsubmergesubwith<TK, TV>(Func<TK, TV, TV, TV> resolver, Map.Map<TK, TV> map, Map.Map<TK, TV> other) where TK : notnull =>
         map.Merge(other, resolver);
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public static void mapsubforsubeach<TK, TV>(Map.Map<TK, TV> map, Action<TK, TV> action) where TK : notnull =>
+    public static void mapsubforsubeach<TK, TV>(Action<TK, TV> action, Map.Map<TK, TV> map) where TK : notnull =>
         map.ForEach(action);
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public static bool mapsubiter<TK, TV>(Map.Map<TK, TV> map, Func<TK, TV, bool> action) where TK : notnull =>
+    public static bool mapsubiter<TK, TV>(Func<TK, TV, bool> action, Map.Map<TK, TV> map) where TK : notnull =>
         map.Iter(action);
 
     public static TState mapsubfold<TK, TV, TState>(Func<TState, TK, TV, TState> folder, TState initial, Map.Map<TK, TV> map) where TK : notnull {
@@ -463,7 +463,7 @@ public static class BjolangRuntime {
         return state;
     }
 
-    public static Map.Map<TK, TV> mapsubfilter<TK, TV>(Map.Map<TK, TV> map, Func<TK, TV, bool> predicate) where TK : notnull {
+    public static Map.Map<TK, TV> mapsubfilter<TK, TV>(Func<TK, TV, bool> predicate, Map.Map<TK, TV> map) where TK : notnull {
         var tmap = Map.Map<TK, TV>.Empty.ToTransient();
         map.Iter((k, v) => {
             if (predicate(k, v)) {
@@ -474,7 +474,7 @@ public static class BjolangRuntime {
         return tmap.ToImmutable();
     }
 
-    public static Map.Map<TK, TV2> mapsubmap<TK, TV, TV2>(Map.Map<TK, TV> map, Func<TK, TV, TV2> mapper) where TK : notnull {
+    public static Map.Map<TK, TV2> mapsubmap<TK, TV, TV2>(Func<TK, TV, TV2> mapper, Map.Map<TK, TV> map) where TK : notnull {
         var tmap = Map.Map<TK, TV2>.Empty.ToTransient();
         map.Iter((k, v) => {
             tmap.Set(k, mapper(k, v));

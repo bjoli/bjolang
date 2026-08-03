@@ -9,7 +9,7 @@
 
   ;; 2. Shorthand passed directly to higher-order function
   (def nums '(1 2 3))
-  (def doubled (list-map nums #(* &1 2)))
+  (def doubled (list-map #(* &1 2) nums))
   (println (list-head doubled))
 
   ;; 3. Direct application with out-of-order arguments

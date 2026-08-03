@@ -52,11 +52,11 @@ Built-in functional linked lists.
 - ~(list-empty? lst)~ : Returns true if the list is empty.
 - ~(list-length lst)~, ~(list-count lst)~ : Returns the number of elements.
 - ~(list-reverse lst)~ : Reverses the list.
-- ~(list-map lst f)~ : Maps function ~f~ over the list.
-- ~(list-filter lst f)~ : Filters elements satisfying ~f~.
+- ~(list-map f lst)~ : Maps function ~f~ over the list.
+- ~(list-filter f lst)~ : Filters elements satisfying ~f~.
 - ~(list-foldl f init lst)~ : Left fold; ~f~ receives ~(acc item)~.
 - ~(list-foldr f init lst)~ : Right fold; ~f~ receives ~(item acc)~.
-- ~(list-for-each lst f)~ : Applies ~f~ to each element for side effects.
+- ~(list-for-each f lst)~ : Applies ~f~ to each element for side effects.
 - ~(list-ref lst index)~ : Gets the element at ~index~.
 
 ** Vectors (~Vec~ / ~RrbList~)
@@ -73,13 +73,13 @@ Persistent immutable vectors.
 - ~(vec-merge vec other)~ : Concatenates two vectors.
 - ~(vec-merge/pure vec other)~ : Concatenates two vectors (pure).
 - ~(vec-split vec index)~ : Splits the vector into two vectors at ~index~.
-- ~(vec-map vec f)~ : Maps ~f~ over the vector.
-- ~(vec-filter vec f)~ : Filters the vector.
+- ~(vec-map f vec)~ : Maps ~f~ over the vector.
+- ~(vec-filter f vec)~ : Filters the vector.
 - ~(vec-fold f init vec)~ : Left fold; ~f~ receives ~(acc item)~.
-- ~(vec-reduce vec f)~ : Reduces the vector.
-- ~(vec-for-each vec f)~ : Applies ~f~ for side effects.
-- ~(vec-for-each/range vec f start count)~ : Applies ~f~ over a range.
-- ~(vec-iter vec f)~ : Iterates with early exit (returns true if all elements matched).
+- ~(vec-reduce f vec)~ : Reduces the vector.
+- ~(vec-for-each f vec)~ : Applies ~f~ for side effects.
+- ~(vec-for-each/range f vec start count)~ : Applies ~f~ over a range.
+- ~(vec-iter f vec)~ : Iterates with early exit (returns true if all elements matched).
 - ~(vec-count vec)~ : Returns the size of the vector.
 - ~(vec-contains vec item)~ : Checks if ~item~ is in the vector.
 - ~(vec-compact vec)~ : Compacts the vector's internal structure.
@@ -112,12 +112,12 @@ High-performance immutable CHAMP (Compressed Hash-Array Mapped Prefix-tree) maps
 - ~(map-keys map)~ : Returns a lazy sequence (~Seq~) of the map's keys.
 - ~(map-values map)~ : Returns a lazy sequence (~Seq~) of the map's values.
 - ~(map-merge map other)~ : Merges two maps, with entries in ~other~ taking precedence.
-- ~(map-merge-with map other f)~ : Merges two maps using resolver function ~(f key val1 val2)~ for duplicate keys.
-- ~(map-for-each map f)~ : Applies ~(f key value)~ to each entry for side effects.
-- ~(map-iter map f)~ : Iterates with early exit; ~f~ receives ~(key value)~ and returns a boolean.
+- ~(map-merge-with f map other)~ : Merges two maps using resolver function ~(f key val1 val2)~ for duplicate keys.
+- ~(map-for-each f map)~ : Applies ~(f key value)~ to each entry for side effects.
+- ~(map-iter f map)~ : Iterates with early exit; ~f~ receives ~(key value)~ and returns a boolean.
 - ~(map-fold f init map)~ : Folds over the map; ~f~ receives ~(acc key value)~.
-- ~(map-filter map f)~ : Returns a new map containing only entries where ~(f key value)~ is true.
-- ~(map-map map f)~ : Returns a new map with values transformed by ~(f key value)~.
+- ~(map-filter f map)~ : Returns a new map containing only entries where ~(f key value)~ is true.
+- ~(map-map f map)~ : Returns a new map with values transformed by ~(f key value)~.
 - ~(list->map lst)~ : Constructs a map from a list of ~(key . val)~ pairs/tuples.
 - ~(map->list map)~ : Converts the map to a list of pairs/tuples.
 - ~(vec->map vec)~ : Constructs a map from a vector of pairs/tuples.
@@ -140,14 +140,14 @@ Lazy, demand-driven sequences.
 - ~(seq-empty? s)~ : Returns true if the sequence is empty.
 - ~(seq-head s)~ : Returns the first element of the sequence.
 - ~(seq-tail s)~ : Returns the rest of the sequence.
-- ~(seq-map s f)~ : Lazily maps ~f~ over the sequence.
-- ~(seq-filter s f)~ : Lazily filters elements satisfying ~f~.
+- ~(seq-map f s)~ : Lazily maps ~f~ over the sequence.
+- ~(seq-filter f s)~ : Lazily filters elements satisfying ~f~.
 - ~(seq-fold f init s)~ : Folds over the sequence; ~f~ receives ~(acc item)~.
 - ~(seq-unfold generator state)~ : Produces a sequence from ~state~ and a ~generator~ function returning ~(Some (Tuple next-item next-state))~ or ~None~.
 - ~(seq-take s n)~ : Takes the first ~n~ elements lazily.
 - ~(seq-skip s n)~ : Skips the first ~n~ elements lazily.
 - ~(seq-append s1 s2)~ : Lazily concatenates two sequences.
-- ~(seq-for-each s f)~ : Applies ~f~ to each element for side effects.
+- ~(seq-for-each f s)~ : Applies ~f~ to each element for side effects.
 - ~(seq-count s)~ : Consumes the sequence and returns the count.
 - ~(seq-range start count)~ : Returns a lazy integer range sequence.
 - ~(list->seq lst)~ : Converts a list to a lazy sequence.

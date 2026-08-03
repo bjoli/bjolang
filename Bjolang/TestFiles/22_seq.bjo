@@ -60,7 +60,7 @@
 (defun (show label s)
   (display label)
   (display ":")
-  (seq-for-each s (fun (x) (display (string-append " " (int->string x)))))
+  (seq-for-each (fun (x) (display (string-append " " (int->string x)))) s)
   (newline))
 
 (defun (main)
@@ -73,8 +73,8 @@
 
   (show "walk" (walk (Cons 1 (Cons 2 (Cons 3 Nil)))))
   (show "unfold" (seq-unfold step 0))
-  (show "mapped" (seq-map (countdown 3) (fun (x) (* x 2))))
-  (show "filtered" (seq-filter (seq-range 0 10) (fun (x) (= 0 (% x 3)))))
+  (show "mapped" (seq-map (fun (x) (* x 2)) (countdown 3)))
+  (show "filtered" (seq-filter (fun (x) (= 0 (% x 3))) (seq-range 0 10)))
   (show "appended" (seq-append (countdown 1) (seq-range 7 9)))
   (show "tail" (seq-tail (countdown 3)))
   (show "empty" (seq-empty))
@@ -85,7 +85,7 @@
 
   ;; A `seq` is an expression: it can be bound, and it closes over its scope.
   (def factor 7)
-  (def scaled (seq (yield-from (seq-map (seq-range 1 4) (fun (x) (* x factor))))))
+  (def scaled (seq (yield-from (seq-map (fun (x) (* x factor)) (seq-range 1 4)))))
   (show "scaled" scaled)
   ;; ...and re-enumerating it runs the body again from the start.
   (show "scaled again" scaled)

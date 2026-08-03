@@ -10,7 +10,7 @@
 ;; Higher-order function returning a captured closure with generics
 (: make-mapper (-> (-> %a %b) (-> (List %a) (List %b))))
 (defun (make-mapper f)
-  (fun (lst) (list-map lst f)))
+  (fun (lst) (list-map f lst)))
 
 (defun (main args)
   (def my-list (Cons "hej" (Cons "då" Nil)))

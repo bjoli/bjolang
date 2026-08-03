@@ -115,7 +115,6 @@ let rec read (tokens: LexedToken list) : SExpr list * LexedToken list =
         | { Token = LParen; Range = r } :: rest ->
             let node, afterList = readForm r r id rest
             loop (node :: acc) afterList
-            loop (node :: acc) afterList
 
         // Vec literal: [items...] → (vec-literal items...)
         | { Token = LBracket; Range = r } :: rest ->
