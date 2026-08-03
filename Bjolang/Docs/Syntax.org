@@ -193,3 +193,74 @@ type, declared with ~(type %name)~ and pinned down by each implementation.
 An associated type is what lets ~fold~ speak about the element type of a
 collection it has not been told the element type of: ~%item~ is whatever the
 implementation for ~(List %a)~ says it is.
+
+A trait written this way compiles to a C# interface, with each implementation a
+sealed class holding a singleton ~Instance~. A call whose receiver type is known
+is spliced straight into the call site; a call on a type variable is dispatched
+through a dictionary parameter the compiler adds to the enclosing function.
+
+*** Inline traits
+A trait may instead apply its implementor to arguments:
+#+BEGIN_SRC scheme
+(def/trait (Monad (%m %a))
+  (: pure (-> %a (%m %a)))
+  (: bind (-> (%m %a) (-> %a (%m %b)) (%m %b))))
+#+END_SRC
+
+~%m~ here is a *type constructor*, not a type, and no C# interface can abstract
+over one — which is why ~Monad~ cannot be written with the form above. A trait
+declared this way is **inline-only**: it has no interface, no singleton and no
+dictionary, and every call to one of its methods is resolved statically and
+spliced. In exchange, a method may be generic in its own right — ~bind~'s ~%b~
+belongs to the method, not to the trait — and it may not be used at a type that
+is still a variable.
+
+An implementation abstracts over the *trailing* arguments of its target. The
+rest are fixed by the implementation and become type parameters of the class it
+compiles to:
+#+BEGIN_SRC scheme
+(def/impl (Monad (List %a))                 ; nothing fixed
+  (defun (pure x) (Cons x Nil))
+  (defun (bind m k) (list-foldr (fun (x acc) (list-append (k x) acc)) Nil m)))
+
+(def/impl (Monad (Result %e %a))            ; %e fixed by the implementation
+  (defun (pure x) (Ok x))
+  (defun (bind m k) (match m ((Ok v) (k v)) ((Err e) (Err e)))))
+#+END_SRC
+
+A constructor whose abstracted argument is not the last one needs a newtype that
+flips them; the compiler says so rather than guessing.
+
+Every implementation method is also emitted as an ordinary method, whatever the
+kind of trait. That is what a recursive method inlines *into*: a resolved call is
+spliced once, and the edge that would close the cycle calls the method instead.
+
+** Monadic blocks
+~(do ...)~ desugars to ~bind~ and ~pure~. It is spelled ~do~ rather than ~seq~,
+which lazy sequences already own.
+#+BEGIN_SRC scheme
+(do (:bind x xs)              ; x <- xs
+    (:let  y (+ x 1))         ; ordinary binding, no monad involved
+    (:then (action))          ; >>, run for its effect
+    (:return (* y 2)))        ; sugar for (pure (* y 2))
+#+END_SRC
+
+Four things are worth knowing:
+
+- The last form may be *any* ~m a~, not only a ~:return~. Otherwise a monadic
+  loop could not be written at all, because the recursive call has to *be* the
+  result rather than be wrapped in a ~pure~.
+- ~:then~ is ~>>~, and is named for that rather than for being a ~:bind~ without
+  a variable. In a strict language those are different: on ~List~, ~>>~
+  multiplies out the elements it discards.
+- ~:bind~ takes a plain identifier. A pattern would raise the question of what
+  happens when the match fails, which wants a ~MonadFail~ rather than a match
+  that can throw.
+- A bare form in non-tail position is an ordinary statement, run for its effect.
+
+Because ~bind~'s continuation is substituted rather than bound to a local, a
+recursive ~(do ...)~ block whose tail call is its last form compiles to a real
+loop. An implementation that mentions its continuation more than once cannot get
+that — substituting it would duplicate the whole rest of the block — so it is
+bound to a local instead, and the compiler warns that loops written through that
+monad will grow the stack.

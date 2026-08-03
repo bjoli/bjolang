@@ -118,6 +118,53 @@ let rec private expandIncludes (activeFiles: string list) (filePath: string) (fo
 
         | other -> [ other ])
 
+/// Reads the `BjolangInlineImpls` metadata back into declarations.
+///
+/// Each entry keeps the parameter names, the untyped body and the qualification
+/// map as three separate fields, exactly as they were written.
+let private parseInlineImpls (source: string) (metadata: string) : Decl list =
+    let forms, _ = Lexer.tokenize source metadata |> read
+
+    forms
+    |> List.choose (fun form ->
+        match form with
+        | SList([ SAtom { Token = Lexer.Symbol "inline-impl" }
+                  SAtom { Token = Lexer.StringLit traitName }
+                  SAtom { Token = Lexer.StringLit methodName }
+                  SAtom { Token = Lexer.StringLit ctor }
+                  SAtom { Token = Lexer.StringLit originModule }
+                  SList(paramNodes, _)
+                  body
+                  SList(qualNodes, _) ],
+                r) ->
+            let parameters =
+                paramNodes
+                |> List.map (function
+                    | SAtom { Token = Lexer.Symbol p } -> p
+                    | bad -> failwithf $"Malformed inline template parameter in metadata at line %d{(getRange bad).Start.Line}")
+
+            let qualification =
+                qualNodes
+                |> List.map (function
+                    | SList([ SAtom { Token = Lexer.StringLit name }; SAtom { Token = Lexer.StringLit emitted } ], _) ->
+                        name, emitted
+                    | bad ->
+                        failwithf $"Malformed inline template qualification in metadata at line %d{(getRange bad).Start.Line}")
+
+            Some(
+                DInlineImpl(
+                    traitName,
+                    methodName,
+                    ctor,
+                    originModule,
+                    parameters,
+                    Parser.parseExpr body,
+                    qualification,
+                    r
+                )
+            )
+        | _ -> None)
+
 let resolveImportPath (basePath: string) (importSpec: ImportSpec) : string option =
     match importSpec with
     | RelativePath p -> 
@@ -154,8 +201,8 @@ let wrapInModule (moduleName: string) (filePath: string) (decls: Decl list) : De
             let getRange d = 
                 match d with
                 | DDef(_, _, r) | DDefun(_, _, _, r) | DDefTuple(_, _, r) | DDefMutable(_, _, r)
-                | DSignature(_, _, _, r) | DType(_, r) | DTypeRec(_, r) | DTrait(_, _, _, _, r) | DImpl(_, _, _, _, r)
-                | DImplExtern(_, _, _, r)
+                | DSignature(_, _, _, r) | DType(_, r) | DTypeRec(_, r) | DTrait(_, _, _, _, _, r) | DImpl(_, _, _, _, r)
+                | DImplExtern(_, _, _, r) | DInlineImpl(_, _, _, _, _, _, _, r)
                 | DModule(_, _, r) | DImport(_, r) | DExport(_, r) | DReExport(_, r) | DExtern(_, _, _, r) -> r
             unionLexerRanges (getRange first) (getRange last)
     
@@ -206,6 +253,19 @@ let loadModuleGraph (mainFilePath: string) : Decl list * string list =
                             let meta = a :?> System.Reflection.AssemblyMetadataAttribute
                             if meta.Key = "BjolangExports" then Some meta.Value else None)
                         |> Array.tryHead
+
+                    // Inlineable method bodies, if this assembly published any.
+                    // An older assembly simply has none, and everything that
+                    // would have been inlined calls the landing pad instead.
+                    let inlineImplDecls =
+                        attr
+                        |> Array.choose (fun a ->
+                            let meta = a :?> System.Reflection.AssemblyMetadataAttribute
+                            if meta.Key = "BjolangInlineImpls" then Some meta.Value else None)
+                        |> Array.tryHead
+                        |> Option.map (parseInlineImpls absPath)
+                        |> Option.defaultValue []
+
                     match exports with
                     | Some metaStr ->
                         let tokens, _ = Lexer.tokenize absPath metaStr |> read
@@ -246,10 +306,12 @@ let loadModuleGraph (mainFilePath: string) : Decl list * string list =
                                     DExtern(name, t, constraints, r)
                                 | d -> d)
                         // No module dependencies: a DLL's transitive deps are
-                        // link-only and never enter the module graph.
-                        parsedDecls, []
+                        // link-only and never enter the module graph. Inline
+                        // templates come last: registering one is meaningless
+                        // until the trait and impl it belongs to exist.
+                        parsedDecls @ inlineImplDecls, []
                     | None ->
-                        [], []
+                        inlineImplDecls, []
                 else
                     let sourceCode = File.ReadAllText(absPath)
                     let tokens, _ = Lexer.tokenize absPath sourceCode |> read
@@ -297,6 +359,67 @@ let loadModuleGraph (mainFilePath: string) : Decl list * string list =
     let allDecls = sorted |> Seq.map (fun m -> wrapInModule m.ModuleName m.FilePath m.ParsedDecls) |> List.concat
     allDecls, dllDeps |> Seq.toList
 
+/// Which module each top-level name belongs to.
+///
+/// Built from the typed program rather than from the environment, because the
+/// environment says only *that* a name is bound. A name reached through an
+/// imported `.dll` arrives as a `TExtern` inside that dll's module, which is
+/// exactly the answer wanted for a helper the origin module itself imported
+/// from a third module.
+let private moduleOfName (decls: TypedAST.TDecl list) : Map<string, string> =
+    let rec collect (decls: TypedAST.TDecl list) =
+        decls
+        |> List.collect (function
+            | TypedAST.TModule(modName, inner, _) ->
+                inner
+                |> List.choose (function
+                    | TypedAST.TDef(n, _, _, _) -> Some(n, modName)
+                    | TypedAST.TDefMutable(n, _, _, _) -> Some(n, modName)
+                    | TypedAST.TDefun(n, _, _, _, _, _, _, _) -> Some(n, modName)
+                    | TypedAST.TExtern(n, _, _) -> Some(n, modName)
+                    | _ -> None)
+            | _ -> [])
+
+    collect decls |> Map.ofList
+
+/// Works out what each local inline template's free variables should be emitted
+/// as, now that the whole program has been checked.
+///
+/// This cannot be done before inference — `infer` fails hard on unbound names
+/// and `Origin_Module::helper` is not one — and it cannot be skipped for local
+/// impls either. Without it, a body that calls a module-level `helper`, inlined
+/// into a caller that happens to have a local named `helper`, emits a bare
+/// `helper` that binds to the local.
+let private qualifyInlineTemplates (env: TypedAST.Env) (decls: TypedAST.TDecl list) : TypedAST.Env =
+    let moduleOf = moduleOfName decls
+
+    let qualified =
+        env.Registry.InlineMethods
+        |> Map.map (fun _ (tpl: TypedAST.InlineTemplate) ->
+            // A template read back from a `.dll` was qualified where it was
+            // written, by a compilation that could see its module's imports.
+            if not (Map.isEmpty tpl.Qualification) then
+                tpl
+            else
+                let free = AlphaRename.freeNames (Set.ofList tpl.Params) tpl.Body
+
+                let qualification =
+                    free
+                    |> Seq.choose (fun n ->
+                        // Anything with no module class of its own — a data
+                        // constructor, a `Prelude` binding, a trait method — is
+                        // left exactly as written. There is nothing to qualify
+                        // it to.
+                        match Map.tryFind n moduleOf with
+                        | Some m -> Some(n, Naming.qualifiedBinding m n)
+                        | None -> None)
+                    |> Map.ofSeq
+
+                { tpl with Qualification = qualification })
+
+    { env with
+        Registry = { env.Registry with InlineMethods = qualified } }
+
 let runFullFrontendPipeline (mainFilePath: string) =
     try
         printfn "=== Step 1: Parsing & Module Resolution ==="
@@ -306,14 +429,27 @@ let runFullFrontendPipeline (mainFilePath: string) =
         printfn "=== Step 2: Type Checking ==="
         let env, typedAst = Inference.checkProgram Prelude.prelude letrecifiedDecls
 
-        printfn "=== Step 3: Dictionary Lowering ==="
-        let loweredAst = Lowering.lowerProgram env typedAst
+        let env = qualifyInlineTemplates env typedAst
 
-        printfn "=== Step 4: Loop Lowering ==="
+        printfn "=== Step 3: Trait Inlining ==="
+        // Before dictionary lowering, so that the dictionary pass sees the
+        // inlined result and handles any interface-trait dispatch inside it with
+        // no changes; and before loop lowering, because a `TRecur` carries an
+        // index into its enclosing loop and cannot be spliced elsewhere.
+        let inlinedAst = TraitInline.run env typedAst
+
+        printfn "=== Step 4: Dictionary Lowering ==="
+        let loweredAst = Lowering.lowerProgram env inlinedAst
+
+        printfn "=== Step 5: Loop Lowering ==="
         let loopLoweredAst = LoopLowering.lowerProgram loweredAst
 
+        // Last, and a cleanup pass only: C# rejects a local that shadows an
+        // enclosing one, and every pass above is free to produce that.
+        let uniquifiedAst = AlphaRename.uniquifyProgram loopLoweredAst
+
         printfn "=== Frontend pipeline complete ==="
-        Some (env, loopLoweredAst, dllDeps)
+        Some (env, uniquifiedAst, dllDeps)
     with ex ->
         printfn $"Compilation Panicked: %s{ex.Message}"
         printfn $"Stack Trace: %s{ex.StackTrace}"

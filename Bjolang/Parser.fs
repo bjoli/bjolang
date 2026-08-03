@@ -112,9 +112,19 @@ type Decl =
     | DDefun of string * DefunArg list * Expr * Range
     | DType of TypeDef list * Range
     | DTypeRec of TypeDef list * Range
-    // DTrait (Name, ImplementorVar, AssociatedTypes, Signatures, Range)
-    | DTrait of string * string * string list * (string * FType) list * Range
+    // DTrait (Name, ImplementorVar, HoleArity, AssociatedTypes, Signatures, Range)
+    //
+    // `HoleArity` is how many arguments the implementor was written applied to.
+    // `(def/trait (Show %c) ...)` gives 0 and means an interface trait;
+    // `(def/trait (Monad (%m %a)) ...)` gives 1 and means an inline-only one.
+    | DTrait of string * string * int * string list * (string * FType) list * Range
     | DExtern of string * FType * (string * string) list * Range
+
+    // One inline-trait method body, read back out of a compiled module's
+    // metadata. It is the *untyped* expression: re-inferring it at the splice is
+    // what gives it a type its trait signature cannot express.
+    // DInlineImpl (TraitName, MethodName, Ctor, OriginModule, Params, Body, Qualification, Range)
+    | DInlineImpl of string * string * string * string * string list * Expr * (string * string) list * Range
     
     // DImpl (TraitName, TargetType, AssociatedTypeBindings, Methods, Range)
     | DImpl of string * FType * (string * FType) list * Decl list * Range
@@ -183,6 +193,12 @@ let parseArrowType (items: SExpr list) (r: Range) : FType =
         | SAtom { Token = Symbol sym }
         | SAtom { Token = TypeVar sym } -> TName(sym, r)
         | SList(SAtom { Token = Symbol name } :: typeArgs, _) -> TApp(name, List.map parseArrowTypeInner typeArgs, r)
+        // A type variable in *applied* position: `(%m %a)`. Only an inline
+        // trait's constructor variable can be written this way, and the leading
+        // quote is what tells `resolveTemplate` it is the hole rather than a
+        // constructor named `m`.
+        | SList(SAtom { Token = QuotedSymbol sym } :: typeArgs, _) ->
+            TApp("'" + sym, List.map parseArrowTypeInner typeArgs, r)
         | _ -> failwithf $"Invalid type syntax in arrow type at line %d{r.Start.Line}"
 
     let rec collectArgs mandatory keywords argItems =
@@ -209,6 +225,9 @@ let rec parseType (s: SExpr) : FType =
     | SAtom { Token = TypeVar sym } -> TName(sym, r)
     | SList(SAtom { Token = Symbol "->" } :: arrowArgs, _) -> parseArrowType arrowArgs r
     | SList(SAtom { Token = Symbol name } :: typeArgs, _) -> TApp(name, List.map parseType typeArgs, r)
+    // `(%m %a)` — a type variable applied to arguments. See `parseArrowTypeInner`.
+    | SList(SAtom { Token = QuotedSymbol sym } :: typeArgs, _) ->
+        TApp("'" + sym, List.map parseType typeArgs, r)
     | _ -> failwithf $"Invalid type syntax at line %d{r.Start.Line}"
 
 let parseUnionCase (s: SExpr) : UnionCase =
@@ -417,6 +436,23 @@ let rec parseExpr (s: SExpr) : Expr =
                 | [] -> failwithf $"Invalid seq syntax at line %d{r.Start.Line}. Expected: (seq body...)"
                 | bodyExprs -> ESeq(parseBody bodyExprs listRange, listRange)
 
+            // A monadic block. `(seq ...)` was already taken by lazy sequences,
+            // so the form is spelled `do`.
+            //
+            //   (do (:bind x xs)
+            //       (:let  y (+ x 1))
+            //       (:then (side-effecting-action))
+            //       (:return (* y 2)))
+            //
+            // The last form may be *any* `m a`, not necessarily `:return`:
+            // otherwise a monadic loop could not be written at all, because the
+            // recursive call has to *be* the result rather than be wrapped in a
+            // `pure`. `(:return e)` is sugar for `(pure e)` in tail position.
+            | "do" ->
+                match args with
+                | [] -> failwithf $"Invalid do syntax at line %d{r.Start.Line}. Expected: (do form...)"
+                | forms -> desugarDo forms listRange
+
             | "yield" ->
                 match args with
                 | [ value ] -> EYield(parseExpr value, listRange)
@@ -539,6 +575,63 @@ let rec parseExpr (s: SExpr) : Expr =
     | SAtom { Token = Comma } -> failwithf $"Unexpected comma at line %d{r.Start.Line}"
     | SAtom { Token = Quote } -> failwithf $"Unexpected quote at line %d{r.Start.Line}"
     | _ -> failwithf $"Unexpected expression at line %d{r.Start.Line}"
+
+/// Desugars a `(do ...)` block into `bind` / `pure`.
+///
+/// Each generated `bind` carries the range of *its own* form. Giving them all
+/// the range of the opening paren made every type error in a ten-step block
+/// point at the same character.
+and desugarDo (forms: SExpr list) (fallbackRange: Range) : Expr =
+    let named (s: SExpr) =
+        match s with
+        | SList(SAtom { Token = Keyword k } :: rest, r) -> Some(k, rest, r)
+        | _ -> None
+
+    match forms with
+    | [] -> failwithf $"Invalid do syntax at line %d{fallbackRange.Start.Line}: the block is empty"
+
+    | [ last ] ->
+        match named last with
+        | Some("return", [ e ], r) -> EApp(EIdent("pure", r), [ parseExpr e ], r)
+        | Some("return", _, r) -> failwithf $"Invalid (:return ...) at line %d{r.Start.Line}. Expected: (:return expr)"
+        | Some(("bind" | "let" | "then") as k, _, r) ->
+            failwithf
+                $"A (do ...) block cannot end with (:%s{k} ...) at line %d{r.Start.Line}. Its last form is the block's value."
+        // Any `m a` may be the last form, which is what lets a monadic loop put
+        // its own recursive call in tail position.
+        | _ -> parseExpr last
+
+    | first :: rest ->
+        let continuation () = desugarDo rest fallbackRange
+
+        match named first with
+        // `:bind` takes an identifier, deliberately. A pattern would force the
+        // failure question — what `(:bind (Some x) e)` means when the match
+        // fails — which wants `MonadFail` rather than a match that can throw.
+        | Some("bind", [ SAtom { Token = Symbol name }; e ], r) ->
+            EApp(EIdent("bind", r), [ parseExpr e; EFun([ name ], continuation (), r) ], r)
+        | Some("bind", _, r) ->
+            failwithf $"Invalid (:bind ...) at line %d{r.Start.Line}. Expected: (:bind name expr) — a plain identifier, not a pattern."
+
+        | Some("let", [ SAtom { Token = Symbol name }; e ], r) ->
+            ELet(name, false, [], None, parseExpr e, continuation (), r)
+        | Some("let", _, r) -> failwithf $"Invalid (:let ...) at line %d{r.Start.Line}. Expected: (:let name expr)"
+
+        // `>>`, and named for what it is. Calling it `:do` would invite reading
+        // it as a variable-less `:bind`, which in a strict language it is not:
+        // on `List`, `>>` multiplies out the elements it discards.
+        | Some("then", [ e ], r) ->
+            EApp(EIdent("bind", r), [ parseExpr e; EFun([ "_" ], continuation (), r) ], r)
+        | Some("then", _, r) -> failwithf $"Invalid (:then ...) at line %d{r.Start.Line}. Expected: (:then expr)"
+
+        | Some("return", _, r) ->
+            failwithf $"(:return ...) at line %d{r.Start.Line} must be the last form of its (do ...) block."
+
+        | Some(k, _, r) -> failwithf $"Unknown (do ...) form ':%s{k}' at line %d{r.Start.Line}"
+
+        // A plain form in non-tail position is an ordinary statement, run for
+        // its effect. It is *not* a variable-less bind.
+        | None -> ELet("_", false, [], None, parseExpr first, continuation (), getRange first)
 
 and parseBody (exprs: SExpr list) (fallbackRange: Range) : Expr =
     let rec collectDefs acc remaining =
@@ -693,10 +786,31 @@ let rec parseDecl (s: SExpr) : Decl =
 
     | SList(SAtom { Token = Symbol "type-rec" } :: typeDefs, _) -> DTypeRec(List.map parseTypeDef typeDefs, r)
 
-    | SList (SAtom { Token = Symbol "def/trait" } :: 
-             SList (SAtom { Token = Symbol traitName } :: [ SAtom { Token = QuotedSymbol implementorVar } ], _) :: 
+    | SList (SAtom { Token = Symbol "def/trait" } ::
+             SList (SAtom { Token = Symbol traitName } :: [ implementorSpec ], _) ::
              body, r) ->
-        
+
+        // `(Show %c)` declares an implementor of arity 0 — an interface trait.
+        // `(Monad (%m %a))` writes it applied, which is what no C# interface can
+        // express and what makes the trait inline-only.
+        let implementorVar, holeArity =
+            match implementorSpec with
+            | SAtom { Token = QuotedSymbol v } -> v, 0
+            | SList (SAtom { Token = QuotedSymbol v } :: holeArgs, hr) ->
+                if holeArgs.IsEmpty then
+                    failwithf
+                        $"Syntax error in def/trait '%s{traitName}' at line %d{hr.Start.Line}: (%%%s{v}) applies the implementor to nothing. Write %%%s{v} instead."
+                for a in holeArgs do
+                    match a with
+                    | SAtom { Token = QuotedSymbol _ } -> ()
+                    | _ ->
+                        failwithf
+                            $"Syntax error in def/trait '%s{traitName}' at line %d{hr.Start.Line}: the implementor may only be applied to type variables."
+                v, holeArgs.Length
+            | _ ->
+                failwithf
+                    $"Syntax error in def/trait '%s{traitName}': expected (%s{traitName} %%c) or (%s{traitName} (%%m %%a))."
+
         let mutable assocTypes = []
         let mutable signatures = []
 
@@ -712,7 +826,7 @@ let rec parseDecl (s: SExpr) : Decl =
             
             | _ -> failwithf $"Syntax error in def/trait '%s{traitName}': Expected (type ...) or (: ...)."
 
-        DTrait (traitName, implementorVar, List.rev assocTypes, List.rev signatures, r)
+        DTrait (traitName, implementorVar, holeArity, List.rev assocTypes, List.rev signatures, r)
 
     // Parse: (def/impl (TraitName (Vec 'a)) (type 'item 'a) (defun (get v i) ...))
     | SList (SAtom { Token = Symbol "def/impl" } :: 

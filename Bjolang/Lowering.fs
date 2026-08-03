@@ -14,8 +14,20 @@ open Bjolang.Unification
 /// The name a devirtualized trait method call is emitted under. `Codegen`
 /// rewrites `::` to `.`, so this names the singleton's instance method.
 let implInstanceMethod (traitName: string) (targetTypeName: string) (methodName: string) =
-    let targetTypeSanitized = targetTypeName.Replace(".", "_")
-    $"%s{traitName}_%s{targetTypeSanitized}.Instance::%s{methodName}"
+    implInstanceMethodName traitName targetTypeName methodName
+
+/// A name an inlined body was qualified with — `core_Module::helper` — pointing
+/// at the module that actually defines it.
+///
+/// `Lowering` looks a callee up in `env.Bindings` to decide whether it has to
+/// forward dictionaries to it, and a qualified name is not a key there. Left
+/// alone, an inlined body that calls a constrained generic function would
+/// silently lose its dictionary arguments.
+let unqualify (name: string) =
+    match name.LastIndexOf "::" with
+    | -1 -> name
+    | i when name.Substring(0, i).EndsWith "_Module" -> name.Substring(i + 2)
+    | _ -> name
 
 /// The type of a dictionary for `traitName` at `implType`.
 ///
@@ -40,79 +52,75 @@ module DictionaryLowering =
         let recurse e = lowerExpr env activeDicts e
 
         match expr.Node with
-        // Target trait method invocations
-        | TApply({ Node = TIdent(methodName, _)
-                   Type = TFun(argTypes, _) } as target,
-                 args, kwArgs) ->
-            let traitMethodOpt =
-                env.Registry.Traits
-                |> Map.tryPick (fun traitName info ->
-                    if Map.containsKey methodName info.Signatures then
-                        Some(traitName, info)
-                    else
-                        None)
+        // A trait call the inliner did not splice. The node says which trait it
+        // belongs to and, if the solver got there, which implementation — so
+        // nothing here is derived from the method name.
+        | TTraitCall(tref, args, kwArgs) ->
+            let loweredArgs = args |> List.map recurse
+            let loweredKwArgs = kwArgs |> List.map (fun (n, e) -> n, recurse e)
 
             let node =
-                match traitMethodOpt with
-                | Some(traitName, info) ->
-                    // The implementor is wherever the trait's own signature put
-                    // it: the parameter written as the trait variable. Reading
-                    // argument zero tied dispatch to one particular parameter
-                    // order, so `(fold f acc col)` had no receiver to dispatch on.
-                    let implementorIndex =
-                        let sameVar (a: string) (b: string) = a.TrimStart('\'') = b.TrimStart('\'')
+                match tref.Resolved with
+                | Some(ctor, tyArgs) ->
+                    // Static dispatch: the landing pad, named directly.
+                    let kind =
+                        match Map.tryFind tref.Trait env.Registry.Traits with
+                        | Some info -> info.Kind
+                        | None -> InterfaceTrait
 
-                        match Map.tryFind methodName info.Signatures with
-                        | Some(TFun(paramTypes, _)) ->
-                            paramTypes
-                            |> List.tryFindIndex (function
-                                | TVar v -> sameVar v info.ImplementorVar
-                                | _ -> false)
-                            |> Option.defaultValue 0
-                        | _ -> 0
+                    let calleeType =
+                        TFun(
+                            (loweredArgs |> List.map (fun a -> a.Type))
+                            @ (loweredKwArgs |> List.map (fun (_, e) -> e.Type)),
+                            expr.Type
+                        )
 
-                    if implementorIndex >= args.Length || implementorIndex >= argTypes.Length then
-                        failwithf
-                            $"Trait method '%s{methodName}' is called without its %s{traitName} implementor at line %d{expr.Range.Start.Line}"
+                    let callee =
+                        { Type = calleeType
+                          Range = expr.Range
+                          Node = TIdent(landingPadName kind tref.Trait ctor tref.Method, tyArgs) }
+                        : TypedExpr
 
-                    let targetObj = args[implementorIndex]
-                    let loweredArgs = args |> List.map recurse
-                    let receiverType = prune env.Registry argTypes[implementorIndex]
+                    TApply(callee, loweredArgs, loweredKwArgs)
 
-                    match prune env.Registry targetObj.Type with
-                    | TCon(targetTypeName, tconArgs) ->
-                        // STATIC DISPATCH: Direct devirtualization.
-                        // The methods live on the impl *class* as instance methods,
-                        // so the call has to go through its singleton.
-                        // Propagate the TCon's type args so codegen can emit
-                        // generic class instantiations (e.g. Foldable_List<int>).
-                        let staticDirectTarget =
-                            { target with
-                                Node = TIdent(implInstanceMethod traitName targetTypeName methodName, tconArgs) }
+                | None ->
+                    // Generic dispatch, through the dictionary the enclosing
+                    // function was given. Only an interface trait ever gets
+                    // here: an unresolved inline-trait call was rejected during
+                    // inference, because there is no dictionary to pass.
+                    let hole =
+                        match tref.Holes with
+                        | h :: _ -> prune env.Registry h
+                        | [] ->
+                            failwithf
+                                $"Trait method '%s{tref.Method}' has no implementor to dispatch on at line %d{expr.Range.Start.Line}"
 
-                        TApply(staticDirectTarget, loweredArgs, [])
-
+                    match hole with
                     | TVar varName ->
-                        // GENERIC DISPATCH
-                        let expectedDictName = $"_dict_%s{traitName}_%s{varName}"
+                        let expectedDictName = $"_dict_%s{tref.Trait}_%s{varName}"
 
                         if not (Map.containsKey expectedDictName activeDicts) then
                             failwithf
                                 $"Missing dictionary '%s{expectedDictName}' for trait dispatch at line %d{expr.Range.Start.Line}"
 
                         let dictIdent =
-                            { Type = dictionaryType env traitName receiverType
+                            { Type = dictionaryType env tref.Trait hole
                               Range = expr.Range
                               Node = TIdent(expectedDictName, []) }
                             : TypedExpr
 
-                        TInterfaceCall(dictIdent.Type, methodName, dictIdent, loweredArgs)
+                        TInterfaceCall(dictIdent.Type, tref.Method, dictIdent, loweredArgs)
 
-                    | _ -> failwithf $"Unsupported receiver type for trait dispatch at line %d{expr.Range.Start.Line}"
+                    | other ->
+                        failwithf
+                            $"Unsupported receiver type %A{other} for trait dispatch at line %d{expr.Range.Start.Line}"
 
-                | None ->
-                    // Not a trait method. The callee may still carry trait constraints
-                    // that require us to pass dictionaries explicitly.
+            { expr with Node = node }
+
+        | TApply(target, args, kwArgs) ->
+            // The callee may carry trait constraints that require us to pass
+            // dictionaries explicitly.
+            let node =
                     let standardCall () =
                         TApply(
                             recurse target,
@@ -122,7 +130,7 @@ module DictionaryLowering =
 
                     match target.Node with
                     | TIdent(calleeName, tArgs) ->
-                        match Map.tryFind calleeName env.Bindings with
+                        match Map.tryFind (unqualify calleeName) env.Bindings with
                         | Some binding ->
                             let (Scheme(schemeVars, constraints, _)) = binding.Scheme
 
@@ -194,9 +202,18 @@ module DictionaryLowering =
         | TDefMutable(name, value, t, r) -> TDefMutable(name, lowerExpr env Map.empty value, t, r)
 
         | TDefun(name, tyArgs, args, kwArgs, restArg, retType, body, r) ->
-            let binding = lookup env name
+            // An inline trait's methods are never bound as values — there is no
+            // scheme they could be bound under — so an impl of one has nothing
+            // to look up here. It also has nothing to look up *for*: an inline
+            // trait carries no dictionaries.
+            let constraints =
+                match Map.tryFind name env.Bindings with
+                | Some binding ->
+                    let (Scheme(_, cs, _)) = binding.Scheme
+                    cs
+                | None -> []
 
-            match binding.Scheme with
+            match Scheme([], constraints, retType) with
             | Scheme(_, constraints, _) ->
                 // Inject dictionary parameters into generic functions at the declaration level
                 let dictParams =
@@ -244,8 +261,8 @@ module DictionaryLowering =
                     r
                 )
 
-        | TImpl(traitName, targetType, assoc, methods, r) ->
-            TImpl(traitName, targetType, assoc, methods |> List.map (lowerDecl env), r)
+        | TImpl(traitName, kind, holeArity, targetType, assoc, methods, r) ->
+            TImpl(traitName, kind, holeArity, targetType, assoc, methods |> List.map (lowerDecl env), r)
 
         | TModule(name, decls, r) -> TModule(name, decls |> List.map (lowerDecl env), r)
 

@@ -112,13 +112,52 @@ let main argv =
             let exportedTraits =
                 env.Registry.Traits
                 |> Map.filter (fun _ info ->
-                    info.Signatures |> Map.exists (fun methodName _ -> List.contains methodName exports))
+                    let methodNames =
+                        (info.Signatures |> Map.toList |> List.map fst)
+                        @ (info.Templates |> Map.toList |> List.map fst)
+
+                    methodNames |> List.exists (fun m -> List.contains m exports))
 
             let exportedTraitMethods =
                 exportedTraits
                 |> Map.toList
-                |> List.collect (fun (_, info) -> info.Signatures |> Map.toList |> List.map fst)
+                |> List.collect (fun (_, info) ->
+                    (info.Signatures |> Map.toList |> List.map fst)
+                    @ (info.Templates |> Map.toList |> List.map fst))
                 |> Set.ofList
+
+            // Every inline template belonging to a trait this module publishes.
+            //
+            // A template that will not serialize is simply left out: whoever
+            // imports it then calls the landing pad, which is always correct and
+            // is emitted for every impl method regardless.
+            let inlineTemplatesToExport =
+                env.Registry.InlineMethods
+                |> Map.toList
+                |> List.filter (fun ((traitName, _, _), (tpl: TypedAST.InlineTemplate)) ->
+                    Map.containsKey traitName exportedTraits
+                    && Codegen.isSerializableTemplate tpl.Body)
+
+            // A template's free variables have to be reachable from the
+            // importing module, or re-inference at the splice fails and the call
+            // falls back to one. Anything an exported template names is
+            // therefore exported too — including a helper this module itself
+            // imported from a third one, which is where the qualification points.
+            let autoExports =
+                inlineTemplatesToExport
+                |> List.collect (fun (_, (tpl: TypedAST.InlineTemplate)) ->
+                    tpl.Qualification |> Map.toList |> List.map fst)
+                |> List.filter (fun n ->
+                    not (List.contains n exports)
+                    && not (Set.contains n exportedTraitMethods)
+                    && Map.containsKey n env.Bindings)
+                |> List.distinct
+
+            if isLibrary && not autoExports.IsEmpty then
+                printfn
+                    "Auto-exporting %d name(s) reachable only through an exported inline template: %s"
+                    autoExports.Length
+                    (String.concat ", " autoExports)
 
             let exportMetadata =
                 if isLibrary && (not exports.IsEmpty || not typesToExport.IsEmpty) then
@@ -127,12 +166,33 @@ let main argv =
                     let serializeTrait (traitName: string) (info: TypedAST.TraitInfo) =
                         let assocStrs =
                             info.AssociatedTypes |> List.map (fun a -> $"(type %s{quoted a})")
+
+                        // The implementor is written applied for an inline
+                        // trait, which is what tells the reader it is one. The
+                        // names of the arguments carry no information — only how
+                        // many there are — so they are generated.
+                        let implementorStr =
+                            if info.HoleArity = 0 then
+                                quoted info.ImplementorVar
+                            else
+                                let holeArgs =
+                                    [ for i in 0 .. info.HoleArity - 1 -> $"'h%d{i}" ] |> String.concat " "
+                                $"(%s{quoted info.ImplementorVar} %s{holeArgs})"
+
                         let methodStrs =
-                            info.Signatures
-                            |> Map.toList
-                            |> List.map (fun (mName, mType) -> $"(: %s{mName} %s{Codegen.serializeHMType mType})")
+                            match info.Kind with
+                            | TypedAST.InlineTrait ->
+                                info.Templates
+                                |> Map.toList
+                                |> List.map (fun (mName, tpl) ->
+                                    $"(: %s{mName} %s{Codegen.serializeTplType info.ImplementorVar tpl})")
+                            | TypedAST.InterfaceTrait ->
+                                info.Signatures
+                                |> Map.toList
+                                |> List.map (fun (mName, mType) -> $"(: %s{mName} %s{Codegen.serializeHMType mType})")
+
                         let parts = assocStrs @ methodStrs |> String.concat " "
-                        $"(def/trait (%s{traitName} %s{quoted info.ImplementorVar}) %s{parts})"
+                        $"(def/trait (%s{traitName} %s{implementorStr}) %s{parts})"
 
                     let serializeImpl (traitName: string) (targetType: TypedAST.HMType) (assocMap: Map<string, TypedAST.HMType>) =
                         let assocStrs =
@@ -142,19 +202,46 @@ let main argv =
                             |> String.concat " "
                         $"(def/impl/extern (%s{traitName} %s{Codegen.serializeHMType targetType}) %s{assocStrs})"
 
+                    // A function's flat type says how many arguments it takes,
+                    // not which of them are keyword arguments — and a keyword
+                    // name is part of the calling convention. Flattening it here
+                    // meant an importer could not pass one at all: the shorter
+                    // argument list it wrote would not unify.
+                    let serializeSignature (name: string) (t: TypedAST.HMType) =
+                        match Map.tryFind name env.FunMetas, t with
+                        | Some meta, TypedAST.TFun(argTypes, ret) when
+                            not meta.KeywordParams.IsEmpty || meta.RestParam.IsSome
+                            ->
+                            let mandatory =
+                                argTypes |> List.truncate meta.MandatoryCount |> List.map Codegen.serializeHMType
+
+                            let keywords =
+                                meta.KeywordParams
+                                |> List.map (fun (n, kt) -> $"(#:{n} {Codegen.serializeHMType kt})")
+
+                            let rest =
+                                match meta.RestParam with
+                                | Some rt -> [ $"#:rest {Codegen.serializeHMType rt}" ]
+                                | None -> []
+
+                            "(-> "
+                            + String.concat " " (mandatory @ keywords @ rest @ [ Codegen.serializeHMType ret ])
+                            + ")"
+                        | _ -> Codegen.serializeHMType t
+
                     let serializeExport name =
                         match Map.tryFind name env.Bindings with
                         | Some b ->
                             let (TypedAST.Scheme(_, constraints, t)) = b.Scheme
-                            let typeStr = $"(: %s{name} %s{Codegen.serializeHMType t})"
-                            if constraints.IsEmpty then typeStr
+                            let typeStr = serializeSignature name t
+                            if constraints.IsEmpty then $"(: %s{name} %s{typeStr})"
                             else
                                 let constraintStrs = 
                                     constraints |> List.map (fun c ->
                                         let targetStr = Codegen.serializeHMType c.TargetType
                                         $"(%s{c.TraitName} %s{targetStr})")
                                 let whereClause = "(where " + String.concat " " constraintStrs + ")"
-                                $"(: %s{name} %s{Codegen.serializeHMType t} %s{whereClause})"
+                                $"(: %s{name} %s{typeStr} %s{whereClause})"
                         | None -> ""
                         
                     let rec serializeFType (ft: Parser.FType) : string =
@@ -187,8 +274,9 @@ let main argv =
                     // express. Emitting a signature for it too would shadow
                     // that binding with a weaker one on the importing side.
                     let sigsStr =
-                        exports
+                        (exports @ autoExports)
                         |> List.filter (fun name -> not (Set.contains name exportedTraitMethods))
+                        |> List.distinct
                         |> List.map serializeExport
                         |> String.concat "\n"
                     let typesStr = typesToExport |> List.map serializeTypeDef |> String.concat "\n"
@@ -214,7 +302,35 @@ let main argv =
                     |> String.concat "\n"
                 else ""
 
-            let csCode = Codegen.generateProgram exportMetadata (if isLibrary then dllDeps else []) dllDeps typedAst
+            // Parameter names, body and qualification map as three distinct
+            // fields. Bundling the parameters and body into a lambda would be
+            // worse than redundant: `infer`'s `EFun` case binds each parameter
+            // to a fresh metavariable in a scope of its own, discarding exactly
+            // the concrete argument types the inliner supplies.
+            let inlineMetadata =
+                if isLibrary && not inlineTemplatesToExport.IsEmpty then
+                    inlineTemplatesToExport
+                    |> List.map (fun ((traitName, methodName, ctor), tpl) ->
+                        let paramsStr = String.concat " " tpl.Params
+
+                        let qualStr =
+                            tpl.Qualification
+                            |> Map.toList
+                            |> List.map (fun (name, emitted) -> $"(\"{name}\" \"{emitted}\")")
+                            |> String.concat " "
+
+                        $"(inline-impl \"{traitName}\" \"{methodName}\" \"{ctor}\" \"{tpl.OriginModule}\" "
+                        + $"({paramsStr}) {Codegen.serializeExpr tpl.Body} ({qualStr}))")
+                    |> String.concat "\n"
+                else ""
+
+            let csCode =
+                Codegen.generateProgram
+                    exportMetadata
+                    inlineMetadata
+                    (if isLibrary then dllDeps else [])
+                    dllDeps
+                    typedAst
             
             if options.Debug then
                 File.WriteAllText("ast_dump.txt", sprintf "%A" typedAst)

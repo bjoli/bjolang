@@ -74,6 +74,8 @@ let mapChildren (f: TypedExpr -> TypedExpr) (expr: TypedExpr) : TypedExpr =
         | TYieldFrom source -> TYieldFrom(f source)
         | TMatch(target, clauses) -> TMatch(f target, List.map mapClause clauses)
         | TInterfaceCall(iType, mName, dict, args) -> TInterfaceCall(iType, mName, f dict, List.map f args)
+        | TTraitCall(tref, args, kwArgs) ->
+            TTraitCall(tref, List.map f args, kwArgs |> List.map (fun (n, e) -> n, f e))
         | TThrow e -> TThrow(f e)
         | TIsInst(tgt, t) -> TIsInst(f tgt, t)
         | TIsInstCase(tgt, t, caseName) -> TIsInstCase(f tgt, t, caseName)
@@ -140,8 +142,8 @@ let rec mapDecl (f: TypedExpr -> TypedExpr) (decl: TDecl) : TDecl =
             r
         )
     | TModule(name, decls, r) -> TModule(name, decls |> List.map (mapDecl f), r)
-    | TImpl(traitName, targetType, assoc, methods, r) ->
-        TImpl(traitName, targetType, assoc, methods |> List.map (mapDecl f), r)
+    | TImpl(traitName, kind, holeArity, targetType, assoc, methods, r) ->
+        TImpl(traitName, kind, holeArity, targetType, assoc, methods |> List.map (mapDecl f), r)
     | TImport _
     | TExport _
     | TReExport _

@@ -27,97 +27,17 @@ open Bjolang.TypedAST
 // Fresh names
 // ---------------------------------------------------------------------------
 
-let private counter = ref 0
-
-let private fresh (prefix: string) =
-    counter.Value <- counter.Value + 1
-    $"%s{prefix}__%d{counter.Value}"
+let private fresh (prefix: string) = Gensym.fresh prefix
 
 // ---------------------------------------------------------------------------
 // Alpha renaming
 // ---------------------------------------------------------------------------
 
-let rec private patternNames (pat: TypedPattern) : string list =
-    match pat.Node with
-    | TPWildcard
-    | TPInt _
-    | TPString _ -> []
-    | TPIdent n -> [ n ]
-    | TPList(items, tailOpt)
-    | TPVec(items, tailOpt) ->
-        (items |> List.collect patternNames)
-        @ (tailOpt |> Option.map patternNames |> Option.defaultValue [])
-    | TPConstruct(_, args) -> args |> List.collect patternNames
-    | TPApp(_, inner) -> patternNames inner
-    | TPAs(inner, n) -> n :: patternNames inner
-
-let private without (names: string seq) (subst: Map<string, string>) =
-    names |> Seq.fold (fun acc n -> Map.remove n acc) subst
-
-/// Renames *free* occurrences of the keys of `subst`, respecting every binder.
-let rec renameExpr (subst: Map<string, string>) (expr: TypedExpr) : TypedExpr =
-    if Map.isEmpty subst then
-        expr
-    else
-
-    let sub = renameExpr subst
-    let reference n = Map.tryFind n subst |> Option.defaultValue n
-
-    let node =
-        match expr.Node with
-        | TIdent(n, tArgs) -> TIdent(reference n, tArgs)
-        | TSet(n, v) -> TSet(reference n, sub v)
-        | TRecordUpdate(n, fields) -> TRecordUpdate(reference n, fields |> List.map (fun (k, v) -> k, sub v))
-
-        | TLet(n, isFun, args, v, b) ->
-            // A function-shaped `let` is never self-recursive — `LetRecify` emits
-            // `ELet` only for singleton components with no self-edge — so `n` is
-            // bound in the body alone.
-            let valueSubst = if isFun then without args subst else subst
-            TLet(n, isFun, args, renameExpr valueSubst v, renameExpr (Map.remove n subst) b)
-
-        | TLetRec(bindings, b) ->
-            let inner = without (bindings |> List.map (fun (n, _, _, _) -> n)) subst
-
-            TLetRec(
-                bindings
-                |> List.map (fun (n, isFun, args, v) ->
-                    n, isFun, args, renameExpr (if isFun then without args inner else inner) v),
-                renameExpr inner b
-            )
-
-        | TLetTuple(names, v, b) -> TLetTuple(names, sub v, renameExpr (without names subst) b)
-        | TLetMutable(n, v, b) -> TLetMutable(n, sub v, renameExpr (Map.remove n subst) b)
-        | TLambda(args, b) -> TLambda(args, renameExpr (without args subst) b)
-
-        | TMatch(target, clauses) ->
-            TMatch(
-                sub target,
-                clauses
-                |> List.map (fun c ->
-                    let inner = without (patternNames c.Pattern) subst
-
-                    { Pattern = c.Pattern
-                      Guard = Option.map (renameExpr inner) c.Guard
-                      Body = renameExpr inner c.Body })
-            )
-
-        | TLoop(members, bodyOpt) ->
-            // Member names are in scope throughout the group; a member's slots and
-            // per-iteration locals are in scope in its own body only.
-            let outer = without (members |> List.map (fun m -> m.LoopName)) subst
-
-            TLoop(
-                members
-                |> List.map (fun m ->
-                    let inner = without ((m.Slots |> List.map fst) @ m.Locals) outer
-                    { m with Body = renameExpr inner m.Body }),
-                Option.map (renameExpr outer) bodyOpt
-            )
-
-        | _ -> (TypeVisitor.mapChildren sub expr).Node
-
-    { expr with Node = node }
+// Promoted to `Bjolang.AlphaRename`, which fixes the pattern hole this pass had:
+// `TMatch` never rewrote the pattern, so a free variable inside a `TPApp`'s
+// embedded expression escaped renaming and a `TPAs` binder was never seen.
+let private patternNames = AlphaRename.patternNames
+let renameExpr = AlphaRename.renameExpr
 
 // ---------------------------------------------------------------------------
 // Loop targets
@@ -457,15 +377,17 @@ let rec private lowerDeclWith (aliasFor: string -> string list) (decl: TDecl) : 
     match decl with
     | TModule(name, decls, r) -> TModule(name, decls |> List.map (lowerDeclWith aliasFor), r)
 
-    | TImpl(traitName, targetType, assoc, methods, r) ->
+    | TImpl(traitName, kind, holeArity, targetType, assoc, methods, r) ->
         // A concrete self-call inside an `impl` method was devirtualized by
         // `Lowering.fs`, so the method no longer calls itself under its own name.
+        // An inline trait's landing pad is a *static* method rather than one on
+        // a singleton, so both spellings have to be recognized.
         let implAlias (methodName: string) =
             match targetType with
-            | TCon(targetTypeName, _) -> [ Lowering.implInstanceMethod traitName targetTypeName methodName ]
+            | TCon(targetTypeName, _) -> [ landingPadName kind traitName targetTypeName methodName ]
             | _ -> []
 
-        TImpl(traitName, targetType, assoc, methods |> List.map (lowerDeclWith implAlias), r)
+        TImpl(traitName, kind, holeArity, targetType, assoc, methods |> List.map (lowerDeclWith implAlias), r)
 
     | TDefun(name, tyArgs, args, kwArgs, restArg, retType, body, r) ->
         let loweredKwArgs = kwArgs |> List.map (fun (n, t, e) -> n, t, lowerExpr [] false e)

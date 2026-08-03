@@ -174,14 +174,30 @@ let rec freeTVars (registry: TraitRegistry) (t: HMType) : string list =
     | TTuple args -> List.collect (freeTVars registry) args
     | TAssoc(_, _, impl) -> freeTVars registry impl
 
-/// Counts every type variable this module has invented, so that no two of them
-/// can share a name.
-let mutable private nextGeneratedTypeVar = 0
+/// Metavariables that a deferred, *un-abstractable* obligation is still waiting
+/// on.
+///
+/// Generalizing one of these would replace the very metavariable resolution is
+/// watching with a rigid type variable, and the answer could then never arrive:
+/// an inline trait has no dictionary, so there is nothing a quantified
+/// constraint over it could mean. Such a binding stays monomorphic instead, and
+/// its use site pins the constructor.
+///
+/// This is deliberately *not* applied to interface traits: quantifying one of
+/// those and passing a dictionary is exactly how they are supposed to work.
+///
+/// A hook rather than a parameter, because `generalize` is called from a dozen
+/// places that have no business knowing a constraint queue exists.
+let mutable heldMetaIds: unit -> Set<int> = fun () -> Set.empty
 
 let generalize (env: Env) (t: HMType) : Scheme =
     let envFv = envFreeVars env
     let tFv = freeVars env.Registry t |> List.distinct
-    let generalizable = tFv |> List.filter (fun m -> not (Set.contains m envFv))
+    let held = heldMetaIds ()
+
+    let generalizable =
+        tFv
+        |> List.filter (fun m -> not (Set.contains m envFv) && not (Set.contains m.Id held))
     
     // Find all explicitly named TVars that are already in the type
     let explicitTVars = freeTVars env.Registry t |> List.distinct
@@ -191,12 +207,7 @@ let generalize (env: Env) (t: HMType) : Scheme =
     // independent generalizations that both chose `'a` would produce a nested
     // `T_a` that shadows the enclosing one instead of referring to it — and a
     // value typed at the outer parameter is not assignable to the inner one.
-    let generatedNames =
-        generalizable
-        |> List.map (fun _ ->
-            let name = $"'t%d{nextGeneratedTypeVar}"
-            nextGeneratedTypeVar <- nextGeneratedTypeVar + 1
-            name)
+    let generatedNames = generalizable |> List.map (fun _ -> Gensym.fresh "'t")
     
     List.iter2 (fun (m: MetaVar) name -> m.Value <- Some(TVar name)) generalizable generatedNames
 

@@ -140,6 +140,14 @@ and TExprNode =
     | TYieldFrom of TypedExpr
     | TMatch of TypedExpr * TMatchClause list
     | TInterfaceCall of HMType * string * TypedExpr * TypedExpr list
+    /// A call to a trait method, with the trait recorded rather than guessed.
+    ///
+    /// Every downstream pass reads `TraitRef.Resolved` and none of them
+    /// re-derives the trait from the method name. Looking the method name up
+    /// across all traits silently picks an arbitrary one when two traits share a
+    /// method — which stops being hypothetical the moment `Monad.pure` and an
+    /// `Applicative.pure` coexist.
+    | TTraitCall of TraitRef * TypedExpr list * (string * TypedExpr) list
     | TThrow of TypedExpr
     // Lowered
     | TIsInst of TypedExpr * HMType
@@ -182,6 +190,63 @@ and TMatchClause =
       Guard: TypedExpr option
       Body: TypedExpr }
 
+/// Which trait a `TTraitCall` invokes, and — once the solver has said so —
+/// which implementation.
+///
+/// `Holes` are the metavariables standing for the trait's constructor variable,
+/// one per occurrence in the method's signature. For a trait whose implementor
+/// takes no arguments there is exactly one and it *is* the implementor type.
+/// Resolution reads their pruned heads; because they are shared with the
+/// surrounding expression, anything that later pins one of them — an argument,
+/// an enclosing call, a declared return type — pins the implementation.
+and TraitRef =
+    { Trait: string
+      Method: string
+      Holes: HMType list
+      mutable Resolved: (string * HMType list) option }
+
+/// How a trait is compiled.
+///
+/// Derived, not declared: a trait whose implementor is written applied to
+/// arguments — `(def/trait (Monad (%m %a)) ...)` — is `InlineTrait`; anything
+/// else is `InterfaceTrait`.
+type TraitKind =
+    /// A C# `interface`, an `Instance` singleton, `_dict_*` parameters for
+    /// generic receivers. Unchanged, and nothing about it is removed.
+    | InterfaceTrait
+    /// No interface, no dictionary, no dynamic dispatch. There is no valid C#
+    /// interface for `Monad<M>`, which is exactly why this kind exists.
+    | InlineTrait
+
+/// A trait signature that mentions the trait's constructor variable *applied*.
+///
+/// `HMType` deliberately has no case for this: `m` appears applied to two
+/// different arguments in `bind`, and adding it would make the unifier
+/// higher-order. `TplType` lives only in the registry and is eliminated by
+/// instantiation before inference ever sees a trait method's type.
+///
+/// Invariant: a `TplType` never reaches `unify`, `generalize` or `Codegen`.
+type TplType =
+    | TplCon of string * TplType list
+    /// The trait's constructor variable, applied to these arguments.
+    | TplHole of TplType list
+    | TplVar of string
+    | TplFun of TplType list * TplType
+    | TplTuple of TplType list
+
+/// The target of an `impl`, kept as a pattern rather than a bare head name.
+///
+/// The trait's constructor variable abstracts over the *trailing* `HoleArity`
+/// arguments; everything before them is fixed by the impl and becomes an
+/// impl-level type variable.
+///
+///     (def/impl (Monad (List %a))      ...)   Ctor = "List",   FixedPrefix = []
+///     (def/impl (Monad (Result %e %a)) ...)   Ctor = "Result", FixedPrefix = ['e]
+type ImplTarget =
+    { Ctor: string
+      FixedPrefix: HMType list
+      HoleArity: int }
+
 type TDecl =
     | TImport of ImportSpec list * Range
     | TExport of string list * Range
@@ -194,8 +259,10 @@ type TDecl =
     //          name     tyArgs          mandatoryArgs           keywordArgs(name,type,default)      restArg(name,elemType)       retType  body       range
     | TType of TypeDef list * Range
     | TTypeRec of TypeDef list * Range
-    | TTrait of string * string * string list * Map<string, HMType> * Range
-    | TImpl of string * HMType * (string * HMType) list * TDecl list * Range
+    //         name     implementorVar  kind        holeArity  assocTypes    signatures
+    | TTrait of string * string * TraitKind * int * string list * Map<string, HMType> * Range
+    //        traitName  kind        holeArity  targetType  assocBindings           methods
+    | TImpl of string * TraitKind * int * HMType * (string * HMType) list * TDecl list * Range
     | TExtern of string * FType * Range
 
 type FunMeta = {
@@ -212,20 +279,54 @@ type Scheme = Scheme of string list * TraitConstraint list * HMType
 
 type Binding = { Scheme: Scheme; IsMutable: bool }
 
+/// The body of one `impl` method, kept for splicing into call sites.
+///
+/// The body is the **untyped** `Expr`, never the typed one. `HMType` contains
+/// mutable `TMeta` cells that are not meaningfully serializable, and
+/// re-inferring at the call site is precisely what gives the method a type its
+/// trait signature could not express.
+type InlineTemplate =
+    { Params: string list
+      Body: Expr
+      /// Free name -> the name to emit for it. Computed where the origin
+      /// module's environment is available, applied after inference.
+      Qualification: Map<string, string>
+      OriginModule: string }
+
 // Metadata resolution callbacks
 type TraitInfo =
     { ImplementorVar: string
       AssociatedTypes: string list
-      Signatures: Map<string, HMType> }
+      /// Ordinary first-order signatures. Populated for `InterfaceTrait` only,
+      /// and left exactly as it was — that path must not regress.
+      Signatures: Map<string, HMType>
+      Kind: TraitKind
+      /// How many arguments the implementor is written applied to. Zero for an
+      /// `InterfaceTrait`.
+      HoleArity: int
+      /// Signature templates. Populated for `InlineTrait` only.
+      Templates: Map<string, TplType> }
 
 type TraitRegistry =
     { LocalTraits: Set<string>
       LocalTypes: Set<string>
       Traits: Map<string, TraitInfo>
+      /// Method name -> owning trait. `infer` recognizes a trait method in
+      /// application position through this, instead of searching every trait's
+      /// signature map and taking whichever matched first.
+      TraitMethods: Map<string, string>
       // Maps (TraitName * TargetTypeIdentifier) -> (GenericTargetType * Map<AssociatedTypeName, HMType>)
       // The GenericTargetType preserves TVars (e.g. TCon("List", [TVar "'a"]))
       // so ResolveAssociatedType can substitute them when given a concrete type.
       Implementations: Map<string * string, HMType * Map<string, HMType>>
+      /// The same implementations, as target *patterns*.
+      ImplTargets: Map<string * string, ImplTarget>
+      /// Inlineable method bodies, keyed `TraitName * MethodName * Ctor`.
+      ///
+      /// The constructor is part of the key on purpose: `(TraitName, MethodName)`
+      /// alone collides between `Monad for List` and `Monad for Option`, and the
+      /// second registration would silently win.
+      InlineMethods: Map<string * string * string, InlineTemplate>
       Aliases: Map<string, string list * HMType>
       Records: Map<string, string list * (string * HMType) list>
       RecordFields: Map<string, string> }
@@ -272,7 +373,13 @@ type TraitRegistry =
 type Env =
     { Bindings: Map<string, Binding>
       Registry: TraitRegistry
-      FunMetas: Map<string, FunMeta> }
+      FunMetas: Map<string, FunMeta>
+      /// The module whose declarations are currently being checked.
+      ///
+      /// An inline template records where its body came from, because its free
+      /// variables have to be emitted as references into *that* module's class
+      /// rather than resolved wherever the body ends up spliced.
+      CurrentModule: string }
 
 
 let addTrait (name: string) (info: TraitInfo) (env: Env) : Env =
@@ -283,10 +390,113 @@ let addTrait (name: string) (info: TraitInfo) (env: Env) : Env =
 
     { env with Registry = newRegistry }
 
-let addImplementation (traitName: string) (typeKey: string) (targetType: HMType) (assocBindings: Map<string, HMType>) (env: Env) : Env =
+let addImplementation
+    (traitName: string)
+    (typeKey: string)
+    (targetType: HMType)
+    (implTarget: ImplTarget)
+    (assocBindings: Map<string, HMType>)
+    (env: Env)
+    : Env =
     let newRegistry =
         { env.Registry with
-            Implementations = Map.add (traitName, typeKey) (targetType, assocBindings) env.Registry.Implementations }
+            Implementations = Map.add (traitName, typeKey) (targetType, assocBindings) env.Registry.Implementations
+            ImplTargets = Map.add (traitName, typeKey) implTarget env.Registry.ImplTargets }
 
     { env with Registry = newRegistry }
+
+let addInlineTemplate
+    (traitName: string)
+    (methodName: string)
+    (ctor: string)
+    (template: InlineTemplate)
+    (env: Env)
+    : Env =
+    { env with
+        Registry =
+            { env.Registry with
+                InlineMethods = Map.add (traitName, methodName, ctor) template env.Registry.InlineMethods } }
+
+/// The C# class an implementation is emitted as.
+let implClassName (traitName: string) (targetTypeName: string) =
+    let flattened = targetTypeName.Replace(".", "_")
+    $"%s{traitName}_%s{flattened}"
+
+/// The landing pad for an interface-trait method: the impl class's methods are
+/// instance methods, so the call goes through the singleton. `Codegen` rewrites
+/// `::` to `.`.
+let implInstanceMethodName (traitName: string) (targetTypeName: string) (methodName: string) =
+    $"%s{implClassName traitName targetTypeName}.Instance::%s{methodName}"
+
+/// The landing pad for an inline-trait method. There is no interface and no
+/// singleton to route through, so the method is `static` and the class names it
+/// directly.
+///
+/// It is emitted unconditionally for every impl method rather than only where
+/// something can be proven to need it. It costs one static method, and it is
+/// what makes the recursion guard, the occurrence-check fallback, and use of a
+/// trait method at a resolved type all work.
+let implStaticMethodName (traitName: string) (targetTypeName: string) (methodName: string) =
+    $"%s{implClassName traitName targetTypeName}::%s{methodName}"
+
+/// The landing pad for a method of `kind`.
+let landingPadName (kind: TraitKind) (traitName: string) (targetTypeName: string) (methodName: string) =
+    match kind with
+    | InterfaceTrait -> implInstanceMethodName traitName targetTypeName methodName
+    | InlineTrait -> implStaticMethodName traitName targetTypeName methodName
+
+/// Every type variable a type mentions, in order of first appearance.
+let typeVarsOf (t: HMType) : string list =
+    let rec go t =
+        match t with
+        | TVar n -> [ n ]
+        | TCon(_, args) -> List.collect go args
+        | TFun(args, ret) -> (List.collect go args) @ go ret
+        | TTuple args -> List.collect go args
+        | TAssoc(_, _, impl) -> go impl
+        | TMeta { Value = Some inner } -> go inner
+        | TMeta _ -> []
+
+    go t |> List.distinct
+
+let rec substTypeVars (subst: Map<string, HMType>) (t: HMType) : HMType =
+    match t with
+    | TVar n ->
+        match Map.tryFind n subst with
+        | Some t' -> t'
+        | None -> t
+    | TCon(n, args) -> TCon(n, List.map (substTypeVars subst) args)
+    | TFun(args, ret) -> TFun(List.map (substTypeVars subst) args, substTypeVars subst ret)
+    | TTuple args -> TTuple(List.map (substTypeVars subst) args)
+    | TAssoc(tn, an, impl) -> TAssoc(tn, an, substTypeVars subst impl)
+    | other -> other
+
+/// Turns a trait signature template into an ordinary `HMType` at one impl.
+///
+/// `TplHole args` becomes `TCon(Ctor, FixedPrefix @ args)`, which is what makes
+/// the whole thing first-order again: after this there is no constructor
+/// variable left anywhere, and the result may be handed to `unify` and
+/// `generalize` like any other type.
+let instantiateTemplate (target: ImplTarget) (tpl: TplType) : HMType =
+    let rec go t =
+        match t with
+        | TplCon(n, args) -> TCon(n, List.map go args)
+        | TplVar n -> TVar n
+        | TplFun(args, ret) -> TFun(List.map go args, go ret)
+        | TplTuple args -> TTuple(List.map go args)
+        | TplHole args -> TCon(target.Ctor, target.FixedPrefix @ List.map go args)
+
+    go tpl
+
+/// Every type variable a template mentions, in order of first appearance.
+let templateVarsOf (tpl: TplType) : string list =
+    let rec go t =
+        match t with
+        | TplVar n -> [ n ]
+        | TplCon(_, args)
+        | TplHole args
+        | TplTuple args -> List.collect go args
+        | TplFun(args, ret) -> (List.collect go args) @ go ret
+
+    go tpl |> List.distinct
 

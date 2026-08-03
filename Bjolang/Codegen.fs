@@ -71,11 +71,7 @@ let withIndent (ctx: CodegenContext) (f: CodegenContext -> unit) =
 let codegenError (line: int) (message: string) : 'a =
     failwithf $"Codegen Error at line %d{line}: %s{message}"
 
-let private nameCounter = ref 0
-
-let private freshName (prefix: string) =
-    nameCounter.Value <- nameCounter.Value + 1
-    $"%s{prefix}%d{nameCounter.Value}"
+let private freshName (prefix: string) = Gensym.fresh prefix
 
 let mapPrimitiveType (name: string) =
     match name with
@@ -99,17 +95,24 @@ let mapPrimitiveType (name: string) =
     | "Option" -> "BjolangRuntime.Option"
     | _ -> name
 
-let sanitizeIdent (s: string) =
-    let s = s.Replace("::", ".").Replace("-", "sub").Replace("?", "_QMARK").Replace("!", "_BANG").Replace("+", "add").Replace("*", "mul").Replace("/", "div").Replace("<", "lt").Replace(">", "gt").Replace("=", "eq").Replace("'", "")
-    let s = if s.Length > 0 && Char.IsDigit(s[0]) then "_" + s else s
-    match s with
-    | "class" | "struct" | "public" | "private" | "protected" | "internal" | "static" | "readonly" | "var" | "ref" | "out" | "in" | "params" | "new" | "return" | "if" | "else" | "while" | "for" | "foreach" | "do" | "switch" | "case" | "default" | "break" | "continue" | "goto" | "try" | "catch" | "finally" | "throw" | "lock" | "typeof" | "sizeof" | "is" | "as" | "true" | "false" | "null" | "void" | "object" | "string" | "int" | "bool"
-    // The rest of the built-in type names. A Bjolang `double` or `long` is a
-    // perfectly ordinary identifier, and one named after a C# type keyword used
-    // to be emitted bare — producing C# that does not parse.
-    | "double" | "float" | "decimal" | "char" | "byte" | "sbyte" | "short" | "ushort" | "uint" | "long" | "ulong" | "nint" | "nuint"
-    | "abstract" | "base" | "checked" | "const" | "delegate" | "enum" | "event" | "explicit" | "extern" | "fixed" | "implicit" | "interface" | "namespace" | "operator" | "override" | "sealed" | "stackalloc" | "this" | "unchecked" | "unsafe" | "using" | "virtual" | "volatile" -> "@" + s
-    | _ -> s
+// Promoted to `Bjolang.Naming`, which the passes that run before code
+// generation also need: an inlined body has to be able to name the module a
+// free variable came from.
+let sanitizeIdent = Naming.sanitizeIdent
+
+/// Does this `::` name qualify a binding to the module class that defines it,
+/// rather than name a method of a trait implementation?
+///
+/// The two shapes are spelled the same because they mean the same thing to
+/// `sanitizeIdent` — reach into that class — but they disagree about what the
+/// identifier's type arguments are for. A trait landing pad's belong to the
+/// *class*, `Foldable_List<int>.Instance.fold`; a qualified binding's belong to
+/// the *function*, and C# infers those from the arguments as it would for any
+/// other call.
+let private isModuleQualified (name: string) =
+    match name.LastIndexOf "::" with
+    | -1 -> false
+    | i -> name.Substring(0, i).EndsWith "_Module"
 
 /// The C# class a module's declarations are emitted into.
 ///
@@ -118,15 +121,14 @@ let sanitizeIdent (s: string) =
 /// site that spells this class has to agree on the answer: the class definition,
 /// the `using static` for it, a qualified reference to one of its bindings, and
 /// the generated entry point.
-let moduleClassName (moduleName: string) =
-    sanitizeIdent (moduleName.Replace(".", "_").Replace("-", "_")) + "_Module"
+let moduleClassName = Naming.moduleClassName
 
 /// The C# spelling of a Bjolang type parameter.
-let typeParamName (name: string) = "T_" + name.TrimStart('\'')
+let typeParamName = Naming.typeParamName
 
 /// The canonical key a type parameter is tracked under, independent of whether
 /// the source wrote it quoted.
-let typeParamKey (name: string) = name.TrimStart('\'')
+let typeParamKey = Naming.typeParamKey
 
 
 
@@ -240,6 +242,165 @@ let rec serializeHMType (t: HMType) : string =
     | TAssoc (traitName, assocName, implType) ->
         $"(assoc %s{traitName} %s{assocName} %s{serializeHMType implType})"
 
+
+/// A trait signature that mentions the implementor applied.
+///
+/// The hole is written as the implementor variable in applied position —
+/// `('m 'a)` — which is the one thing `parseType` accepts only for a quoted
+/// head, and therefore the one thing that reads back as a hole rather than as a
+/// constructor named `m`.
+let rec serializeTplType (implementorVar: string) (t: TplType) : string =
+    let go = serializeTplType implementorVar
+
+    match t with
+    | TplCon(name, args) ->
+        let baseName =
+            match name with
+            | _ when name = TypeConstants.Int32Name -> "int"
+            | _ when name = TypeConstants.StringName -> "string"
+            | _ when name = TypeConstants.BooleanName -> "bool"
+            | _ when name = TypeConstants.VoidName -> "void"
+            | _ -> name
+
+        if args.IsEmpty then baseName
+        else $"(%s{baseName} " + String.concat " " (List.map go args) + ")"
+    | TplVar name -> name
+    | TplFun(args, ret) ->
+        if args.IsEmpty then $"(-> %s{go ret})"
+        else "(-> " + String.concat " " (List.map go args) + $" %s{go ret})"
+    | TplTuple types -> "(Tuple " + String.concat " " (List.map go types) + ")"
+    | TplHole args ->
+        "('" + implementorVar.TrimStart('\'') + " " + String.concat " " (List.map go args) + ")"
+
+let rec serializeFType (ft: Parser.FType) : string =
+    match ft with
+    | Parser.TName(n, _) -> n
+    | Parser.TApp(n, args, _) -> $"({n} " + String.concat " " (List.map serializeFType args) + ")"
+    | Parser.TArrow(mandatory, keywords, restOpt, ret, _) ->
+        let mandatoryStrs = mandatory |> List.map serializeFType
+        let keywordStrs = keywords |> List.map (fun (n, t) -> $"(#:{n} {serializeFType t})")
+        let restStrs = match restOpt with Some t -> [$"#:rest {serializeFType t}"] | None -> []
+        let allParts = mandatoryStrs @ keywordStrs @ restStrs @ [serializeFType ret]
+        "(-> " + String.concat " " allParts + ")"
+
+// ---------------------------------------------------------------------------
+// Untyped expressions, for inline templates
+// ---------------------------------------------------------------------------
+
+/// What has to survive a round trip through the reader.
+///
+/// The metadata string is escaped again on its way into a C# attribute, so
+/// backslashes have to be doubled *here* as well as there; escaping only quotes
+/// used to turn `\"` into `\\"`, which closes the C# literal.
+let private escapeSexpr (s: string) =
+    s.Replace("\\", "\\\\").Replace("\"", "\\\"").Replace("\n", "\\n").Replace("\t", "\\t")
+
+let rec serializePattern (p: Parser.Pattern) : string =
+    match p with
+    | Parser.PWildcard _ -> "_"
+    | Parser.PIdent(n, _) -> n
+    | Parser.PInt(v, _) -> v
+    | Parser.PString(v, _) -> "\"" + escapeSexpr v + "\""
+    // Always parenthesized, even with no arguments. A bare name reads back as a
+    // constructor only when it happens to start with a capital, and that is not
+    // something to rely on.
+    | Parser.PConstruct(n, args, _) ->
+        "(" + String.concat " " (n :: List.map serializePattern args) + ")"
+    | Parser.PList(items, tailOpt, _) -> serializeSeqPattern "List" items tailOpt
+    | Parser.PVec(items, tailOpt, _) -> serializeSeqPattern "Vec" items tailOpt
+
+and private serializeSeqPattern (head: string) items tailOpt =
+    let itemStrs = items |> List.map serializePattern
+    let tailStrs =
+        match tailOpt with
+        | Some t -> [ serializePattern t; "..." ]
+        | None -> []
+    "(" + String.concat " " (head :: (itemStrs @ tailStrs)) + ")"
+
+/// Writes an untyped expression as source the reader accepts again.
+///
+/// The *untyped* expression is what an inline template stores: `HMType` is full
+/// of mutable metavariable cells that mean nothing outside the compilation that
+/// made them, and re-inferring the body at the call site is exactly what gives
+/// the method a type its trait signature could not express.
+let rec serializeExpr (e: Parser.Expr) : string =
+    let list (parts: string list) = "(" + String.concat " " parts + ")"
+
+    match e with
+    | Parser.EInt(v, _) -> v
+    | Parser.EString(v, _) -> "\"" + escapeSexpr v + "\""
+    | Parser.EQuotedSymbol(s, _) -> "'" + s
+    | Parser.EKeyword(k, _) -> "#:" + k
+    | Parser.EIdent(n, _) -> n
+    | Parser.ETuple(items, _) -> list ("Tuple" :: List.map serializeExpr items)
+    | Parser.EApp(target, args, _) -> list (serializeExpr target :: List.map serializeExpr args)
+    | Parser.ECast(t, v, _) -> list [ "cast"; serializeFType t; serializeExpr v ]
+
+    | Parser.ELet(n, isFun, args, ann, value, body, _) ->
+        let valueStr =
+            if isFun then list [ "fun"; list args; serializeExpr value ]
+            else serializeExpr value
+
+        let annotated =
+            match ann with
+            | Some t -> list [ "cast"; serializeFType t; valueStr ]
+            | None -> valueStr
+
+        list [ "let"; list [ list [ n; annotated ] ]; serializeExpr body ]
+
+    | Parser.ELetRec(bindings, body, _) ->
+        // A body block: consecutive `def`/`defun` forms are collected back into
+        // one mutually-recursive group by the reader.
+        let defs =
+            bindings
+            |> List.map (fun (n, isFun, args, _, value) ->
+                if isFun then list [ "defun"; list (n :: args); serializeExpr value ]
+                else list [ "def"; n; serializeExpr value ])
+
+        list ([ "let"; "()" ] @ defs @ [ serializeExpr body ])
+
+    | Parser.ELetMutable(n, _, value, body, _) ->
+        list [ "let"; "()"; list [ "def/mutable"; n; serializeExpr value ]; serializeExpr body ]
+
+    | Parser.ESet(n, v, _) -> list [ "set!"; n; serializeExpr v ]
+    | Parser.EIf(c, t, f, _) -> list [ "if"; serializeExpr c; serializeExpr t; serializeExpr f ]
+    | Parser.EWhen(c, b, negated, _) ->
+        list [ (if negated then "unless" else "when"); serializeExpr c; serializeExpr b ]
+    | Parser.EFun(args, body, _) -> list [ "fun"; list args; serializeExpr body ]
+    | Parser.ERecord(fields, _) ->
+        list ("record" :: (fields |> List.map (fun (k, v) -> list [ k; serializeExpr v ])))
+    | Parser.ERecordUpdate(n, fields, _) ->
+        list ("record-set" :: n :: (fields |> List.map (fun (k, v) -> list [ k; serializeExpr v ])))
+    | Parser.EGetField(target, f, _) -> list [ "record-get"; serializeExpr target; f ]
+    | Parser.EVec(items, _) -> "[" + String.concat " " (List.map serializeExpr items) + "]"
+
+    | Parser.EMatch(target, clauses, _) ->
+        let clauseStrs =
+            clauses
+            |> List.map (fun (pat, guard, body) ->
+                match guard with
+                | Some g -> list [ serializePattern pat; "#:when"; serializeExpr g; serializeExpr body ]
+                | None -> list [ serializePattern pat; serializeExpr body ])
+
+        list ("match" :: serializeExpr target :: clauseStrs)
+
+    | Parser.ESeq(body, _) -> list [ "seq"; serializeExpr body ]
+    | Parser.EYield(v, _) -> list [ "yield"; serializeExpr v ]
+    | Parser.EYieldFrom(s, _) -> list [ "yield-from"; serializeExpr s ]
+
+    // No reader form produces these, so none can appear in a template body.
+    | Parser.ELetTuple _ -> failwith "an inline template body may not destructure a tuple binding"
+    | Parser.EList _ -> failwith "an inline template body may not contain a bare list literal"
+    | Parser.ETryFinally _ -> failwith "an inline template body may not contain try/finally"
+
+/// Can this body be written out and read back at all? A template that cannot be
+/// serialized is simply not exported; its landing pad still is.
+let isSerializableTemplate (e: Parser.Expr) : bool =
+    try
+        serializeExpr e |> ignore
+        true
+    with _ ->
+        false
 
 let getUnionTypeString (hm: HMType) (parentName: string) : string =
     let rec findCon t =
@@ -447,7 +608,7 @@ let rec generateExpr (ctx: CodegenContext) (expr: TypedExpr) : unit =
     // type arguments. `Lowering` produces these when it passes a dictionary to a
     // constrained function, and the class is generic whenever the implemented
     // type is (`Foldable_Vec<T_a>`), so the arguments cannot be dropped.
-    | TIdent (name, tArgs) when name.Contains("::") && not tArgs.IsEmpty ->
+    | TIdent (name, tArgs) when name.Contains("::") && not tArgs.IsEmpty && not (isModuleQualified name) ->
         let parts = name.Split("::")
         let tyArgsStr = tArgs |> List.map typeToString |> String.concat ", "
         append ctx (sanitizeIdent parts[0])
@@ -654,6 +815,14 @@ let rec generateExpr (ctx: CodegenContext) (expr: TypedExpr) : unit =
     | TTypeEq _ ->
         codegenError expr.Range.Start.Line "type equality tests are not supported by the C# backend"
 
+    // Every trait call has been turned into either a spliced body or a direct
+    // call by the time code is generated: `TraitInline` takes the resolved ones
+    // and `Lowering` takes the rest. One reaching here means neither did.
+    | TTraitCall (tref, _, _) ->
+        codegenError
+            expr.Range.Start.Line
+            $"internal error: call to '{tref.Trait}.{tref.Method}' was never resolved to an implementation"
+
     | TThrow _
     | TVecMake _
     | TLet _
@@ -785,7 +954,7 @@ and private generateApply
 
         match target.Node with
         | TIdent (name, tArgs) ->
-            if name.Contains("::") && not tArgs.IsEmpty then
+            if name.Contains("::") && not tArgs.IsEmpty && not (isModuleQualified name) then
                 // Trait instance method: "TraitName_Type.Instance::methodName"
                 // Split at "::" to insert type args on the class portion.
                 let parts = name.Split("::")
@@ -864,7 +1033,12 @@ and private generateApply
             else
                 for (kwName, _), emit in List.zip kwArgs keywordEmitters do
                     if argIdx > 0 then append ctx ", "
-                    append ctx $"%s{sanitizeIdent kwName}: "
+                    // The parameter is declared as `__kw_<name>`, so that is
+                    // what a named argument has to say. Writing the bare name
+                    // produced C# that named a parameter which does not exist —
+                    // latent only because nothing in the suite had ever passed a
+                    // keyword argument rather than relying on its default.
+                    append ctx $"__kw_%s{sanitizeIdent kwName}: "
                     emit ctx
                     argIdx <- argIdx + 1
 
@@ -1796,7 +1970,11 @@ let rec generateDecl (ctx: CodegenContext) (decl: TDecl) : unit =
                 appendLine ctx "}"
             | Alias _ -> ()
 
-    | TTrait (name, targetVar, assocTypes, signatures, _) ->
+    // An inline trait emits nothing at all. There is no valid C# interface for
+    // `Monad<M>`: the parameter would have to be a type constructor.
+    | TTrait (_, _, InlineTrait, _, _, _, _) -> ()
+
+    | TTrait (name, targetVar, _, _, assocTypes, signatures, _) ->
         // Helper to collect all TVar names from a type
         let rec collectTVars t =
             match t with
@@ -1846,7 +2024,7 @@ let rec generateDecl (ctx: CodegenContext) (decl: TDecl) : unit =
         indent ctx
         appendLine ctx "}"
 
-    | TImpl (traitName, targetType, assocMap, methods, _) ->
+    | TImpl (traitName, kind, holeArity, targetType, assocMap, methods, _) ->
         let targetTypeName =
             match targetType with
             | TCon(n, _) -> n.Replace(".", "_")
@@ -1854,11 +2032,20 @@ let rec generateDecl (ctx: CodegenContext) (decl: TDecl) : unit =
         let sanitizedTraitName = sanitizeIdent traitName
         let className = $"%s{sanitizedTraitName}_%s{targetTypeName}"
 
-        let typeParamVars =
+        // The class's type parameters are the impl's *fixed prefix*. For an
+        // interface trait that is the whole target; for an inline trait the
+        // trailing `holeArity` arguments belong to the trait's constructor
+        // variable, so they are the method's business rather than the class's.
+        let targetArgs =
             match targetType with
-            | TCon(_, args) ->
-                args |> List.choose (function TVar v -> Some v | _ -> None) |> List.distinct
+            | TCon(_, args) -> args
             | _ -> []
+
+        let prefixArgs = targetArgs |> List.truncate (max 0 (targetArgs.Length - holeArity))
+
+        let typeParamVars =
+            prefixArgs |> List.collect collectTypeVars |> List.distinct
+
         let tyParamsStr =
             if typeParamVars.IsEmpty then ""
             else "<" + (typeParamVars |> List.map typeParamName |> String.concat ", ") + ">"
@@ -1866,31 +2053,54 @@ let rec generateDecl (ctx: CodegenContext) (decl: TDecl) : unit =
         // The class's own type parameters are in scope in every method body.
         let ctx = { ctx with TypeParams = typeParamVars |> List.map typeParamKey |> Set.ofList }
 
-        let targetTypeStr = typeToString targetType
-        let assocArgsStr =
-            assocMap
-            |> List.map (fun (_, t) -> typeToString t)
-            |> String.concat ", "
-        let traitArgsStr = if String.IsNullOrEmpty(assocArgsStr) then targetTypeStr else $"%s{targetTypeStr}, %s{assocArgsStr}"
+        let baseClause =
+            match kind with
+            | InlineTrait -> ""
+            | InterfaceTrait ->
+                let targetTypeStr = typeToString targetType
+                let assocArgsStr =
+                    assocMap
+                    |> List.map (fun (_, t) -> typeToString t)
+                    |> String.concat ", "
+                let traitArgsStr =
+                    if String.IsNullOrEmpty(assocArgsStr) then targetTypeStr
+                    else $"%s{targetTypeStr}, %s{assocArgsStr}"
+                $" : %s{sanitizedTraitName}<%s{traitArgsStr}>"
 
         indent ctx
-        appendLine ctx $"public sealed class %s{className}%s{tyParamsStr} : %s{sanitizedTraitName}<%s{traitArgsStr}> {{"
+        appendLine ctx $"public sealed class %s{className}%s{tyParamsStr}%s{baseClause} {{"
         withIndent ctx (fun ctx ->
-            indent ctx
-            appendLine ctx $"public static readonly %s{className}%s{tyParamsStr} Instance = new();"
+            // An inline trait has no interface to satisfy, so there is nothing
+            // for a singleton to be an instance *of*: its landing pads are plain
+            // static methods.
+            match kind with
+            | InterfaceTrait ->
+                indent ctx
+                appendLine ctx $"public static readonly %s{className}%s{tyParamsStr} Instance = new();"
+            | InlineTrait -> ()
+
+            let modifier =
+                match kind with
+                | InterfaceTrait -> "public "
+                | InlineTrait -> "public static "
+
             for m in methods do
                 match m with
                 | TDefun (n, tyArgs, args, kwArgs, restArg, retType, body, _) ->
-                    // Filter out class-level type params to get method-level generics
+                    // Whatever is left over after the class's own parameters is
+                    // a method-level generic and must be emitted as one. This is
+                    // exactly the restriction inline traits lift: `bind`'s `'b`
+                    // belongs to the method, not to the trait's target.
+                    let classKeys = typeParamVars |> List.map typeParamKey |> Set.ofList
                     let methodOnlyTyArgs =
-                        tyArgs |> List.filter (fun v -> not (Set.contains (typeParamKey v) (typeParamVars |> List.map typeParamKey |> Set.ofList)))
+                        tyArgs |> List.filter (fun v -> not (Set.contains (typeParamKey v) classKeys))
                     let methodTyArgsStr =
                         if methodOnlyTyArgs.IsEmpty then ""
                         else "<" + (methodOnlyTyArgs |> List.map typeParamName |> String.concat ", ") + ">"
                     // Include method-level type params in scope
                     let methodCtx =
                         { ctx with TypeParams = Set.union ctx.TypeParams (methodOnlyTyArgs |> List.map typeParamKey |> Set.ofList) }
-                    generateMethod methodCtx "public " methodTyArgsStr n args kwArgs restArg retType body
+                    generateMethod methodCtx modifier methodTyArgsStr n args kwArgs restArg retType body
                 | _ -> ()
         )
         indent ctx
@@ -1973,7 +2183,7 @@ let rec generateDecl (ctx: CodegenContext) (decl: TDecl) : unit =
 /// `linkedDlls` is every assembly this compilation references, and each one
 /// contributes a `using static` so that names re-exported through one DLL can
 /// still be found in the class that actually defines them.
-let generateProgram (exportMetadata: string) (metadataDeps: string list) (linkedDlls: string list) (decls: TDecl list) : string =
+let generateProgram (exportMetadata: string) (inlineMetadata: string) (metadataDeps: string list) (linkedDlls: string list) (decls: TDecl list) : string =
     let unionCases =
         let rec collect decls =
             decls |> List.collect (function
@@ -2050,9 +2260,23 @@ let generateProgram (exportMetadata: string) (metadataDeps: string list) (linked
     for className in moduleUsings do
         appendLine ctx $"using static %s{className};"
         
+    // Backslashes are doubled *first*. Escaping only the quotes turned a `\"`
+    // already inside the metadata — which an inline template body carries as
+    // soon as it mentions a string literal — into `\\"`, closing the C# literal
+    // early and producing source that does not parse.
+    let escapeAttribute (s: string) =
+        s.Replace("\\", "\\\\").Replace("\"", "\\\"").Replace("\n", "\\n").Replace("\r", "")
+
     if not (String.IsNullOrWhiteSpace(exportMetadata)) then
-        let escapedMeta = exportMetadata.Replace("\"", "\\\"").Replace("\n", "\\n").Replace("\r", "")
+        let escapedMeta = escapeAttribute exportMetadata
         appendLine ctx $"[assembly: System.Reflection.AssemblyMetadata(\"BjolangExports\", \"%s{escapedMeta}\")]"
+
+    // Kept in an attribute of its own rather than mixed into the exports: these
+    // are expressions, not declarations, and whoever reads them wants them
+    // whole rather than folded into the declaration parser.
+    if not (String.IsNullOrWhiteSpace(inlineMetadata)) then
+        let escapedInline = escapeAttribute inlineMetadata
+        appendLine ctx $"[assembly: System.Reflection.AssemblyMetadata(\"BjolangInlineImpls\", \"%s{escapedInline}\")]"
     
     if not metadataDeps.IsEmpty then
         let depsStr = metadataDeps |> List.map System.IO.Path.GetFullPath |> String.concat ";"

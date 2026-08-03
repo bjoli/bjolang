@@ -7,13 +7,17 @@
 
     <ItemGroup>
         <Compile Include="Paths.fs"/>
+        <Compile Include="Gensym.fs"/>
+        <Compile Include="Naming.fs"/>
         <Compile Include="Lexer.fs"/>
         <Compile Include="Parser.fs"/>
         <Compile Include="LetRecify.fs"/>
         <Compile Include="TypedAST.fs" />
         <Compile Include="TypeVisitor.fs" />
+        <Compile Include="AlphaRename.fs" />
         <Compile Include="Unification.fs" />
         <Compile Include="Inference.fs" />
+        <Compile Include="TraitInline.fs" />
         <Compile Include="Lowering.fs" />
         <Compile Include="LoopLowering.fs" />
         <Compile Include="Prelude.fs" />

@@ -19,51 +19,50 @@ open Bjolang.Unification
 let collectTraitConstraints (env: Env) (body: TypedExpr) : TraitConstraint list =
     let registry = env.Registry
 
-    let traitOf methodName =
-        registry.Traits
-        |> Map.tryPick (fun traitName info ->
-            if Map.containsKey methodName info.Signatures then Some traitName else None)
-
     let step (acc: Set<string * string>) (expr: TypedExpr) =
         match expr.Node with
-        | TApply({ Node = TIdent(calleeName, tArgs); Type = calleeType }, _, _) ->
-            match traitOf calleeName with
-            | Some traitName ->
-                match calleeType with
-                | TFun(receiverType :: _, _) ->
-                    match prune registry receiverType with
-                    | TVar varName -> Set.add (traitName, varName) acc
-                    | _ -> acc
-                | _ -> acc
-            | None ->
-                // `tArgs` is positionally aligned with the callee's scheme
-                // variables, so it says what each of them was instantiated to
-                // at this call site.
-                match Map.tryFind calleeName env.Bindings with
-                | Some binding ->
-                    let (Scheme(schemeVars, constraints, _)) = binding.Scheme
+        // A trait call the solver could not pin down. The node says which trait
+        // it belongs to, so there is nothing to guess: looking the method name
+        // up across every trait picked an arbitrary one whenever two traits
+        // shared a method.
+        | TTraitCall(tref, _, _) when tref.Resolved.IsNone ->
+            tref.Holes
+            |> List.fold
+                (fun acc hole ->
+                    match prune registry hole with
+                    | TVar varName -> Set.add (tref.Trait, varName) acc
+                    | _ -> acc)
+                acc
 
-                    if constraints.IsEmpty || schemeVars.Length <> tArgs.Length then
+        | TApply({ Node = TIdent(calleeName, tArgs) }, _, _) ->
+            // `tArgs` is positionally aligned with the callee's scheme
+            // variables, so it says what each of them was instantiated to
+            // at this call site.
+            match Map.tryFind calleeName env.Bindings with
+            | Some binding ->
+                let (Scheme(schemeVars, constraints, _)) = binding.Scheme
+
+                if constraints.IsEmpty || schemeVars.Length <> tArgs.Length then
+                    acc
+                else
+                    let varSubst = List.zip schemeVars tArgs |> Map.ofList
+
+                    constraints
+                    |> List.fold
+                        (fun acc c ->
+                            let instantiated =
+                                match c.TargetType with
+                                | TVar v -> Map.tryFind v varSubst |> Option.defaultValue c.TargetType
+                                | t -> t
+
+                            // A concrete instantiation resolves to a real
+                            // impl at this call site and needs nothing from
+                            // our caller.
+                            match prune registry instantiated with
+                            | TVar varName -> Set.add (c.TraitName, varName) acc
+                            | _ -> acc)
                         acc
-                    else
-                        let varSubst = List.zip schemeVars tArgs |> Map.ofList
-
-                        constraints
-                        |> List.fold
-                            (fun acc c ->
-                                let instantiated =
-                                    match c.TargetType with
-                                    | TVar v -> Map.tryFind v varSubst |> Option.defaultValue c.TargetType
-                                    | t -> t
-
-                                // A concrete instantiation resolves to a real
-                                // impl at this call site and needs nothing from
-                                // our caller.
-                                match prune registry instantiated with
-                                | TVar varName -> Set.add (c.TraitName, varName) acc
-                                | _ -> acc)
-                            acc
-                | None -> acc
+            | None -> acc
         | _ -> acc
 
     TypeVisitor.foldExpr step Set.empty body
@@ -281,6 +280,18 @@ let rec resolveTypeAnnotation (registry: TraitRegistry) (ptype: FType) : HMType 
     | TApp("Tuple", args, _) -> TTuple(args |> List.map (resolveTypeAnnotation registry))
     | TApp("assoc", [ TName(traitName, _); TName(assocName, _); implType ], _) ->
         TAssoc(traitName, assocName, resolveTypeAnnotation registry implType)
+    // `(%f int)` — a type variable applied to arguments. `HMType` has no case
+    // for this and deliberately never will: giving the unifier one makes it
+    // higher-order. Only an inline trait's own constructor variable may be
+    // written applied, and `resolveTemplate` reads those, not this function.
+    //
+    // Falling through to the general case turned it into a type constructor
+    // literally named `'f`, which then failed much later with a confusing
+    // complaint about a missing implementation for a type nobody wrote.
+    | TApp(name, _, r) when name.StartsWith "'" ->
+        failwithf
+            $"Kind Error at %s{Lexer.formatPos r}: the type variable %%%s{name.TrimStart('\'')} is applied to arguments here. Bjolang has no higher-kinded type variables: only the constructor variable of an inline trait may be written applied, and only inside that trait's own signatures. A function cannot be generic over a type constructor."
+
     | TApp(name, args, _) ->
         let resolvedArgs = args |> List.map (resolveTypeAnnotation registry)
         match Map.tryFind name registry.Aliases with
@@ -292,6 +303,308 @@ let rec resolveTypeAnnotation (registry: TraitRegistry) (ptype: FType) : HMType 
             applyTypeSubst subst t
         | None -> TCon(name, resolvedArgs)
 
+
+// ---------------------------------------------------------------------------
+// Inline-trait signature templates
+// ---------------------------------------------------------------------------
+
+let rec private hmToTpl (t: HMType) : TplType =
+    match t with
+    | TCon(n, args) -> TplCon(n, List.map hmToTpl args)
+    | TVar n -> TplVar n
+    | TFun(args, ret) -> TplFun(List.map hmToTpl args, hmToTpl ret)
+    | TTuple ts -> TplTuple(List.map hmToTpl ts)
+    | other -> failwithf $"Type Error: %A{other} may not appear in an inline trait's signature"
+
+/// Reads a trait signature that mentions the implementor *applied*.
+///
+/// The result is a `TplType`, never an `HMType`: `m` occurs at two different
+/// argument lists in `bind`, and giving the unifier a case for that would make
+/// it higher-order. Instantiation at an impl (see `instantiateTemplate`)
+/// eliminates the hole and hands inference an ordinary first-order type.
+let rec resolveTemplate (registry: TraitRegistry) (holeVar: string) (ftype: FType) : TplType =
+    let go = resolveTemplate registry holeVar
+    let holeName = "'" + holeVar
+
+    match ftype with
+    | TName(name, r) when name = holeName ->
+        failwithf
+            $"Type Error at %s{Lexer.formatPos r}: the constructor variable %%%s{holeVar} must be written applied, as (%%%s{holeVar} ...)."
+    | TName _ -> hmToTpl (resolveTypeAnnotation registry ftype)
+    | TApp("->", args, _) ->
+        let resolved = args |> List.map go
+        TplFun(List.take (resolved.Length - 1) resolved, List.last resolved)
+    | TArrow(mandatory, keywords, restOpt, ret, r) ->
+        if not keywords.IsEmpty || restOpt.IsSome then
+            failwithf
+                $"Type Error at %s{Lexer.formatPos r}: an inline trait's methods may not take keyword or rest parameters."
+        TplFun(mandatory |> List.map go, go ret)
+    | TApp("Tuple", args, _) -> TplTuple(args |> List.map go)
+    | TApp(name, args, _) when name = holeName -> TplHole(args |> List.map go)
+    | TApp(name, args, _) when name.StartsWith "'" ->
+        failwithf
+            $"Type Error: only the trait's own constructor variable may be applied in a signature; %s{name} is an ordinary type variable."
+    | TApp(name, args, _) ->
+        match Map.tryFind name registry.Aliases with
+        | Some _ ->
+            // An alias may expand into anything, including something that hides
+            // the hole. Resolving it as an ordinary type is only sound when no
+            // argument mentions the hole.
+            hmToTpl (resolveTypeAnnotation registry ftype)
+        | None -> TplCon(name, args |> List.map go)
+
+/// Instantiates a template for one call site: every ordinary type variable
+/// becomes a fresh meta, and every *occurrence* of the hole becomes a meta of
+/// its own together with the arguments it was applied to.
+///
+/// The hole metas are shared with the surrounding expression, which is the whole
+/// point: the call node is fully typed immediately, with the constructor still
+/// unknown, and whatever later pins one of them — an argument, an enclosing
+/// `bind`, a declared return type — pins the constructor.
+let instantiateTemplateFresh (tpl: TplType) : HMType * (HMType * HMType list) list =
+    let varMap = System.Collections.Generic.Dictionary<string, HMType>()
+    let holes = ResizeArray<HMType * HMType list>()
+
+    let rec go t =
+        match t with
+        | TplVar n ->
+            match varMap.TryGetValue n with
+            | true, m -> m
+            | _ ->
+                let m = freshMeta ()
+                varMap[n] <- m
+                m
+        | TplCon(n, args) -> TCon(n, List.map go args)
+        | TplFun(args, ret) -> TFun(List.map go args, go ret)
+        | TplTuple ts -> TTuple(List.map go ts)
+        | TplHole args ->
+            let argTypes = List.map go args
+            let m = freshMeta ()
+            holes.Add(m, argTypes)
+            m
+
+    let t = go tpl
+    t, List.ofSeq holes
+
+// ---------------------------------------------------------------------------
+// Deferred trait resolution
+// ---------------------------------------------------------------------------
+
+/// A trait obligation raised by a call and discharged later.
+///
+/// `bind` resolves from its first argument, but `pure : 'a -> m 'a` mentions the
+/// constructor only in its *result*, so any rule that reads argument zero cannot
+/// see it at all. Rather than make `infer` bidirectional, the obligation is
+/// simply recorded and revisited once the surrounding expression has had its say.
+type Wanted =
+    { Trait: string
+      Method: string
+      Kind: TraitKind
+      /// One entry per occurrence of the hole: the meta standing for the
+      /// constructor application, and the arguments it was applied to.
+      HoleArgs: (HMType * HMType list) list
+      /// The AST node that reads the answer back.
+      Ref: TraitRef
+      Range: Range }
+
+let private wantedQueue = ResizeArray<Wanted>()
+
+/// Every metavariable a type still mentions, following bindings by hand.
+///
+/// Deliberately registry-free: this is consulted from `generalize`, which has no
+/// business being handed a queue, let alone an environment.
+let rec private metaIdsOf (t: HMType) : int list =
+    match t with
+    | TMeta m ->
+        match m.Value with
+        | Some inner -> metaIdsOf inner
+        | None -> [ m.Id ]
+    | TCon(_, args)
+    | TTuple args -> List.collect metaIdsOf args
+    | TFun(args, ret) -> (List.collect metaIdsOf args) @ metaIdsOf ret
+    | TAssoc(_, _, impl) -> metaIdsOf impl
+    | TVar _ -> []
+
+/// The holes an unresolved *inline*-trait obligation is still watching.
+///
+/// A local helper written without a signature — `(defun (bump fa) (fmap fa inc))`
+/// — is let-polymorphic, so its parameter's metavariable used to be quantified
+/// the moment the binding was finished, long before any call site said what it
+/// was. Resolution then found a rigid type variable and reported that an
+/// inline-only trait cannot be used generically, which was true of the type it
+/// had just been given and false of the program that was written.
+///
+/// Holding these back makes such a binding monomorphic, which is the only thing
+/// it can honestly be: one use site, one constructor, resolved and inlined.
+let private heldByInlineWanteds () : Set<int> =
+    wantedQueue
+    |> Seq.filter (fun w -> w.Kind = InlineTrait && w.Ref.Resolved.IsNone)
+    |> Seq.collect (fun w -> w.HoleArgs |> Seq.collect (fun (m, _) -> metaIdsOf m))
+    |> Set.ofSeq
+
+do Unification.heldMetaIds <- heldByInlineWanteds
+
+let private pushWanted (w: Wanted) = wantedQueue.Add w
+
+/// Detaches everything raised so far. Callers solve what they take.
+let takeWanteds () : Wanted list =
+    let ws = List.ofSeq wantedQueue
+    wantedQueue.Clear()
+    ws
+
+/// Instantiates an impl's target pattern, giving fresh metas to the impl's own
+/// prefix variables.
+///
+/// Returns the prefix to unify the hole against, and — separately — the metas
+/// standing for the class's *type parameters*. The two are not the same list:
+/// `impl Show for (List int)` has a one-argument prefix and no type parameters
+/// at all, and naming `Show_List<int>` for it is a type error in C#.
+let private instantiateImplPrefix (target: ImplTarget) : HMType list * HMType list =
+    let vars = target.FixedPrefix |> List.collect typeVarsOf |> List.distinct
+    let subst = vars |> List.map (fun v -> v, freshMeta ()) |> Map.ofList
+    let prefix = target.FixedPrefix |> List.map (substTypeVars subst)
+    prefix, vars |> List.map (fun v -> subst[v])
+
+let private tryResolveWanted (env: Env) (w: Wanted) : bool =
+    if w.Ref.Resolved.IsSome then
+        true
+    else
+
+    let registry = env.Registry
+
+    let ctorOpt =
+        w.HoleArgs
+        |> List.tryPick (fun (m, _) ->
+            match prune registry m with
+            | TCon(ctor, _) -> Some ctor
+            | _ -> None)
+
+    match ctorOpt with
+    | None -> false
+    | Some ctor ->
+        match Map.tryFind (w.Trait, ctor) registry.ImplTargets with
+        | None ->
+            failwithf
+                $"Type Error at %s{Lexer.formatPos w.Range}: no implementation of trait '%s{w.Trait}' for '%s{ctor}', required by '%s{w.Method}'."
+        | Some target ->
+            let prefix, classTypeArgs = instantiateImplPrefix target
+
+            for (m, occArgs) in w.HoleArgs do
+                unify registry m (TCon(ctor, prefix @ occArgs))
+
+            w.Ref.Resolved <- Some(ctor, classTypeArgs |> List.map (prune registry))
+            true
+
+/// Runs the wanted queue to a fixpoint, then reports what is left.
+///
+/// An unsolved `InterfaceTrait` obligation is not an error: it is exactly the
+/// generic-receiver case the dictionary path already handles, and leaving it
+/// alone is what keeps the current semantics intact.
+let solveWanteds (env: Env) (wanteds: Wanted list) : unit =
+    let mutable pending = wanteds |> List.filter (fun w -> w.Ref.Resolved.IsNone)
+    let mutable progress = true
+
+    while progress && not pending.IsEmpty do
+        progress <- false
+
+        pending <-
+            pending
+            |> List.filter (fun w ->
+                if tryResolveWanted env w then
+                    progress <- true
+                    false
+                else
+                    true)
+
+    for w in pending do
+        match w.Kind with
+        | InterfaceTrait -> ()
+        | InlineTrait ->
+            let holes = w.HoleArgs |> List.map (fst >> prune env.Registry)
+
+            if holes |> List.exists (function TVar _ -> true | _ -> false) then
+                failwithf
+                    $"Type Error at %s{Lexer.formatPos w.Range}: '%s{w.Method}' cannot be used at a generic type; '%s{w.Trait}' is an inline-only trait, so there is no dictionary to pass. Give the call a concrete type, or make the caller monomorphic."
+            else
+                failwithf
+                    $"Type Error at %s{Lexer.formatPos w.Range}: cannot determine which '%s{w.Trait}' instance '%s{w.Method}' uses here; add a type annotation. Nothing in this expression says what the constructor is — a `(do ...)` block with no `:bind` never mentions one."
+
+/// Solves everything raised since the last call. Used at every point that is
+/// about to generalize, since a scheme must not be built over a constructor
+/// that resolution would still have pinned down.
+let solvePending (env: Env) : unit = solveWanteds env (takeWanteds ())
+
+/// Reads an impl's target as a pattern.
+///
+/// The trait's constructor variable abstracts over the *trailing* `HoleArity`
+/// arguments; everything before them is fixed by this impl.
+let implTargetOf (traitName: string) (info: TraitInfo) (targetType: HMType) (r: Range) : ImplTarget =
+    match targetType with
+    | TCon(ctor, args) ->
+        if args.Length < info.HoleArity then
+            failwithf
+                $"Kind Error at %s{Lexer.formatPos r}: trait '%s{traitName}' abstracts over the last %d{info.HoleArity} argument(s) of its implementor, but '%s{ctor}' is applied to only %d{args.Length}. A constructor whose abstracted argument is not last — `Either e` in the first position — needs a newtype that flips them."
+
+        { Ctor = ctor
+          FixedPrefix = args |> List.take (args.Length - info.HoleArity)
+          HoleArity = info.HoleArity }
+    | _ -> failwithf $"Trait implementations require concrete target types at %s{Lexer.formatPos r}"
+
+/// Instantiates a trait method at a call site and records the obligation.
+let private traitCallType (env: Env) (traitName: string) (methodName: string) (r: Range) : HMType * TraitRef =
+    let info = Map.find traitName env.Registry.Traits
+
+    let methodType, holeArgs =
+        match info.Kind with
+        | InlineTrait ->
+            match Map.tryFind methodName info.Templates with
+            | Some tpl -> instantiateTemplateFresh tpl
+            | None -> failwithf $"Internal error: '%s{methodName}' is not a method of inline trait '%s{traitName}'"
+        | InterfaceTrait ->
+            // Instantiated from the trait's own signature rather than from
+            // whatever `methodName` happens to be bound to. Inside an `impl`
+            // the method is also bound monomorphically, for recursion, and that
+            // binding quantifies nothing — so reading the implementor out of a
+            // scheme's type arguments found no hole at all for a self-call.
+            let sigType =
+                match Map.tryFind methodName info.Signatures with
+                | Some t -> t
+                | None -> failwithf $"Internal error: '%s{methodName}' is not a method of trait '%s{traitName}'"
+
+            let implVar = "'" + info.ImplementorVar
+
+            // An associated type is a projection out of the implementor, so it
+            // is pinned by the same meta rather than being free on its own.
+            let assocSubst =
+                info.AssociatedTypes
+                |> List.map (fun a -> "'" + a, TAssoc(traitName, a, TVar implVar))
+                |> Map.ofList
+
+            let withAssoc = applyTypeSubst assocSubst sigType
+
+            let vars =
+                implVar :: (freeTVars env.Registry withAssoc |> List.distinct |> List.filter ((<>) implVar))
+
+            let subst = vars |> List.map (fun v -> v, freshMeta ()) |> Map.ofList
+
+            // An implementor of arity zero is the hole, applied to nothing.
+            applyTypeSubst subst withAssoc, [ subst[implVar], [] ]
+
+    let tref =
+        { Trait = traitName
+          Method = methodName
+          Holes = holeArgs |> List.map fst
+          Resolved = None }
+
+    pushWanted
+        { Trait = traitName
+          Method = methodName
+          Kind = info.Kind
+          HoleArgs = holeArgs
+          Ref = tref
+          Range = r }
+
+    methodType, tref
 
 /// Instantiates a record type with fresh type variables.
 ///
@@ -332,6 +645,18 @@ let rec infer (env: Env) (expr: Expr) : HMType * TypedExpr =
           Range = r
           Node = TString value }
 
+    // An inline trait's methods are never bound as values: there is no single
+    // scheme they could be bound under, which is the whole reason the trait is
+    // inline-only.
+    | EIdent(name, r) when
+        Map.containsKey name env.Registry.TraitMethods
+        && not (Map.containsKey name env.Bindings)
+        ->
+        let traitName = env.Registry.TraitMethods[name]
+
+        failwithf
+            $"Type Error at %s{Lexer.formatPos r}: '%s{name}' is a method of the inline-only trait '%s{traitName}' and has no value form. Apply it directly, or wrap it in a lambda at a known type."
+
     | EIdent(name, r) ->
         let binding = lookup env name
         let t, tArgs, constraints = instantiate env.Registry binding.Scheme
@@ -362,6 +687,34 @@ let rec infer (env: Env) (expr: Expr) : HMType * TypedExpr =
         { Type = funType
           Range = r
           Node = TLambda(args, typedBody) }
+
+    // A trait method in application position.
+    //
+    // The call is typed immediately — every position in the template gets a
+    // fresh meta and the arguments and result are unified against them — while
+    // *which* implementation runs is left blank for the solver. That is what
+    // lets `pure`, whose constructor appears only in its result, be resolved at
+    // all: the metas are shared with the surrounding expression, so an enclosing
+    // `bind` or a declared return type pins them.
+    | EApp(EIdent(methodName, _), args, r) when Map.containsKey methodName env.Registry.TraitMethods ->
+        let traitName = env.Registry.TraitMethods[methodName]
+
+        let typedArgs =
+            args
+            |> List.map (function
+                | EKeyword(kw, kr) ->
+                    failwithf
+                        $"Type Error at %s{Lexer.formatPos kr}: trait method '%s{methodName}' takes positional arguments only, but was given '#:%s{kw}'."
+                | a -> infer env a)
+
+        let methodType, tref = traitCallType env traitName methodName r
+        let retType = freshMeta ()
+        unify env.Registry methodType (TFun(typedArgs |> List.map fst, retType))
+
+        retType,
+        { Type = retType
+          Range = r
+          Node = TTraitCall(tref, typedArgs |> List.map snd, []) }
 
     | EApp(target, args, r) ->
         let targetType, typedTarget = infer env target
@@ -943,6 +1296,11 @@ let rec checkDecl (env: Env) (sigs: Map<string, HMType * FType option * (string 
         | Some (sigType, _, _) -> unify env.Registry exprType sigType
         | None -> ()
 
+        // Trait obligations are discharged before generalization: a scheme must
+        // not be built over a constructor that resolution would still have
+        // pinned down.
+        solvePending env
+
         let newEnv =
             addBinding
                 name
@@ -1087,6 +1445,8 @@ let rec checkDecl (env: Env) (sigs: Map<string, HMType * FType option * (string 
                 (typedArgs @ [kwName, kwType, typedDefault], nextEnv)
             ) ([], envWithMandatory)
 
+        solvePending env
+
         let scheme = generalize env funType
         let (Scheme(vars, _, schemeType)) = scheme
 
@@ -1119,6 +1479,7 @@ let rec checkDecl (env: Env) (sigs: Map<string, HMType * FType option * (string 
         let exprType, typedExpr = infer env expr
         let elementMetas = names |> List.map (fun _ -> freshMeta ())
         unify env.Registry exprType (TTuple elementMetas)
+        solvePending env
 
         let newEnv =
             List.zip names elementMetas
@@ -1140,6 +1501,8 @@ let rec checkDecl (env: Env) (sigs: Map<string, HMType * FType option * (string 
         | Some (sigType, _, _) -> unify env.Registry exprType sigType
         | None -> ()
 
+        solvePending env
+
         let newEnv =
             addBinding
                 name
@@ -1150,8 +1513,10 @@ let rec checkDecl (env: Env) (sigs: Map<string, HMType * FType option * (string 
         newEnv, Map.remove name sigs, [ TDefMutable(name, typedExpr, exprType, r) ]
 
     | DModule(moduleName, decls, r) ->
-        let finalEnv, finalSigs, typedDecls = checkDeclGroup env sigs decls
-        finalEnv, finalSigs, [ TModule(moduleName, typedDecls, r) ]
+        let finalEnv, finalSigs, typedDecls =
+            checkDeclGroup { env with CurrentModule = moduleName } sigs decls
+
+        { finalEnv with CurrentModule = env.CurrentModule }, finalSigs, [ TModule(moduleName, typedDecls, r) ]
 
     | DImport(paths, r) -> env, sigs, [ TImport(paths, r) ]
     | DExport(names, r) -> env, sigs, [ TExport(names, r) ]
@@ -1181,20 +1546,84 @@ let rec checkDecl (env: Env) (sigs: Map<string, HMType * FType option * (string 
                 { TraitName = traitName; TargetType = TVar varName })
         let schemeWithConstraints = Scheme(vars, constraints, schemeType)
         let newEnv = { env with Bindings = Map.add name { Scheme = schemeWithConstraints; IsMutable = false } env.Bindings }
+
+        // Keyword and rest metadata travels with an imported signature too.
+        // Without it a call that passes a keyword argument, or omits an optional
+        // one, has nothing to resolve against, and the flat function type
+        // refuses to unify with the shorter argument list the caller wrote.
+        let newEnv =
+            match ftype with
+            | TArrow(mandatory, keywords, restOpt, _, _) ->
+                let funMeta =
+                    { MandatoryCount = mandatory.Length
+                      KeywordParams =
+                        keywords |> List.map (fun (n, ft) -> n, resolveTypeAnnotation env.Registry ft)
+                      RestParam = restOpt |> Option.map (resolveTypeAnnotation env.Registry) }
+
+                { newEnv with FunMetas = Map.add name funMeta newEnv.FunMetas }
+            | _ -> newEnv
+
         newEnv, sigs, [ TExtern(name, ftype, r) ]
 
-    | DTrait(traitName, implementorVar, assocTypes, signatures, r) ->
+    | DTrait(traitName, implementorVar, holeArity, assocTypes, signatures, r) ->
+        // The kind is derived, not declared: an implementor written applied to
+        // arguments cannot be an interface, because there is no C# interface
+        // that abstracts over a type constructor.
+        let kind = if holeArity > 0 then InlineTrait else InterfaceTrait
+
         let hmSignatures =
-            signatures
-            |> List.map (fun (name, fType) -> name, resolveTypeAnnotation env.Registry fType)
-            |> Map.ofList
+            match kind with
+            | InterfaceTrait ->
+                signatures
+                |> List.map (fun (name, fType) -> name, resolveTypeAnnotation env.Registry fType)
+                |> Map.ofList
+            | InlineTrait -> Map.empty
+
+        let templates =
+            match kind with
+            | InterfaceTrait -> Map.empty
+            | InlineTrait ->
+                signatures
+                |> List.map (fun (name, fType) -> name, resolveTemplate env.Registry implementorVar fType)
+                |> Map.ofList
+
+        if kind = InlineTrait && not assocTypes.IsEmpty then
+            failwithf
+                $"Type Error at %s{Lexer.formatPos r}: trait '%s{traitName}' applies its implementor, so it is inline-only and cannot declare associated types. An inline trait's methods may be generic in their own right instead."
 
         let traitInfo =
             { ImplementorVar = implementorVar
               AssociatedTypes = assocTypes
-              Signatures = hmSignatures }
+              Signatures = hmSignatures
+              Kind = kind
+              HoleArity = holeArity
+              Templates = templates }
 
         let newEnv = addTrait traitName traitInfo env
+
+        // Whatever the kind, the method names are recorded so that `infer` can
+        // recognize them in application position without searching every trait.
+        let methodNames = signatures |> List.map fst
+
+        // A method name identifies its trait, and that is the *only* thing that
+        // can: nothing at a call site says which trait `pure` came from. Two
+        // traits claiming one name is therefore not ambiguity to be resolved
+        // later but a program with no meaning, and it has to be rejected here
+        // rather than silently dispatched to whichever was registered last.
+        for m in methodNames do
+            match Map.tryFind m newEnv.Registry.TraitMethods with
+            | Some owner when owner <> traitName ->
+                failwithf
+                    $"Type Error at %s{Lexer.formatPos r}: trait '%s{traitName}' declares a method '%s{m}', but '%s{owner}' already does. A call site says nothing about which trait a method name belongs to, so the two are indistinguishable. Rename one of them."
+            | _ -> ()
+
+        let newEnv =
+            { newEnv with
+                Registry =
+                    { newEnv.Registry with
+                        TraitMethods =
+                            methodNames
+                            |> List.fold (fun acc m -> Map.add m traitName acc) newEnv.Registry.TraitMethods } }
 
         let assocSubst = 
             assocTypes 
@@ -1202,20 +1631,25 @@ let rec checkDecl (env: Env) (sigs: Map<string, HMType * FType option * (string 
                 "'" + assocName, TAssoc(traitName, assocName, TVar ("'" + implementorVar)))
             |> Map.ofList
 
+        // An inline trait's methods are deliberately *not* bound into
+        // `env.Bindings`. There is no single scheme they could be bound under —
+        // `m` appears applied to two different arguments in `bind` — and a
+        // weaker stand-in would be worse than nothing.
         let mutable finalEnv = newEnv
-        for kvp in hmSignatures do
-            let methodTypeWithAssoc = applyTypeSubst assocSubst kvp.Value
-            // Collect ALL free type variables from the method signature.
-            // The implementor var is always first; any additional vars (like 'acc)
-            // are method-level generics that must also be quantified.
-            let methodVars = freeTVars env.Registry methodTypeWithAssoc |> List.distinct
-            let implVar = "'" + implementorVar
-            let allVars = implVar :: (methodVars |> List.filter ((<>) implVar))
-            let scheme = Scheme(allVars, [], methodTypeWithAssoc)
-            finalEnv <- addBinding kvp.Key { Scheme = scheme; IsMutable = false } finalEnv
 
-        // TDecl representation requires a TTrait node definition in your AST
-        finalEnv, sigs, [ TTrait(traitName, implementorVar, assocTypes, hmSignatures, r) ]
+        if kind = InterfaceTrait then
+            for kvp in hmSignatures do
+                let methodTypeWithAssoc = applyTypeSubst assocSubst kvp.Value
+                // Collect ALL free type variables from the method signature.
+                // The implementor var is always first; any additional vars (like 'acc)
+                // are method-level generics that must also be quantified.
+                let methodVars = freeTVars env.Registry methodTypeWithAssoc |> List.distinct
+                let implVar = "'" + implementorVar
+                let allVars = implVar :: (methodVars |> List.filter ((<>) implVar))
+                let scheme = Scheme(allVars, [], methodTypeWithAssoc)
+                finalEnv <- addBinding kvp.Key { Scheme = scheme; IsMutable = false } finalEnv
+
+        finalEnv, sigs, [ TTrait(traitName, implementorVar, kind, holeArity, assocTypes, hmSignatures, r) ]
     | DTypeRec(typeDefs, r) -> registerTypeDefs true typeDefs env, sigs, [ TTypeRec(typeDefs, r) ]
     | DImpl(traitName, targetTypeExpr, assocBindings, methods, r) ->
         let targetType = resolveTypeAnnotation env.Registry targetTypeExpr
@@ -1237,8 +1671,14 @@ let rec checkDecl (env: Env) (sigs: Map<string, HMType * FType option * (string 
             |> List.map (fun (name, fType) -> name, resolveTypeAnnotation env.Registry fType)
 
         let hmAssocBindingsMap = Map.ofList hmAssocBindings
-        let regEnv = addImplementation traitName typeKey targetType hmAssocBindingsMap env
-        let traitInfo = Map.find traitName regEnv.Registry.Traits
+
+        let traitInfo =
+            match Map.tryFind traitName env.Registry.Traits with
+            | Some info -> info
+            | None -> failwithf $"Unknown trait '%s{traitName}' at %s{Lexer.formatPos r}"
+
+        let implTarget = implTargetOf traitName traitInfo targetType r
+        let regEnv = addImplementation traitName typeKey targetType implTarget hmAssocBindingsMap env
 
         // FIX 1: Prepend the "'" to the substitution keys so they match TVar "'c"
         let mutable substitutions = Map.add ("'" + traitInfo.ImplementorVar) targetType Map.empty
@@ -1263,12 +1703,25 @@ let rec checkDecl (env: Env) (sigs: Map<string, HMType * FType option * (string 
             |> List.map (fun methodDecl ->
                 match methodDecl with
                 | DDefun(name, args, body, methodRange) ->
+                    // The definition-site check. Checking each body against the
+                    // trait's own signature, instantiated at *this* impl, is what
+                    // keeps errors out of the instantiation sites: an inline
+                    // method that does not match its trait is rejected here,
+                    // once, rather than at every place it is later spliced.
                     let expectedSignature =
-                        match Map.tryFind name traitInfo.Signatures with
-                        | Some sigType -> applySubst sigType
-                        | None ->
-                            failwithf
-                                $"Method '%s{name}' is not a member of trait '%s{traitName}' at line %d{methodRange.Start.Line}"
+                        match traitInfo.Kind with
+                        | InlineTrait ->
+                            match Map.tryFind name traitInfo.Templates with
+                            | Some tpl -> instantiateTemplate implTarget tpl
+                            | None ->
+                                failwithf
+                                    $"Method '%s{name}' is not a member of trait '%s{traitName}' at line %d{methodRange.Start.Line}"
+                        | InterfaceTrait ->
+                            match Map.tryFind name traitInfo.Signatures with
+                            | Some sigType -> applySubst sigType
+                            | None ->
+                                failwithf
+                                    $"Method '%s{name}' is not a member of trait '%s{traitName}' at line %d{methodRange.Start.Line}"
 
                     // After substituting the implementor var and associated types,
                     // the signature may still contain TVars from two sources:
@@ -1276,7 +1729,16 @@ let rec checkDecl (env: Env) (sigs: Map<string, HMType * FType option * (string 
                     //      → These must stay as rigid TVars so they match the class params.
                     //   2. Method-level generics (like 'acc in fold's signature)
                     //      → These must be instantiated to fresh metas.
-                    let classLevelVars = freeTVars regEnv.Registry targetType |> Set.ofList
+                    //
+                    // An inline trait's class-level parameters are only the
+                    // impl's *fixed prefix*: the arguments the constructor
+                    // variable abstracts over belong to the method, and `bind`'s
+                    // own `'b` is a method-level generic that has to reach C# as
+                    // a generic method parameter.
+                    let classLevelVars =
+                        match traitInfo.Kind with
+                        | InlineTrait -> implTarget.FixedPrefix |> List.collect typeVarsOf |> Set.ofList
+                        | InterfaceTrait -> freeTVars regEnv.Registry targetType |> Set.ofList
                     let remainingVars = freeTVars regEnv.Registry expectedSignature |> List.distinct
                     let freshSubst =
                         remainingVars
@@ -1296,7 +1758,12 @@ let rec checkDecl (env: Env) (sigs: Map<string, HMType * FType option * (string 
                 | _ -> failwithf $"Only 'defun' declarations are allowed inside 'def/impl' at %s{Lexer.formatPos r}")
 
         // Ensure all required methods from the trait are implemented
-        for requiredMethod in traitInfo.Signatures.Keys do
+        let requiredMethods =
+            match traitInfo.Kind with
+            | InlineTrait -> traitInfo.Templates |> Map.toList |> List.map fst
+            | InterfaceTrait -> traitInfo.Signatures |> Map.toList |> List.map fst
+
+        for requiredMethod in requiredMethods do
             let isImplemented =
                 methods
                 |> List.exists (function
@@ -1308,7 +1775,69 @@ let rec checkDecl (env: Env) (sigs: Map<string, HMType * FType option * (string 
                     "Implementation of trait '%s' is missing required method '%s' at line %d"
                     traitName requiredMethod r.Start.Line
 
-        regEnv, sigs, [ TImpl(traitName, targetType, hmAssocBindings, typedMethods, r) ]
+        // Register every method as an inline template — interface traits
+        // included. A statically resolvable call is inlined whatever the kind of
+        // trait it belongs to; the difference is only that an interface trait
+        // also keeps its dictionary path for the generic case.
+        //
+        // The body stored is the untyped one. Re-inferring it at the splice is
+        // what lets it take a type the trait signature could not express, and a
+        // typed AST is not serializable anyway: `HMType` is full of mutable
+        // metavariable cells.
+        let finalEnv =
+            methods
+            |> List.fold
+                (fun acc methodDecl ->
+                    match methodDecl with
+                    | DDefun(name, defunArgs, body, _) ->
+                        let paramNames =
+                            defunArgs |> List.choose (function MandatoryArg n -> Some n | _ -> None)
+
+                        // Keyword and rest parameters would have to survive the
+                        // splice as a calling convention, which a spliced body
+                        // has no call to carry. Such a method simply is not
+                        // inlineable; the landing pad still is.
+                        let inlineable =
+                            defunArgs |> List.forall (function MandatoryArg _ -> true | _ -> false)
+
+                        if inlineable then
+                            addInlineTemplate
+                                traitName
+                                name
+                                implTarget.Ctor
+                                { Params = paramNames
+                                  Body = body
+                                  // Filled in after inference, where a
+                                  // name-to-module map exists.
+                                  Qualification = Map.empty
+                                  OriginModule = acc.CurrentModule }
+                                acc
+                        else
+                            acc
+                    | _ -> acc)
+                regEnv
+
+        finalEnv,
+        sigs,
+        [ TImpl(traitName, traitInfo.Kind, traitInfo.HoleArity, targetType, hmAssocBindings, typedMethods, r) ]
+
+    | DInlineImpl(traitName, methodName, ctor, originModule, parameters, body, qualification, r) ->
+        // An inline template read back from a compiled module's metadata. Like
+        // `DImplExtern` there is nothing to check and nothing to emit: the
+        // landing pad is already compiled into the assembly that declared it,
+        // and this is only the body to splice instead of calling it.
+        let env =
+            addInlineTemplate
+                traitName
+                methodName
+                ctor
+                { Params = parameters
+                  Body = body
+                  Qualification = Map.ofList qualification
+                  OriginModule = originModule }
+                env
+
+        env, sigs, []
 
     | DImplExtern(traitName, targetTypeExpr, assocBindings, r) ->
         // A bodyless implementation, read back from a compiled module's
@@ -1322,16 +1851,19 @@ let rec checkDecl (env: Env) (sigs: Map<string, HMType * FType option * (string 
             | TCon(name, _) -> name
             | _ -> failwithf $"Trait implementations require concrete target types at %s{Lexer.formatPos r}"
 
-        if not (Map.containsKey traitName env.Registry.Traits) then
-            failwithf
-                $"Unknown trait '%s{traitName}' in imported implementation at %s{Lexer.formatPos r}"
+        let traitInfo =
+            match Map.tryFind traitName env.Registry.Traits with
+            | Some info -> info
+            | None ->
+                failwithf $"Unknown trait '%s{traitName}' in imported implementation at %s{Lexer.formatPos r}"
 
         let hmAssocBindings =
             assocBindings
             |> List.map (fun (name, fType) -> name, resolveTypeAnnotation env.Registry fType)
             |> Map.ofList
 
-        addImplementation traitName typeKey targetType hmAssocBindings env, sigs, []
+        let implTarget = implTargetOf traitName traitInfo targetType r
+        addImplementation traitName typeKey targetType implTarget hmAssocBindings env, sigs, []
 
 /// Type-checks a group of declarations that share a signature scope: a module
 /// body, or a whole program.
@@ -1352,19 +1884,31 @@ and private checkDeclGroup
         |> List.collect (function
             | DSignature(name, ftype, constraints, _) -> 
                 [name, (resolveTypeAnnotation env.Registry ftype, Some ftype, constraints)]
-            | DTrait(_, _, _, signatures, _) ->
+            // An inline trait's signatures are not `HMType`s and never can be:
+            // they mention the constructor variable applied. They are read as
+            // templates by `DTrait` instead, and there is nothing to inject here.
+            | DTrait(_, _, holeArity, _, signatures, _) when holeArity = 0 ->
                 signatures
                 |> List.map (fun (name, ftype) ->
                     name, (resolveTypeAnnotation env.Registry ftype, Some ftype, []))
             | _ -> [])
         |> Map.ofList
 
+    /// A trait method's signature comes from its `def/trait`, whichever kind of
+    /// trait that is, so exporting one is never missing a signature.
+    let traitMethodNames =
+        decls
+        |> List.collect (function
+            | DTrait(_, _, _, _, signatures, _) -> signatures |> List.map fst
+            | _ -> [])
+        |> Set.ofList
+
     // 2. Validate exports against collected signatures
     decls
     |> List.iter (function
         | DExport(names, exprRange) ->
             for name in names do
-                if not (Map.containsKey name explicitSigs) then
+                if not (Map.containsKey name explicitSigs || Set.contains name traitMethodNames) then
                     failwithf "Export Error: Exported item '%s' is missing a mandatory type signature at %s" name (Lexer.formatPos exprRange)
         | _ -> ())
 
@@ -1449,4 +1993,7 @@ and private checkDeclGroup
 /// rather than assumed to be wrapped, so a bare list type-checks the same way.
 let checkProgram (initialEnv: Env) (program: Decl list) : Env * TDecl list =
     let finalEnv, _, typedDecls = checkDeclGroup initialEnv Map.empty program
+    // Anything raised outside a declaration that generalizes still has to be
+    // answered for.
+    solvePending finalEnv
     finalEnv, typedDecls

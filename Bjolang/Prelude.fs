@@ -16,7 +16,10 @@ let emptyRegistry : TraitRegistry =
     { LocalTraits = Set.empty
       LocalTypes = Set.ofList ["List"; "Vec"; "VecBuilder"; "Seq"; "Option"]
       Traits = Map.empty
+      TraitMethods = Map.empty
       Implementations = Map.empty
+      ImplTargets = Map.empty
+      InlineMethods = Map.empty
       Aliases = Map.empty
       Records = Map.empty
       RecordFields = Map.empty }
@@ -160,4 +163,5 @@ let prelude : Env =
         ("vecbuilder->vec", {Scheme = Scheme(["a"], [], makeFunType [makeVecBuilderType (TVar "a")] (makeVecType (TVar "a"))); IsMutable = false })
       ]
       Registry = emptyRegistry
-      FunMetas = Map.empty }
+      FunMetas = Map.empty
+      CurrentModule = "" }
