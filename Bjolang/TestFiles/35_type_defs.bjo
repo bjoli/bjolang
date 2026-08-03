@@ -1,0 +1,32 @@
+(import (std prelude))
+
+(type
+  (: Color (Enum Red Green Blue))
+  (: Fruit (Record
+            (: Peel? bool)
+            (: Colour Color)))
+  (: UserId string)
+  (: (MyOption %a) (Union MyNone (MySome %a))))
+
+(: color->str (-> Color string))
+(defun (color->str c)
+  (match c
+    (Red "red")
+    (Green "green")
+    (Blue "blue")))
+
+(: opt->str (-> (MyOption int) string))
+(defun (opt->str o)
+  (match o
+    (MyNone "none")
+    ((MySome v) (int->string v))))
+
+(defun (main)
+  (def banana (record (Peel? #t) (Colour Green)))
+  (def uid "user_123")
+  (println (color->str (record-get banana Colour)))
+  (println uid)
+  (println (opt->str MyNone))
+  (println (opt->str (MySome 42)))
+  0)
+

@@ -984,7 +984,7 @@ and private generateApply
                 append ctx (sanitizeIdent methodPart)
             else
                 append ctx (qualifiedName ctx name)
-                if not tArgs.IsEmpty && args.IsEmpty && kwArgs.IsEmpty then
+                if not tArgs.IsEmpty && (args.IsEmpty || name = "make-array" || name = "makesubarray") && kwArgs.IsEmpty then
                     let tyArgsStr = tArgs |> List.map typeToString |> String.concat ", "
                     append ctx $"<%s{tyArgsStr}>"
         | TLambda _ ->

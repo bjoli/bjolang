@@ -12,10 +12,12 @@ let makeListType a = TCon("List", [a])
 let makeSeqType a = TCon("Seq", [a])
 let makeOptionType a = TCon("Option", [a])
 let makeMapType k v = TCon("Map", [k; v])
+let makeArrayType a = TCon("Array", [a])
+
 
 let emptyRegistry : TraitRegistry =
     { LocalTraits = Set.empty
-      LocalTypes = Set.ofList ["List"; "Vec"; "VecBuilder"; "Seq"; "Option"; "Map"; "Keyword"; "Symbol"]
+      LocalTypes = Set.ofList ["List"; "Vec"; "VecBuilder"; "Seq"; "Option"; "Map"; "Keyword"; "Symbol"; "Array"]
       Traits = Map.empty
       TraitMethods = Map.empty
       Implementations = Map.empty
@@ -126,6 +128,14 @@ let prelude : Env =
         ("vec-count", {Scheme = Scheme(["a"], [], makeFunType [makeVecType (TVar "a")] intType); IsMutable = false })
         ("vec-contains", {Scheme = Scheme(["a"], [], makeFunType [makeVecType (TVar "a"); TVar "a"] boolType); IsMutable = false })
         ("vec-compact", {Scheme = Scheme(["a"], [], makeFunType [makeVecType (TVar "a")] (makeVecType (TVar "a"))); IsMutable = false })
+
+        // Array
+        // Array operations
+        ("make-array",   { Scheme = Scheme(["a"], [], makeFunType [intType] (makeArrayType (TVar "a"))); IsMutable = false })
+        ("array-ref",    { Scheme = Scheme(["a"], [], makeFunType [makeArrayType (TVar "a"); intType] (TVar "a")); IsMutable = false })
+        ("array-set!",   { Scheme = Scheme(["a"], [], makeFunType [makeArrayType (TVar "a"); intType; TVar "a"] voidType); IsMutable = false })
+        ("array-length", { Scheme = Scheme(["a"], [], makeFunType [makeArrayType (TVar "a")] intType); IsMutable = false })
+
 
         // Option
         ("Some", {Scheme = Scheme(["a"], [], makeFunType [TVar "a"] (makeOptionType (TVar "a"))); IsMutable = false })

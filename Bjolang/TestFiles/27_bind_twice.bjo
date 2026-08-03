@@ -11,8 +11,7 @@
   (: pure (-> %a (%m %a)))
   (: bind (-> (%m %a) (-> %a (%m %b)) (%m %b))))
 
-;; Two values at once — the continuation has to run on each of them.
-(type ((Duo %a) (: MkDuo %a %a)))
+(type (: (Duo %a) (Union (MkDuo %a %a))))
 
 (def/impl (Monad (Duo %a))
   (defun (pure x) (MkDuo x x))

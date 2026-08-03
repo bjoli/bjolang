@@ -258,15 +258,16 @@ let main argv =
                     let serializeTypeDef (td: Parser.TypeDef, isRec: bool) : string =
                         let quotedArgs = td.TypeArgs |> List.map (fun a -> if a.StartsWith("'") then a else "'" + a)
                         let typeArgsStr = if td.TypeArgs.IsEmpty then "" else " " + String.concat " " quotedArgs
+                        let headStr = if td.TypeArgs.IsEmpty then td.Name else $"({td.Name}{typeArgsStr})"
+                        let head = if isRec then "type-rec" else "type"
                         match td.Kind with
-                        | Parser.Alias(ft) -> $"(type ({td.Name}{typeArgsStr}) {serializeFType ft})"
+                        | Parser.Alias(ft) -> $"({head} (: {headStr} {serializeFType ft}))"
                         | Parser.Union(cases) ->
                             let serializeCase c =
                                 match c with
                                 | Parser.SimpleCase(n, _) -> n
-                                | Parser.DataCase(n, args, _) -> $"(: {n} " + String.concat " " (List.map serializeFType args) + ")"
-                            let head = if isRec then "type-rec" else "type"
-                            $"({head} (({td.Name}{typeArgsStr})\n  " + String.concat "\n  " (List.map serializeCase cases) + "))"
+                                | Parser.DataCase(n, args, _) -> $"({n} " + String.concat " " (List.map serializeFType args) + ")"
+                            $"({head} (: {headStr} (Union\n  " + String.concat "\n  " (List.map serializeCase cases) + ")))"
                         | Parser.Record(fields) -> "" // Ignore for now
                         
                     // A trait method is published by its `def/trait`, which

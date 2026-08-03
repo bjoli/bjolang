@@ -12,7 +12,7 @@
   (defun (fmap o g)
     (match o ((Some v) (Some (g v))) (None None))))
 
-(type ((Pair %a) (: MkPair %a %a)))
+(type (: (Pair %a) (Union (MkPair %a %a))))
 
 (def/impl (Functor (Pair %a))
   (defun (fmap p g)

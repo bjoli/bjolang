@@ -15,9 +15,10 @@
 ;; Two type arguments, only the last of which the trait abstracts over. `%e` is
 ;; fixed by the impl and becomes a *class* type parameter; `%a` and `bind`'s own
 ;; `%b` become method type parameters.
-(type ((Result %e %a)
-  (: Ok %a)
-  (: Err %e)))
+(type
+  (: (Result %e %a) (Union
+    (Ok %a)
+    (Err %e))))
 
 (def/impl (Monad (Result %e %a))
   (defun (pure x) (Ok x))

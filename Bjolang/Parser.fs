@@ -239,7 +239,8 @@ let parseUnionCase (s: SExpr) : UnionCase =
 
     match s with
     | SAtom { Token = Symbol name } -> SimpleCase(name, r)
-    | SList(SAtom { Token = Colon } :: SAtom { Token = Symbol name } :: tTypes, _) -> DataCase(name, List.map parseType tTypes, r)
+    | SList([ SAtom { Token = Symbol name } ], _) -> SimpleCase(name, r)
+    | SList(SAtom { Token = Symbol name } :: tTypes, _) -> DataCase(name, List.map parseType tTypes, r)
     | _ ->
         printfn $"%A{s}"
         failwithf $"Invalid union case at line %d{r.Start.Line}"
@@ -279,17 +280,32 @@ let parseTypeDef (s: SExpr) : TypeDef =
           TypeArgs = typeArgs
           Kind = Record(List.map parseRecordField fields)
           Range = r }
-    | SList([ SAtom { Token = Colon }; head; aliasType ], _) ->
+    // `Union`, `Enum`, and `Sum` are accepted tags for sum types.
+    | SList([ SAtom { Token = Colon }
+              head
+              SList(SAtom { Token = Symbol("Union" | "Enum" | "Sum") } :: cases, _) ],
+            _) ->
+        let name, typeArgs = parseTypeDefHead head
+        { Name = name
+          TypeArgs = typeArgs
+          Kind = Union(List.map parseUnionCase cases)
+          Range = r }
+    // Explicit Alias: (: head (Alias aliasType))
+    | SList([ SAtom { Token = Colon }
+              head
+              SList([ SAtom { Token = Symbol "Alias" }; aliasType ], _) ],
+            _) ->
         let name, typeArgs = parseTypeDefHead head
         { Name = name
           TypeArgs = typeArgs
           Kind = Alias(parseType aliasType)
           Range = r }
-    | SList(head :: cases, _) ->
+    // Implicit Alias: (: head aliasType)
+    | SList([ SAtom { Token = Colon }; head; aliasType ], _) ->
         let name, typeArgs = parseTypeDefHead head
         { Name = name
           TypeArgs = typeArgs
-          Kind = Union(List.map parseUnionCase cases)
+          Kind = Alias(parseType aliasType)
           Range = r }
     | _ -> failwithf $"Invalid type definition at line %d{r.Start.Line}"
 

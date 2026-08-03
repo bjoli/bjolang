@@ -11,7 +11,9 @@ It also fakes Brand types by inlining traits when the trait in known at compile 
 
 For concurrency I will integrate a concurrentML because I made this language and async is no fun
 
-Loop facility based on goof-loop for guile scheme.
+Loop facility based on goof-loop for guile scheme, because I made it and it is better than what most other languages have.
+
+No magic f#-esque record inference. Records will have named constructors.
 
 * Limitations
 
@@ -64,7 +66,7 @@ Tail recursion does not work except for self recursion (including named lets) an
 
 * Examples
 *** Traits
-Bjolang has traits. Traits can be regular traits, which means they are usable on concrete types (fast calls) or in dynamic contexts (as fast as C# Interfaces).
+Bjolang has traits. Traits can be regular traits, which means they are usable on concrete types (fast calls) or in dynamic contexts (as fast as C# Interfaces). There are also inlinable traits. These are traits that only work when the type is known at compile time, and are inlined at the call site. This is because c# cannot represent something like the Monad trait with interfaces. Inlining solves this. These traits are painfully monomorphic.
 
 #+begin_src scheme
 ;; The simplest kind of trait is something like a trait that turns anything into a string:
@@ -99,21 +101,21 @@ Bjolang has traits. Traits can be regular traits, which means they are usable on
 
 ;; This is a "fake hkt" trait: it only works when types are know at compile time and in monomorphic functions.
 (def/trait (Functor (%f %a))
-  (: fmap (-> (%f %a) (-> %a %b) (%f %b))))
+  (: fmap (-> (-> %a %b) (%f %a)  (%f %b))))
 
 (def/impl (Functor (List %a))
-  (defun (fmap xs g) (list-map xs g)))
+  (defun (fmap g xs) (list-map g xs))) 
 
 (def/impl (Functor (Option %a))
-  (defun (fmap o g)
+  (defun (fmap g o)
     (match o ((Some v) (Some (g v))) (None None))))
 
 (defun (main args)
   (def a-list '(1 2 3 4))
   (def an-option (Option 5))
   ;; these both work
-  (def b (fmap (fun (arg) (+ arg 1)) a-list))
-  (def c (fmap (fun (arg) (+ arg 1)) an-option))
+  (def b (fmap #(+ &1 1) a-list))
+  (def c (fmap #(+ &1 1) an-option))
 
   (defun (bump bomp)
     (fmap (fun (arg) (+ arg 1)) bomp))
@@ -144,7 +146,7 @@ Bjolang has traits. Traits can be regular traits, which means they are usable on
 
  The Vec type is an RRB vector. It compares favourably to the immutable vectors of clojure an  scala.
 
- The Map is a CHAMP that has transient operations and a builder. It compares favourable to the immutable map in c# or the hash map in language ext, but it also uses unsafe functions.
+ The Map is a CHAMP that has transient operations and a builder. It compares favourably to the immutable map in c# or the hash map in language ext.
 
  #+begin_src scheme
 (defun (main args)
@@ -154,3 +156,49 @@ Bjolang has traits. Traits can be regular traits, which means they are usable on
   (println (map-count a-map)) ;; 3
   
  #+end_src
+
+*** Keyword arguments
+Unlike f#, bjolang has keyword arguments (but no optargs!):
+
+#+begin_src scheme
+(: key-fun (-> Int (#:what string) Void))
+(defun (key-fun times #:what (string-append "ban" "ana"))
+  (let loop ((times times))
+    (when (> times 0)
+      (println what)
+      (loop (- times 1)))))
+
+(key-fun 100) ;; prints "banana\n" 100 times
+(key-fun 10 #:what "orange") ;; prints "orange\n" 10 times
+#+end_src
+
+This is currently less efficient than non-kw functions, because every function call checks what was provided and re-evaluates the default argument expressions.
+
+*** Structs and records
+Have the same syntax. This is a record example:
+
+#+begin_src scheme
+(type
+ (: Colors (Enum Red Green Brown Golden))
+ (: Fruit (Record
+           (: name String)
+           (: has-peel? Bool)
+           (: colour Colors))))
+ 
+(def banana (Fruit (name "banana") (has-peel? #t) (colour Golden)))
+(def megaripe-banana (record-set banana (colour Brown))
+
+#+end_src
+
+*** Pattern matching
+#+begin_src scheme
+(match operation
+  ((Some 5) (println "it returned 5!!!"))
+  ((Some a) (print "It returned ") (println a))
+  (None (println "something went wrong")))
+
+(match a-list
+  ((List 1 2 3) 1)
+  ((List 1 2 _) 2)
+  ((List a b c) (+ a (+ b c)))
+#+end_src
