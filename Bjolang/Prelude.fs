@@ -15,7 +15,7 @@ let makeMapType k v = TCon("Map", [k; v])
 
 let emptyRegistry : TraitRegistry =
     { LocalTraits = Set.empty
-      LocalTypes = Set.ofList ["List"; "Vec"; "VecBuilder"; "Seq"; "Option"; "Map"]
+      LocalTypes = Set.ofList ["List"; "Vec"; "VecBuilder"; "Seq"; "Option"; "Map"; "Keyword"; "Symbol"]
       Traits = Map.empty
       TraitMethods = Map.empty
       Implementations = Map.empty
@@ -71,6 +71,14 @@ let prelude : Env =
         ("int->string", {Scheme = Scheme([], [], makeFunType [intType] stringType); IsMutable = false })
         ("string->int", {Scheme = Scheme([], [], makeFunType [stringType] intType); IsMutable = false })
         ("string->double", {Scheme = Scheme([], [], makeFunType [stringType] doubleType); IsMutable = false })
+
+        // Keyword & Symbol conversions / predicates
+        ("keyword->string", {Scheme = Scheme([], [], makeFunType [keywordType] stringType); IsMutable = false })
+        ("string->keyword", {Scheme = Scheme([], [], makeFunType [stringType] keywordType); IsMutable = false })
+        ("symbol->string", {Scheme = Scheme([], [], makeFunType [symbolType] stringType); IsMutable = false })
+        ("string->symbol", {Scheme = Scheme([], [], makeFunType [stringType] symbolType); IsMutable = false })
+        ("keyword?", {Scheme = Scheme(["a"], [], makeFunType [TVar "a"] boolType); IsMutable = false })
+        ("symbol?", {Scheme = Scheme(["a"], [], makeFunType [TVar "a"] boolType); IsMutable = false })
 
         // List constructors (builtins backed by SchemeList)
         ("Cons", {Scheme = Scheme(["a"], [], makeFunType [TVar "a"; makeListType (TVar "a")] (makeListType (TVar "a"))); IsMutable = false })

@@ -94,6 +94,8 @@ let mapPrimitiveType (name: string) =
     | "Seq" -> "System.Collections.Generic.IEnumerable"
     | "Option" -> "BjolangRuntime.Option"
     | "Map" -> "Map.Map"
+    | "Keyword" | "Bjolang.Keyword" -> "BjolangRuntime.Keyword"
+    | "Symbol" | "Bjolang.Symbol" -> "BjolangRuntime.Symbol"
     | _ -> name
 
 // Promoted to `Bjolang.Naming`, which the passes that run before code
@@ -302,6 +304,8 @@ let rec serializePattern (p: Parser.Pattern) : string =
     | Parser.PIdent(n, _) -> n
     | Parser.PInt(v, _) -> v
     | Parser.PString(v, _) -> "\"" + escapeSexpr v + "\""
+    | Parser.PKeyword(k, _) -> "#:" + k
+    | Parser.PQuotedSymbol(s, _) -> "'" + s
     // Always parenthesized, even with no arguments. A bare name reads back as a
     // constructor only when it happens to start with a capital, and that is not
     // something to rely on.
@@ -515,6 +519,8 @@ let rec generatePattern (ctx: CodegenContext) (pat: TypedPattern) : unit =
     | TPIdent name -> append ctx $"var {sanitizeIdent name}"
     | TPInt value -> append ctx value
     | TPString value -> append ctx $"\"%s{escapeStringLiteral value}\""
+    | TPKeyword k -> append ctx $"BjolangRuntime.Keyword {{ Name: \"{escapeStringLiteral k}\" }}"
+    | TPSymbol s -> append ctx $"BjolangRuntime.Symbol {{ Name: \"{escapeStringLiteral s}\" }}"
     // `Option` is the runtime's `Option<T>` struct — a flag and a value rather
     // than a pair of subclasses — so its constructors match as property
     // patterns. The type is left off: the scrutinee already has it, and a type
@@ -603,8 +609,8 @@ let rec generateExpr (ctx: CodegenContext) (expr: TypedExpr) : unit =
     match expr.Node with
     | TInt i -> append ctx i
     | TString s -> append ctx $"\"%s{escapeStringLiteral s}\""
-    | TKeyword k -> append ctx $"\"%s{k}\""
-    | TSymbol s -> append ctx $"\"%s{s}\""
+    | TKeyword k -> append ctx $"BjolangRuntime.Keyword.Intern(\"{escapeStringLiteral k}\")"
+    | TSymbol s -> append ctx $"BjolangRuntime.Symbol.Intern(\"{escapeStringLiteral s}\")"
     // A dictionary singleton: "Foldable_Vec::Instance" with the impl class's own
     // type arguments. `Lowering` produces these when it passes a dictionary to a
     // constrained function, and the class is generic whenever the implemented

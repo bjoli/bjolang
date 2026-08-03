@@ -48,7 +48,9 @@ let rec patternBinders (pat: Pattern) : string list =
     match pat with
     | PWildcard _
     | PInt _
-    | PString _ -> []
+    | PString _
+    | PKeyword _
+    | PQuotedSymbol _ -> []
     | PIdent(n, _) -> [ n ]
     | PList(items, tailOpt, _)
     | PVec(items, tailOpt, _) ->
@@ -259,7 +261,9 @@ let rec private typedPatternBinders (pat: TypedPattern) : string list =
     match pat.Node with
     | TPWildcard
     | TPInt _
-    | TPString _ -> []
+    | TPString _
+    | TPKeyword _
+    | TPSymbol _ -> []
     | TPIdent n -> [ n ]
     | TPList(items, tailOpt)
     | TPVec(items, tailOpt) ->

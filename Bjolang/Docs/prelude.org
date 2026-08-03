@@ -42,6 +42,16 @@ Standard polymorphic math operators (deferred to C# for resolution):
 - ~(double->string d)~
 - ~(string->int s)~
 - ~(string->double s)~
+- ~(keyword->string kw)~ : Returns the string name of a keyword.
+- ~(string->keyword s)~ : Interns a string as a ~Keyword~.
+- ~(symbol->string sym)~ : Returns the string name of a symbol.
+- ~(string->symbol s)~ : Interns a string as a ~Symbol~.
+
+** Keywords and Symbols
+Keywords (~:foo~ or ~#:foo~) and quoted symbols (~'foo~) are interned first-class types.
+- ~(keyword? x)~ : Returns true if ~x~ is a ~Keyword~.
+- ~(symbol? x)~ : Returns true if ~x~ is a ~Symbol~.
+- Keywords and symbols can be compared with ~(eq? a b)~ for $O(1)$ reference equality and used as map keys.
 
 ** Lists (~SchemeList~)
 Built-in functional linked lists.

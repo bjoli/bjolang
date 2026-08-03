@@ -150,6 +150,20 @@ let rec checkPattern (env: Env) (expectedType: HMType) (pat: Pattern) : TypedPat
           Range = r
           Node = TPString value },
         Map.empty
+    | PKeyword(value, r) ->
+        unify env.Registry expectedType TypeConstants.keywordType
+
+        { Type = TypeConstants.keywordType
+          Range = r
+          Node = TPKeyword value },
+        Map.empty
+    | PQuotedSymbol(value, r) ->
+        unify env.Registry expectedType TypeConstants.symbolType
+
+        { Type = TypeConstants.symbolType
+          Range = r
+          Node = TPSymbol value },
+        Map.empty
     | PConstruct(name, args, r) ->
         let binding = 
             match Map.tryFind name env.Bindings with
@@ -719,15 +733,26 @@ let rec infer (env: Env) (expr: Expr) : HMType * TypedExpr =
     | EApp(target, args, r) ->
         let targetType, typedTarget = infer env target
 
+        // Look up FunMeta if the target is a known identifier
+        let funMeta =
+            match target with
+            | EIdent(name, _) -> Map.tryFind name env.FunMetas
+            | _ -> None
+
+        let isDeclaredKw kwName =
+            match funMeta with
+            | Some meta -> meta.KeywordParams |> List.exists (fun (k, _) -> k = kwName)
+            | None -> false
+
         // Separate keyword args from positional args
-        // Keyword args appear as EKeyword("name") followed by a value expr
+        // Keyword args appear as EKeyword("name") followed by a value expr when matching a declared keyword parameter
         let rec splitArgs positional keywords remaining =
             match remaining with
             | [] -> List.rev positional, List.rev keywords
-            | EKeyword(kwName, _) :: value :: rest ->
+            | EKeyword(kwName, _) :: value :: rest when isDeclaredKw kwName ->
                 let valType, typedVal = infer env value
                 splitArgs positional ((kwName, (valType, typedVal)) :: keywords) rest
-            | EKeyword(kwName, kr) :: [] ->
+            | EKeyword(kwName, kr) :: [] when isDeclaredKw kwName ->
                 failwithf $"Keyword argument '#:%s{kwName}' is missing a value at line %d{kr.Start.Line}"
             | arg :: rest ->
                 let argType, typedArg = infer env arg
@@ -735,12 +760,6 @@ let rec infer (env: Env) (expr: Expr) : HMType * TypedExpr =
 
         let positionalArgs, keywordArgs = splitArgs [] [] args
         let retType = freshMeta ()
-
-        // Look up FunMeta if the target is a known identifier
-        let funMeta =
-            match target with
-            | EIdent(name, _) -> Map.tryFind name env.FunMetas
-            | _ -> None
 
         match funMeta with
         | Some meta when not keywordArgs.IsEmpty || meta.RestParam.IsSome || not meta.KeywordParams.IsEmpty ->
@@ -987,7 +1006,7 @@ let rec infer (env: Env) (expr: Expr) : HMType * TypedExpr =
           Node = TWhen(tCond, tBody, negated) }
 
     | EQuotedSymbol(sym, r) ->
-        let t = TCon("Bjolang.Symbol", [])
+        let t = TypeConstants.symbolType
 
         t,
         { Type = t
@@ -995,7 +1014,7 @@ let rec infer (env: Env) (expr: Expr) : HMType * TypedExpr =
           Node = TSymbol sym }
 
     | EKeyword(kw, r) ->
-        let t = TCon("Bjolang.Keyword", [])
+        let t = TypeConstants.keywordType
 
         t,
         { Type = t

@@ -1,5 +1,7 @@
 ;; std/core.bjo
-(export print println ->str)
+(export print println ->str bind pure)
+
+(include "Monad.protobjo")
 
 ;; Type to String Trait
 (def/trait (->str %a)
@@ -20,6 +22,12 @@
 
 (def/impl (->str long)
   (defun (->str n) (long->string n)))
+
+(def/impl (->str Keyword)
+  (defun (->str k) (keyword->string k)))
+
+(def/impl (->str Symbol)
+  (defun (->str s) (symbol->string s)))
 
 
 

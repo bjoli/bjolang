@@ -21,6 +21,8 @@ let mapPatternChildrenWith (f: TypedExpr -> TypedExpr) (fp: TypedPattern -> Type
         | TPWildcard
         | TPInt _
         | TPString _
+        | TPKeyword _
+        | TPSymbol _
         | TPIdent _ as leaf -> leaf
         | TPList(items, tailOpt) -> TPList(List.map fp items, Option.map fp tailOpt)
         | TPVec(items, tailOpt) -> TPVec(List.map fp items, Option.map fp tailOpt)

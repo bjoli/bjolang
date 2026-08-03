@@ -70,12 +70,18 @@ module TypeConstants =
     let UInt64Name = "System.UInt64"
     [<Literal>]
     let DoubleName = "System.Double"
+    [<Literal>]
+    let KeywordName = "Keyword"
+    [<Literal>]
+    let SymbolName = "Symbol"
 
     let intType = TCon(Int32Name, [])
     let stringType = TCon(StringName, [])
     let boolType = TCon(BooleanName, [])
     let voidType = TCon(VoidName, [])
     let objType = TCon(ObjectName, [])
+    let keywordType = TCon(KeywordName, [])
+    let symbolType = TCon(SymbolName, [])
     
     let byteType = TCon(ByteName, [])
     let shortType = TCon(Int16Name, [])
@@ -99,6 +105,8 @@ and TPatternNode =
     | TPWildcard
     | TPInt of string
     | TPString of string
+    | TPKeyword of string
+    | TPSymbol of string
     | TPIdent of string
     | TPList of TypedPattern list * TypedPattern option
     | TPVec of TypedPattern list * TypedPattern option

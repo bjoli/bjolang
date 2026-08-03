@@ -47,6 +47,8 @@ type Pattern =
     | PIdent of string * Range
     | PInt of string * Range
     | PString of string * Range
+    | PKeyword of string * Range
+    | PQuotedSymbol of string * Range
     | PList of Pattern list * Pattern option * Range // (items, optional tail, range)
     | PVec of Pattern list * Pattern option * Range // (items, optional tail, range)
     | PConstruct of string * Pattern list * Range
@@ -148,6 +150,8 @@ let rec parsePattern (s: SExpr) : Pattern =
         else PIdent(sym, r)
     | SAtom { Token = NumberLit n } -> PInt(n, r)
     | SAtom { Token = StringLit str } -> PString(str, r)
+    | SAtom { Token = Keyword kw } -> PKeyword(kw, r)
+    | SAtom { Token = QuotedSymbol sym } -> PQuotedSymbol(sym, r)
 
     // Special handling for List/Vec patterns and the spread operator
     | SList(SAtom { Token = Symbol "List" } :: args, _) ->

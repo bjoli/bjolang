@@ -17,7 +17,9 @@ let rec patternBoundNames (pat: Pattern) : string list =
     | PWildcard _ -> []
     | PIdent(name, _) -> [ name ]
     | PInt _
-    | PString _ -> []
+    | PString _
+    | PKeyword _
+    | PQuotedSymbol _ -> []
     | PList(items, tail, _)
     | PVec(items, tail, _) ->
         let itemNames = List.collect patternBoundNames items

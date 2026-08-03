@@ -536,5 +536,70 @@ public static class BjolangRuntime {
             yield return new ValueTuple<TK, TV>(kvp.Key, kvp.Value);
         }
     }
+
+    /// <summary>
+    /// An interned keyword. All instances of a keyword with the same name share the same reference.
+    /// </summary>
+    public sealed class Keyword : IEquatable<Keyword>, IComparable<Keyword> {
+        private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, Keyword> _table = new();
+
+        public string Name { get; }
+
+        private Keyword(string name) {
+            Name = name;
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public static Keyword Intern(string name) =>
+            _table.GetOrAdd(name, static n => new Keyword(n));
+
+        public bool Equals(Keyword? other) => ReferenceEquals(this, other);
+        public override bool Equals(object? obj) => ReferenceEquals(this, obj);
+        public override int GetHashCode() => RuntimeHelpers.GetHashCode(this);
+        public int CompareTo(Keyword? other) => string.CompareOrdinal(Name, other?.Name);
+        public override string ToString() => $":{Name}";
+    }
+
+    /// <summary>
+    /// An interned symbol. All instances of a symbol with the same name share the same reference.
+    /// </summary>
+    public sealed class Symbol : IEquatable<Symbol>, IComparable<Symbol> {
+        private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, Symbol> _table = new();
+
+        public string Name { get; }
+
+        private Symbol(string name) {
+            Name = name;
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public static Symbol Intern(string name) =>
+            _table.GetOrAdd(name, static n => new Symbol(n));
+
+        public bool Equals(Symbol? other) => ReferenceEquals(this, other);
+        public override bool Equals(object? obj) => ReferenceEquals(this, obj);
+        public override int GetHashCode() => RuntimeHelpers.GetHashCode(this);
+        public int CompareTo(Symbol? other) => string.CompareOrdinal(Name, other?.Name);
+        public override string ToString() => Name;
+    }
+
+    // --- Keyword & Symbol helpers ---
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static string keywordsubgtstring(Keyword k) => k.Name;
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static Keyword stringsubgtkeyword(string s) => Keyword.Intern(s);
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static string symbolsubgtstring(Symbol s) => s.Name;
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static Symbol stringsubgtsymbol(string s) => Symbol.Intern(s);
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static bool keyword_QMARK(object? o) => o is Keyword;
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static bool symbol_QMARK(object? o) => o is Symbol;
 }
 

@@ -97,12 +97,12 @@ Bjolang has traits. Traits can be regular traits, which means they are usable on
 ;; type for which Foldable is defined.
 (fold #(+ % 1) 0 '(1 2 3 4))
 
-;; This is a "fake hkt" trait: it only works when types are know at compile time.
+;; This is a "fake hkt" trait: it only works when types are know at compile time and in monomorphic functions.
 (def/trait (Functor (%f %a))
   (: fmap (-> (%f %a) (-> %a %b) (%f %b))))
 
 (def/impl (Functor (List %a))
-  (defun (fmap xs g) (list-map g xs)))
+  (defun (fmap xs g) (list-map xs g)))
 
 (def/impl (Functor (Option %a))
   (defun (fmap o g)
@@ -139,3 +139,18 @@ Bjolang has traits. Traits can be regular traits, which means they are usable on
       (:return (+ doubled third))))
 #+END_SRC
 
+*** Immutable base data structures
+ Bjolang's base data structures are all immutable and fast (yes, actually fast). These data structures are _not_ vibe coded like this project. Not only are they fast in their immutable versions, but they also have transient versions.
+
+ The Vec type is an RRB vector. It compares favourably to the immutable vectors of clojure an  scala.
+
+ The Map is a CHAMP that has transient operations and a builder. It compares favourable to the immutable map in c# or the hash map in language ext, but it also uses unsafe functions.
+
+ #+begin_src scheme
+(defun (main args)
+  (def a-map #map((:banana "fruit") (:volvo "car") (:mercedes "car") (:anna-karenina "neither")))
+  (def b-map  (map-filter #(equal? &2 "neither") a-map))
+  (println (map-count b-map)) ;; 1
+  (println (map-count a-map)) ;; 3
+  
+ #+end_src
