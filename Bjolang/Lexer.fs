@@ -20,6 +20,7 @@ module Lexer =
         $"%s{name}:%d{r.Start.Line}"
 
     type Token =
+        | Hash
         | Quote
         | LParen
         | RParen
@@ -207,9 +208,11 @@ module Lexer =
                     let len = nextPos - pos
                     emit (NumberLit(input.Substring(pos, len))) len
 
-                // Hashtag prefixes (#:, #\, etc.)
+                // Hashtag prefixes (#:, #\, #(, #[, etc.)
                 | '#' when pos + 1 < length ->
                     match input[pos + 1] with
+                    | '(' -> emit Hash 1
+                    | '[' -> emit Hash 1
                     | ':' -> // Keywords (#:keyword)
                         let nextPos = readSymbol (pos + 2)
                         let len = nextPos - pos
@@ -241,6 +244,7 @@ module Lexer =
                         let nextPos = readSymbol pos
                         let len = nextPos - pos
                         emit (Symbol(input.Substring(pos, len))) len
+                | '#' -> emit Hash 1
 
                 // Symbols
                 | _ ->

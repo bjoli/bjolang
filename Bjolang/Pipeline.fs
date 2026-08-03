@@ -11,6 +11,16 @@ let unionLexerRanges (r1: Lexer.Range) (r2: Lexer.Range) : Lexer.Range =
     // The opening one wins: it is where the form the caller is describing began.
     { Start = r1.Start; End = r2.End; File = r1.File }
 
+let rec collectPositionalArgs (expr: SExpr) : Set<int> =
+    match expr with
+    | SAtom { Token = Lexer.Symbol sym } when sym.Length > 1 && sym.StartsWith("&") ->
+        match System.Int32.TryParse(sym.Substring(1)) with
+        | true, n when n > 0 -> Set.singleton n
+        | _ -> Set.empty
+    | SList(items, _) ->
+        items |> List.map collectPositionalArgs |> Set.unionMany
+    | _ -> Set.empty
+
 let rec read (tokens: LexedToken list) : SExpr list * LexedToken list =
     let isDot = function SAtom { Token = Dot } -> true | _ -> false
 
@@ -48,6 +58,17 @@ let rec read (tokens: LexedToken list) : SExpr list * LexedToken list =
 
             let node, afterList = readForm r qr withHead rest
             loop (node :: acc) afterList
+
+        // Function shorthand: #(+ &1 &2 5) → (fun (&1 &2) (+ &1 &2 5))
+        | { Token = Hash; Range = hr } :: { Token = LParen; Range = r } :: rest ->
+            let bodySList, afterList = readForm r hr id rest
+            let argIndices = collectPositionalArgs bodySList
+            let maxArg = if Set.isEmpty argIndices then 0 else Set.maxElement argIndices
+            let paramNames = [ for i in 1 .. maxArg -> $"&{i}" ]
+            let funToken = SAtom { Token = Lexer.Symbol "fun"; Range = hr }
+            let paramList = SList(paramNames |> List.map (fun p -> SAtom { Token = Lexer.Symbol p; Range = hr }), hr)
+            let lambdaSExpr = SList([ funToken; paramList; bodySList ], getRange bodySList)
+            loop (lambdaSExpr :: acc) afterList
 
         | { Token = LParen; Range = r } :: rest ->
             let node, afterList = readForm r r id rest
