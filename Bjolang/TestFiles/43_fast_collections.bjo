@@ -64,6 +64,31 @@
         (:acc out (mapping (Tuple x (* x x))))))
 
 ;; ---------------------------------------------------------------------------
+;; Range
+;; ---------------------------------------------------------------------------
+
+;; A Range's cursor is the number itself, so a loop over one is `c = lo`,
+;; `c < hi`, `c += by` with the bounds read straight out of the record — no
+;; sequence object is consulted per element and nothing is allocated per step.
+(: sum-range (-> int int))
+(defun (sum-range n)
+  (loop (:for i (range 0 n))
+        (:acc total (summing i))))
+
+(: count-by (-> int int int int))
+(defun (count-by lo hi by)
+  (loop (:for i (range-by lo hi by))
+        (:acc n (counting i))))
+
+;; A record type reaches an importing module with its *fields*, not just its
+;; name. Without them `record-get` here fails outright, and an inline template
+;; that reads one cannot be re-inferred at the splice — so `Range`'s methods
+;; would quietly fall back to interface calls.
+(: upper (-> Range int))
+(defun (upper r)
+  (record-get r hi))
+
+;; ---------------------------------------------------------------------------
 
 (: build-map (-> int (Map int int)))
 (defun (build-map n)
@@ -120,6 +145,12 @@
   (expect "big-count" (vec-count big) 200000)
   (expect "big-vecing" (vec-count (doubled big)) 200000)
   (expect "big-listing" (list-length (listed big)) 200000)
+
+  ;; 0..99 sums to 4950; 0,3,6,9 is four of them.
+  (expect "sum-range" (sum-range 100) 4950)
+  (expect "range-empty" (sum-range 0) 0)
+  (expect "count-by" (count-by 0 10 3) 4)
+  (expect "imported-record-field" (upper (range 2 7)) 7)
 
   (def bigmap (squares big))
   (expect "big-mapping" (map-count bigmap) 200000)

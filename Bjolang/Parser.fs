@@ -1232,7 +1232,14 @@ and desugarLoop (allForms: SExpr list) (r: Range) : Expr =
 
     // Every exit runs this. Each accumulator is rebound to its *finished* value,
     // shadowing the slot, so `=> expr` sees the finished one by name.
-    let finishBlock =
+    //
+    // It is a member of the group rather than something spliced at each exit:
+    // exhaustion, every `:break`, every `:final` and a named loop's declining
+    // `:do` all reach it, and inlining it at each one would emit as many copies
+    // of the `=>` expression as there are ways out.
+    let exitName = Gensym.fresh "loopexit"
+
+    let finishBlockBody =
         // `:final`'s accumulator is not the author's and has no business in the
         // result, so only the declared ones are delivered or even finished.
         let declared = accInfo |> List.filter (fun slot -> not slot.Hidden)
@@ -1264,6 +1271,12 @@ and desugarLoop (allForms: SExpr list) (r: Range) : Expr =
                 ))
             declared
             result
+
+    /// Leaving the loop: hand the accumulators as they stand to the finish
+    /// member. They are in scope under their own names at every exit, whether as
+    /// a slot or as a rebinding an `:acc` clause made earlier this iteration.
+    let finishBlock (cr: Range) =
+        EApp(EIdent(exitName, cr), accNames |> List.map (fun n -> EIdent(n, cr)), cr)
 
     /// Steps one accumulator, then carries on.
     let stepAcc (slot: AccSlot) (rest: Expr) =
@@ -1303,7 +1316,7 @@ and desugarLoop (allForms: SExpr list) (r: Range) : Expr =
     /// hands back to its parent with the parent's cursors advanced — the same
     /// edge an `:end-subloop-if` takes.
     let exitLevel (i: int) (cr: Range) =
-        if i = 0 then finishBlock else advanceLevel (i - 1) cr
+        if i = 0 then finishBlock cr else advanceLevel (i - 1) cr
 
     // The clauses of one level, in order. The last of them falls into the next
     // level if there is one, and otherwise into the next iteration of this one —
@@ -1360,7 +1373,7 @@ and desugarLoop (allForms: SExpr list) (r: Range) : Expr =
         // Accumulators stepped earlier in this iteration keep what they were
         // given.
         | LBreak(cond, cr) :: tl ->
-            EIf(parseExpr cond, finishBlock, buildClauses level tl accsLeft, cr)
+            EIf(parseExpr cond, finishBlock cr, buildClauses level tl accsLeft, cr)
 
         // `:break` on the hidden accumulator, then the accumulator's own step —
         // in that order. The slot still holds the previous iteration's verdict
@@ -1371,7 +1384,7 @@ and desugarLoop (allForms: SExpr list) (r: Range) : Expr =
             | slot :: restAcc ->
                 EIf(
                     EIdent(slot.Name, slot.Range),
-                    finishBlock,
+                    finishBlock slot.Range,
                     stepAcc slot (buildClauses level tl restAcc),
                     slot.Range
                 )
@@ -1412,7 +1425,7 @@ and desugarLoop (allForms: SExpr list) (r: Range) : Expr =
         // Anything else completes, and then the loop is over.
         | other ->
             rejectLoopName name other
-            ELet("_", false, [], None, other, finishBlock, cr)
+            ELet("_", false, [], None, other, finishBlock cr, cr)
 
     /// `(lp #:name expr ...)` — the slots the call overrides.
     and parseOverrides (name: string) (args: Expr list) (cr: Range) : Map<string, Expr> =
@@ -1475,6 +1488,12 @@ and desugarLoop (allForms: SExpr list) (r: Range) : Expr =
                 )
 
             (lvl.Member, true, slotNames lvl.Index, None, body))
+
+    // The finish member. It calls nothing, so `LetRecify` gives it a component
+    // of its own and it is bound ahead of the loop group rather than becoming a
+    // case in the same switch — which costs one call on the way out and saves a
+    // copy of the block at every other exit.
+    let members = members @ [ (exitName, true, accNames, None, finishBlockBody) ]
 
     let initialArgs =
         (levels[0].SeqNames

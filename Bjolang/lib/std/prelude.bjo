@@ -9,6 +9,8 @@
   current done? next start
   ;; Collecter
   init step finish
+  ;; Range
+  range range-by
 
   print println ->str )
 
@@ -113,6 +115,32 @@
   (defun (done? s c) (vec-cursor-done? c))
   (defun (current s c) (vec-cursor-current c))
   (defun (next s c) c))
+
+;; A half-open range of ints, `lo` up to but not including `hi`. Its cursor is
+;; the number itself, so a loop over one is `c = lo`, `c < hi`, `c += by` — the
+;; shape of a hand-written `for`, with the sequence bound once in the prologue
+;; and its fields read straight out of it.
+;;
+;; `by` must be positive. A `done?` that coped with both directions would test
+;; the sign on every iteration, and counting down is better served by a sequence
+;; of its own than by a branch in the common path.
+(type (: Range (Record (: lo int) (: hi int) (: by int))))
+
+(: range (-> int int Range))
+(defun (range lo hi)
+  (record (lo lo) (hi hi) (by 1)))
+
+(: range-by (-> int int int Range))
+(defun (range-by lo hi by)
+  (record (lo lo) (hi hi) (by by)))
+
+(def/impl (Iterable Range)
+  (type %elem int)
+  (type %cursor int)
+  (defun (start s) (record-get s lo))
+  (defun (done? s c) (>= c (record-get s hi)))
+  (defun (current s c) c)
+  (defun (next s c) (+ c (record-get s by))))
 
 ;; A Map's elements are its pairs, in the trie's own order.
 (def/impl (Iterable (Map %k %v))

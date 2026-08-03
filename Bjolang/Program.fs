@@ -268,7 +268,21 @@ let main argv =
                                 | Parser.SimpleCase(n, _) -> n
                                 | Parser.DataCase(n, args, _) -> $"({n} " + String.concat " " (List.map serializeFType args) + ")"
                             $"({head} (: {headStr} (Union\n  " + String.concat "\n  " (List.map serializeCase cases) + ")))"
-                        | Parser.Record(fields) -> "" // Ignore for now
+                        // A record's *fields* are the part worth publishing.
+                        // Without them an importer knows the name and nothing
+                        // else: `record-get` on the type fails with "unknown
+                        // record field", and an inline template that reads one
+                        // cannot be re-inferred at the splice, so it falls back
+                        // to an interface call. Both were silent — the type name
+                        // still resolved, because an unrecognized one passes
+                        // through to C# verbatim.
+                        | Parser.Record(fields) ->
+                            let serializeField (f: Parser.RecordField) =
+                                $"(: {f.Name} {serializeFType f.Type})"
+
+                            $"({head} (: {headStr} (Record\n  "
+                            + String.concat "\n  " (List.map serializeField fields)
+                            + ")))"
                         
                     // A trait method is published by its `def/trait`, which
                     // gives it the associated types a bare signature cannot
