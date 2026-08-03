@@ -507,6 +507,11 @@ let runFullFrontendPipeline (mainFilePath: string) =
         printfn "=== Step 5: Loop Lowering ==="
         let loopLoweredAst = LoopLowering.lowerProgram loweredAst
 
+        // A `(loop ...)` is a loop by construction, but promotion is a silent
+        // optimization and a desugaring bug would leave real calls behind —
+        // correct, and unable to iterate deeply. Checked rather than assumed.
+        LoopLowering.assertLoopsPromoted loopLoweredAst
+
         // Last, and a cleanup pass only: C# rejects a local that shadows an
         // enclosing one, and every pass above is free to produce that.
         let uniquifiedAst = AlphaRename.uniquifyProgram loopLoweredAst

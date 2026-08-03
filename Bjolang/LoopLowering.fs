@@ -411,3 +411,67 @@ let rec private lowerDeclWith (aliasFor: string -> string list) (decl: TDecl) : 
 let lowerDecl (decl: TDecl) : TDecl = lowerDeclWith (fun _ -> []) decl
 
 let lowerProgram (decls: TDecl list) : TDecl list = List.map lowerDecl decls
+
+// ---------------------------------------------------------------------------
+// The promotion assertion
+// ---------------------------------------------------------------------------
+
+/// The prefix `(loop ...)` gives the member it generates.
+///
+/// Checked by name rather than by a flag on the node because the marker has to
+/// survive inference, which builds a `TLetRec` of its own from the untyped one.
+let loopMemberPrefix = "looplevel"
+
+/// Fails the compile if a generated loop did not become real jumps.
+///
+/// The `(loop ...)` desugaring emits a shape that is a loop *by construction* —
+/// one self-recursive member whose every exit is a tail call. But promotion is a
+/// silent optimization: when it declines, the result is still correct, just a
+/// closure and a real call per iteration, which shows up as a stack overflow in
+/// somebody's program rather than as a failure here. A desugaring bug should
+/// break the test suite instead.
+///
+/// Reaching `TLoop` is *not* the property worth checking: `lowerLetRec` emits
+/// one whenever the members are function-shaped, whether or not any call was in
+/// tail position. What matters is that no reference to the loop's own name
+/// survives in its body — every one should have become a `TRecur`, and any that
+/// is left is a call.
+let assertLoopsPromoted (decls: TDecl list) : unit =
+    let rec mentions (name: string) (e: TypedExpr) =
+        match e.Node with
+        | TIdent(n, _) when n = name -> true
+        | _ -> TypeVisitor.children e |> List.exists (mentions name)
+
+    let rec checkExpr (e: TypedExpr) =
+        match e.Node with
+        | TLetRec(bindings, _) ->
+            for (name, _, _, _) in bindings do
+                if name.StartsWith loopMemberPrefix then
+                    failwithf
+                        $"Internal error at %s{Lexer.formatPos e.Range}: a (loop ...) was left as a recursive binding rather than becoming a loop. Correct, but it allocates a closure per level entry and cannot iterate deeply. This is a bug in the loop desugaring, not in this program."
+
+            TypeVisitor.children e |> List.iter checkExpr
+
+        | TLoop(members, _) ->
+            for m in members do
+                if m.LoopName.StartsWith loopMemberPrefix && mentions m.LoopName m.Body then
+                    failwithf
+                        $"Internal error at %s{Lexer.formatPos e.Range}: a (loop ...) still calls itself by name instead of jumping, so its recursive edge was not in tail position. This is a bug in the loop desugaring, not in this program."
+
+            TypeVisitor.children e |> List.iter checkExpr
+
+        | _ -> TypeVisitor.children e |> List.iter checkExpr
+
+    let rec checkDecl (d: TDecl) =
+        match d with
+        | TModule(_, inner, _) -> List.iter checkDecl inner
+        | TImpl(_, _, _, _, _, methods, _) -> List.iter checkDecl methods
+        | _ ->
+            TypeVisitor.mapDecl
+                (fun e ->
+                    checkExpr e
+                    e)
+                d
+            |> ignore
+
+    List.iter checkDecl decls

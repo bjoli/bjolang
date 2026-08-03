@@ -116,6 +116,11 @@ let freshen (roots: string list) (expr: Expr) : Expr * Map<string, string> =
             let names', bodySubst = bind [ n ] subst
             ELet(List.head names', isFun, args', ann, value', go bodySubst body, r)
 
+        | ELetMono(n, value, body, r) ->
+            let value' = go subst value
+            let names', bodySubst = bind [ n ] subst
+            ELetMono(List.head names', value', go bodySubst body, r)
+
         | ELetRec(bindings, body, r) ->
             // Every name in the group is bound before any value is renamed.
             let names = bindings |> List.map (fun (n, _, _, _, _) -> n)
@@ -199,6 +204,10 @@ let freeNames (bound: Set<string>) (expr: Expr) : Set<string> =
 
         | ELet(n, isFun, args, _, value, body, _) ->
             go (if isFun then Set.union bound (Set.ofList args) else bound) value
+            go (Set.add n bound) body
+
+        | ELetMono(n, value, body, _) ->
+            go bound value
             go (Set.add n bound) body
 
         | ELetRec(bindings, body, _) ->

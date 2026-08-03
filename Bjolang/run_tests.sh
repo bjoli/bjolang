@@ -45,10 +45,6 @@ run_prefix_group() {
     
     for bjo_file in $files; do
         local basename=$(basename "$bjo_file")
-        if [[ "$basename" == "08_iterators.bjo" ]]; then
-            echo "SKIP: $basename" >> "$log_file"
-            continue
-        fi
         
         local exe_file="${bjo_file%.bjo}.exe"
         local dll_file="${bjo_file%.bjo}.dll"

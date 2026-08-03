@@ -153,6 +153,12 @@ let rec typeToString (hm: HMType) : string =
             if args.IsEmpty then "Action" else $"Action<%s{argsStr}>"
         else
             if args.IsEmpty then $"Func<%s{typeToString ret}>" else $"Func<%s{argsStr}, %s{typeToString ret}>"
+    // `ValueTuple<>` is not a type. The zero-element tuple is the unit type, and
+    // C# spells it `ValueTuple` — the non-generic struct — so it needs its own
+    // case rather than falling out of the general one. Reachable without ever
+    // writing `(Tuple)`: `()` parses as an empty tuple, and so does a body with
+    // no forms in it.
+    | TTuple [] -> "ValueTuple"
     | TTuple types ->
         let typesStr = types |> List.map typeToString |> String.concat ", "
         $"ValueTuple<%s{typesStr}>"
@@ -340,6 +346,11 @@ let rec serializeExpr (e: Parser.Expr) : string =
     | Parser.ETuple(items, _) -> list ("Tuple" :: List.map serializeExpr items)
     | Parser.EApp(target, args, _) -> list (serializeExpr target :: List.map serializeExpr args)
     | Parser.ECast(t, v, _) -> list [ "cast"; serializeFType t; serializeExpr v ]
+
+    // Round-trips as its own form: re-importing it as a plain `let` would put
+    // the generalization back, which is the whole thing it exists to prevent.
+    | Parser.ELetMono(n, value, body, _) ->
+        list [ "let/mono"; n; serializeExpr value; serializeExpr body ]
 
     | Parser.ELet(n, isFun, args, ann, value, body, _) ->
         let valueStr =
@@ -708,6 +719,12 @@ let rec generateExpr (ctx: CodegenContext) (expr: TypedExpr) : unit =
         generateExpr ctx f
         append ctx "))"
 
+    // `()` is not an expression in C#, and a one-element `(x)` is just `x`
+    // rather than a tuple — so the unit value is written as the struct's own
+    // default. `default(ValueTuple)` rather than a bare `default`, which needs a
+    // target type and does not have one in every position this can appear.
+    | TTupleMake [] -> append ctx "default(ValueTuple)"
+
     | TTupleMake args ->
         append ctx "("
         for i, emit in List.indexed (prepareOperands ctx args) do
@@ -865,7 +882,7 @@ and private hoistToTemp (ctx: CodegenContext) (prelude: ResizeArray<string>) (ex
         // is an intermediate statement rather than a block's last word.
         generateBlock inner Effect expr
     else
-        generateBlock inner (DeclareAndAssign(typeToString expr.Type, tmp)) expr
+        generateBindingValue inner (DeclareAndAssign(typeToString expr.Type, tmp)) expr
 
     // Anything the node hoisted in turn is already inside `scratch`, ahead of the
     // node's own statements, so appending as one unit preserves the order.
@@ -1055,6 +1072,23 @@ and private generateApply
                 argIdx <- argIdx + 1
         append ctx ")"
 
+/// Emits the value of a *binding*: a `let`, a `set!`, a hoisted temporary.
+///
+/// Every `BlockTarget` but `Effect` describes a terminal position, and inside an
+/// inlined loop a terminal target ends the loop. A binding is not terminal —
+/// whatever follows it still has to run — but it has to name somewhere to put
+/// the value, so it uses a terminal-looking target anyway. Hiding the loop is
+/// what stops `exitInlineLoop` from emitting a `break` between the binding and
+/// its use, which is either a use of an unassigned local or, worse, a loop that
+/// silently runs one iteration.
+///
+/// This was independently the same bug at four sites, so it has a name now.
+/// Nothing inside a binding's value can legitimately jump to the enclosing loop:
+/// a `TRecur` only ever appears in tail position, and a nested loop brings its
+/// own context.
+and private generateBindingValue (ctx: CodegenContext) (target: BlockTarget) (value: TypedExpr) : unit =
+    generateBlock { ctx with Loop = None } target value
+
 /// Emits one statement, giving `generateExpr` somewhere to hoist statement-shaped
 /// operands to. The statement is built into a scratch buffer first so that the
 /// hoisted statements can be written ahead of it — including ahead of its indent.
@@ -1183,7 +1217,9 @@ and generateBlock (ctx: CodegenContext) (target: BlockTarget) (expr: TypedExpr) 
                 // block is not over, so this is an `Effect`, not a `Discard`.
                 generateBlock ctx Effect value
             else
-                generateBlock ctx (DeclareAndAssign(typeToString value.Type, sanitizeIdent name)) value
+                // The body below *is* terminal, and is generated with the loop
+                // still in scope so that a tail call in it still becomes a jump.
+                generateBindingValue ctx (DeclareAndAssign(typeToString value.Type, sanitizeIdent name)) value
 
         generateBlock ctx target body
 
@@ -1198,11 +1234,11 @@ and generateBlock (ctx: CodegenContext) (target: BlockTarget) (expr: TypedExpr) 
         generateBlock ctx target body
 
     | TLetMutable (name, value, body) ->
-        generateBlock ctx (DeclareAndAssign(typeToString value.Type, sanitizeIdent name)) value
+        generateBindingValue ctx (DeclareAndAssign(typeToString value.Type, sanitizeIdent name)) value
         generateBlock ctx target body
 
     | TSet (name, value) ->
-        generateBlock ctx (Assign(sanitizeIdent name)) value
+        generateBindingValue ctx (Assign(sanitizeIdent name)) value
         // `set!` itself yields void, so the enclosing target still has to be
         // discharged.
         dischargeVoid ctx target
@@ -1263,7 +1299,7 @@ and generateBlock (ctx: CodegenContext) (target: BlockTarget) (expr: TypedExpr) 
 
     | TLetTuple (names, value, body) ->
         let tmp = freshName "__tuple"
-        generateBlock ctx (DeclareAndAssign(typeToString value.Type, tmp)) value
+        generateBindingValue ctx (DeclareAndAssign(typeToString value.Type, tmp)) value
         for i, name in List.indexed names do
             indent ctx
             appendLine ctx $"var %s{sanitizeIdent name} = %s{tmp}.Item%d{i + 1};"

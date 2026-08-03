@@ -65,6 +65,11 @@ let rec exprFreeVars (isGuarded: bool) (bound: Set<string>) (expr: Expr) : Map<s
         let bfv = exprFreeVars isGuarded (Set.add name bound) body
         mergeVarUseMaps vfv bfv
 
+    | ELetMono(name, value, body, _) ->
+        let vfv = exprFreeVars isGuarded bound value
+        let bfv = exprFreeVars isGuarded (Set.add name bound) body
+        mergeVarUseMaps vfv bfv
+
     | ELetRec(bindings, body, _) ->
         let boundNames = bindings |> List.map (fun (n, _, _, _, _) -> n) |> Set.ofList
         let allBound = Set.union bound boundNames
@@ -234,6 +239,8 @@ let rec letrecifyExpr (expr: Expr) : Expr =
     | ECast(t, e, r) -> ECast(t, letrecifyExpr e, r)
 
     | ELet(name, isFun, args, typeAnn, value, body, r) -> ELet(name, isFun, args, typeAnn, letrecifyExpr value, letrecifyExpr body, r)
+
+    | ELetMono(name, value, body, r) -> ELetMono(name, letrecifyExpr value, letrecifyExpr body, r)
 
     | ELetTuple(names, value, body, r) -> ELetTuple(names, letrecifyExpr value, letrecifyExpr body, r)
 

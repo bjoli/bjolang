@@ -814,6 +814,26 @@ let rec infer (env: Env) (expr: Expr) : HMType * TypedExpr =
               Range = r
               Node = TApply(typedTarget, positionalArgs |> List.map snd, []) }
 
+    // Deliberately not generalized — see `ELetMono`. The value is inferred
+    // first, exactly as `let` does, so the binding keeps its concrete head; only
+    // the quantification is dropped.
+    | ELetMono(name, value, body, r) ->
+        let valType, typedVal = infer env value
+
+        let localEnv =
+            addBinding
+                name
+                { Scheme = Scheme([], [], valType)
+                  IsMutable = false }
+                env
+
+        let bodyType, typedBody = infer localEnv body
+
+        bodyType,
+        { Type = bodyType
+          Range = r
+          Node = TLet(name, false, [], typedVal, typedBody) }
+
     | ELet(name, isFun, args, typeAnn, value, body, r) ->
         let valType, typedVal =
             if isFun then

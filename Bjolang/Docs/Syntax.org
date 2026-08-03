@@ -258,6 +258,50 @@ Four things are worth knowing:
   that can throw.
 - A bare form in non-tail position is an ordinary statement, run for its effect.
 
+** Loops
+~(loop ...)~ is a left fold with early exit that always delivers a result. Its
+clause list is flat — there is no body position — and sequences and accumulators
+are extended by writing trait implementations rather than by adding syntax.
+#+BEGIN_SRC scheme
+(loop (:for x xs)
+      (:let y (expensive x))
+      (:when (test? y))
+      (:acc out (listing y))
+      => out)
+#+END_SRC
+
+| Clause                          | Meaning                                            |
+|---------------------------------+----------------------------------------------------|
+| ~(:for pat seq)~                | bind ~pat~ to successive elements of ~seq~         |
+| ~(:let pat expr)~               | per-iteration binding, in clause order             |
+| ~(:do expr ...)~                | run for effect, value discarded                    |
+| ~(:when cond)~                  | skip the rest of this iteration unless ~cond~      |
+| ~(:acc name (coll ...) #:when c)~ | declare an accumulator; ~#:when~ gates the step  |
+
+Consecutive ~:for~ clauses advance in *lockstep* and are tested in clause order:
+when the first of them is done the loop is over, and no later ~done?~ runs. A
+~:for~ pattern only destructures and must always match — it is not a filter.
+
+Every exit runs the finish block. ~=> expr~ sees each accumulator by name, bound
+to its *finished* value; with no ~=>~ the result is the single accumulator, or a
+tuple of them in declaration order, or ~void~ if there are none.
+
+In a collector form the **last positional argument is the per-iteration step
+expression** and everything before it constructs the collector: ~(listing y)~
+accumulates ~y~, and ~(folding 0 e)~ seeds with ~0~ and accumulates ~e~. Inside
+the loop an accumulator's name reads the value as of that point, which is what
+lets ~folding~ refer to what it has so far.
+
+The stock collectors are ~listing~, ~summing~, ~counting~ and ~folding~; the
+stock sequences are ~List~ and ~Vec~. A new one of either is an ordinary
+implementation of ~Iterable~ or ~Collector~ in ~(std iter)~ — the compiler knows
+only the clause keywords.
+
+A loop compiles to a plain ~while~ with the whole cursor and collector protocol
+inlined away, and a compiler pass fails the build if one ever does not: leaving
+real calls behind would still be correct, but would allocate per iteration and
+overflow the stack on a long sequence rather than answer.
+
 Because ~bind~'s continuation is substituted rather than bound to a local, a
 recursive ~(do ...)~ block whose tail call is its last form compiles to a real
 loop. An implementation that mentions its continuation more than once cannot get
