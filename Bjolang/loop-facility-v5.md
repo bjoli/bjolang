@@ -62,9 +62,34 @@ and the auto-generated finish. Sequences are `List` and `Vec`; collectors are
   One allocation survives per loop *entry*: the collector value itself, which is
   dead after inlining and would need a DCE pass to remove.
 
-Not yet implemented, and rejected with a message that says so rather than
-misbehaving: nested levels (a `:for` preceded by a non-`:for`), `:subloop`,
-`:break`, `:end-subloop-if`, `:final`, and named loops.
+**`:break`, `:final` and named loops are done too**, covered by
+`TestFiles/40_loop_control.bjo`.
+
+- `:break` emits the finish block inline at the clause position. That duplicates
+  it once per `:break`, which is what `M_exit`-as-a-group-member is for; with a
+  single level there is nothing to jump to yet, and `LetRecify`'s SCC pass would
+  split a finish member out of the group anyway, since the loop calls it but it
+  does not call back.
+- `:final` is exactly the documented rewrite, and it falls out of the clause walk
+  rather than needing a pre-pass: test the hidden slot, and on the false branch
+  step it and carry on. Its accumulator is a gensym and is marked hidden, so it
+  appears in neither the finish block's bindings nor an auto-generated result —
+  an author's accumulator called `tmp` is untouched.
+- A named loop's final `:do` has its *tail positions* rewritten: one that is a
+  call to the loop name becomes the jump, and one that is not runs for its effect
+  and falls into the finish block. That is what keeps `(lp)` a genuine tail call
+  while still letting a path decline to iterate.
+- `(lp #:name expr)` overrides accumulator slots only, and the argument vector is
+  completed at desugar time. A `:for` variable is *not* addressable: it is
+  derived from its cursor rather than carried, so there is no slot to override.
+  Making one addressable would mean carrying an `Option` element slot per `:for`
+  and consulting it ahead of `current` — implementable, but it allocates per
+  iteration and the semantics against `done?` need deciding, so the compiler
+  refuses with a message naming the accumulators it *can* override.
+
+Still not implemented, and rejected with a message that says so rather than
+misbehaving: nested levels (a `:for` preceded by a non-`:for`), `:subloop`, and
+`:end-subloop-if`.
 
 ## Prerequisite status (audited against the tree)
 

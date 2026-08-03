@@ -277,6 +277,31 @@ are extended by writing trait implementations rather than by adding syntax.
 | ~(:do expr ...)~                | run for effect, value discarded                    |
 | ~(:when cond)~                  | skip the rest of this iteration unless ~cond~      |
 | ~(:acc name (coll ...) #:when c)~ | declare an accumulator; ~#:when~ gates the step  |
+| ~(:break cond)~                 | end the whole loop, before the rest of the iteration |
+| ~(:final cond)~                 | end it *after* the current iteration completes     |
+
+Each carries its own condition rather than being guarded by a preceding
+~:when~ — clauses do not compose, so there is no bare ~(:break)~ to be reached
+conditionally. ~:final~ is not a mechanism of its own: it is a ~:break~ on a
+hidden accumulator holding the previous iteration's verdict, which is what makes
+it one iteration later than a ~:break~ on the same predicate.
+
+*** Named loops
+A name before the clauses hands the continue edge to the loop's *final* ~:do~.
+Tail calling the name is the jump; completing without one leaves the loop —
+through the finish block, like every other exit.
+#+BEGIN_SRC scheme
+(loop lp (:for x xs)
+         (:acc total (summing x))
+         (:do (if (> x 2) (lp #:total (* total 10)) (lp)))
+         => total)
+#+END_SRC
+
+~(lp)~ advances everything; ~(lp #:name expr)~ overrides one accumulator and
+advances the rest. A ~:for~ variable cannot be overridden — it is derived from
+its cursor rather than carried in a slot — and the compiler says so. The name is
+a jump, not a value: using it anywhere but tail position in that final ~:do~ is
+an error rather than a closure.
 
 Consecutive ~:for~ clauses advance in *lockstep* and are tested in clause order:
 when the first of them is done the loop is over, and no later ~done?~ runs. A

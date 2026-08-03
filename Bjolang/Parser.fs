@@ -367,6 +367,74 @@ let desugarQuotedList (items: SExpr list) (r: Range) : Expr =
             EApp(EIdent("Cons", r), [hd; tl], r)
     buildConsChain items r
 
+/// An expression's own range.
+let exprRange (e: Expr) : Range =
+    match e with
+    | EInt(_, r)
+    | EString(_, r)
+    | EQuotedSymbol(_, r)
+    | EKeyword(_, r)
+    | EIdent(_, r)
+    | ETuple(_, r)
+    | EApp(_, _, r)
+    | ECast(_, _, r)
+    | ELet(_, _, _, _, _, _, r)
+    | ELetMono(_, _, _, r)
+    | ELetRec(_, _, r)
+    | ELetTuple(_, _, _, r)
+    | ELetMutable(_, _, _, _, r)
+    | ESet(_, _, r)
+    | EIf(_, _, _, r)
+    | EWhen(_, _, _, r)
+    | EFun(_, _, r)
+    | ERecord(_, r)
+    | ERecordUpdate(_, _, r)
+    | EGetField(_, _, r)
+    | EList(_, r)
+    | EVec(_, r)
+    | EMatch(_, _, r)
+    | ETryFinally(_, _, r)
+    | ESeq(_, r)
+    | EYield(_, r)
+    | EYieldFrom(_, r) -> r
+
+/// Every expression held directly inside `e`.
+///
+/// Exhaustive on purpose: this is used to refuse a loop name outside tail
+/// position, and a case missed here would let one through to a much worse
+/// diagnostic later.
+let exprChildren (e: Expr) : Expr list =
+    match e with
+    | EInt _
+    | EString _
+    | EQuotedSymbol _
+    | EKeyword _
+    | EIdent _ -> []
+    | ECast(_, x, _)
+    | EGetField(x, _, _)
+    | ESeq(x, _)
+    | EYield(x, _)
+    | EYieldFrom(x, _) -> [ x ]
+    | ESet(_, x, _) -> [ x ]
+    | ETuple(xs, _)
+    | EList(xs, _)
+    | EVec(xs, _) -> xs
+    | EApp(f, args, _) -> f :: args
+    | ELet(_, _, _, _, v, b, _) -> [ v; b ]
+    | ELetMono(_, v, b, _) -> [ v; b ]
+    | ELetTuple(_, v, b, _) -> [ v; b ]
+    | ELetMutable(_, _, v, b, _) -> [ v; b ]
+    | ELetRec(bindings, b, _) -> (bindings |> List.map (fun (_, _, _, _, v) -> v)) @ [ b ]
+    | EIf(c, t, f, _) -> [ c; t; f ]
+    | EWhen(c, b, _, _) -> [ c; b ]
+    | EFun(_, b, _) -> [ b ]
+    | ERecord(fields, _) -> fields |> List.map snd
+    | ERecordUpdate(_, fields, _) -> fields |> List.map snd
+    | ETryFinally(b, c, _) -> [ b; c ]
+    | EMatch(target, clauses, _) ->
+        target
+        :: (clauses |> List.collect (fun (_, guard, body) -> (Option.toList guard) @ [ body ]))
+
 /// One clause of a `(loop ...)`, still unparsed.
 ///
 /// The clause list is flat and there is no body position: every clause carries
@@ -382,6 +450,34 @@ type private LoopClause =
     /// mentions loop variables, and construction arguments are hoisted out of
     /// the loop entirely.
     | LAcc of string * SExpr * SExpr option * Range
+    /// Ends the whole loop when the condition holds, before the rest of the
+    /// iteration runs. Routes through the finish block like every other exit.
+    | LBreak of SExpr * Range
+    /// Ends the loop *after* the current iteration completes.
+    ///
+    /// Not a mechanism of its own: it is a `:break` on a hidden accumulator
+    /// holding the previous iteration's verdict, and the two sit at the position
+    /// `:final` occupied with the break first. An accumulator slot read at the
+    /// top of iteration N holds what was written at the end of N-1, which is
+    /// exactly "finish this one, then stop". Reversed, the break would read the
+    /// value written this iteration and `:final` would collapse into `:break`.
+    | LFinal of SExpr * Range
+
+/// An accumulator's slot, after its collector form has been split.
+type private AccSlot =
+    { /// Prologue binding holding the collector value.
+      Collector: string
+      /// The slot's name. A user accumulator keeps the name it was declared
+      /// with — it is in scope through the loop, and each `:acc` rebinds it, so
+      /// a later clause reads the value as of its own position.
+      Name: string
+      CollectorExpr: Expr
+      StepForm: SExpr
+      Modifier: SExpr option
+      /// `:final`'s accumulator, which is not the author's and must not appear
+      /// in the finish block's result.
+      Hidden: bool
+      Range: Range }
 
 /// A `(loop ...)` clause's own range, for diagnostics.
 let private loopClauseRange (c: LoopClause) : Range =
@@ -391,7 +487,9 @@ let private loopClauseRange (c: LoopClause) : Range =
     | LDo(_, r)
     | LWhen(_, r)
     | LSubloop r
-    | LAcc(_, _, _, r) -> r
+    | LAcc(_, _, _, r)
+    | LBreak(_, r)
+    | LFinal(_, r) -> r
 
 let rec parseExpr (s: SExpr) : Expr =
     let r = getRange s
@@ -724,6 +822,10 @@ and desugarDo (forms: SExpr list) (fallbackRange: Range) : Expr =
 and private isLoopForm (args: SExpr list) : bool =
     match args with
     | SList(SAtom { Token = Keyword _ } :: _, _) :: _ -> true
+    // A named loop puts its name first, so the clause is one further along.
+    // `(loop f (g 1))` — a call to a named `let` taking a function and an
+    // argument — still is not one, because `(g 1)` is not keyword-headed.
+    | SAtom { Token = Symbol _ } :: SList(SAtom { Token = Keyword _ } :: _, _) :: _ -> true
     | _ -> false
 
 /// Reads one clause. Nothing is desugared here.
@@ -766,11 +868,24 @@ and private parseLoopClause (s: SExpr) : LoopClause =
     | SList(SAtom { Token = Keyword "acc" } :: _, r) ->
         failwithf $"Invalid (:acc ...) at line %d{r.Start.Line}. Expected: (:acc name (collector ...) [#:when cond])"
 
-    // Named for what they will be, so that the message says "not yet" rather
-    // than "unknown".
-    | SList(SAtom { Token = Keyword(("break" | "final" | "end-subloop-if") as k) } :: _, r) ->
+    // Both take a condition rather than being guarded by a preceding `:when`:
+    // clauses do not compose, so there is no bare `(:break)` to be reached
+    // conditionally.
+    | SList(SAtom { Token = Keyword "break" } :: rest, r) ->
+        match rest with
+        | [ cond ] -> LBreak(cond, r)
+        | _ -> failwithf $"Invalid (:break ...) at line %d{r.Start.Line}. Expected: (:break cond)"
+
+    | SList(SAtom { Token = Keyword "final" } :: rest, r) ->
+        match rest with
+        | [ cond ] -> LFinal(cond, r)
+        | _ -> failwithf $"Invalid (:final ...) at line %d{r.Start.Line}. Expected: (:final cond)"
+
+    // Named for what it will be, so that the message says "not yet" rather than
+    // "unknown".
+    | SList(SAtom { Token = Keyword "end-subloop-if" } :: _, r) ->
         failwithf
-            $"(:%s{k} ...) at line %d{r.Start.Line} is not implemented yet. Only :for, :let, :do, :when and :acc are."
+            $"(:end-subloop-if ...) at line %d{r.Start.Line} is not implemented yet: it abandons the current subloop, and nested levels are not supported. Use (:when ...) to skip an iteration or (:break ...) to leave the loop."
 
     | SList(SAtom { Token = Keyword k } :: _, r) ->
         failwithf $"Unknown (loop ...) clause ':%s{k}' at line %d{r.Start.Line}"
@@ -858,7 +973,13 @@ and private splitCollector (s: SExpr) : Expr * SExpr =
 /// A loop is a left fold with early exit that always delivers a result: every
 /// exit runs the same finish block. That is why the accumulators are hoisted —
 /// they hold state across the whole loop and have to be visible at the end.
-and desugarLoop (forms: SExpr list) (r: Range) : Expr =
+and desugarLoop (allForms: SExpr list) (r: Range) : Expr =
+    // An optional name comes first, before any clause.
+    let userLoopName, forms =
+        match allForms with
+        | SAtom { Token = Symbol n } :: rest -> Some n, rest
+        | _ -> None, allForms
+
     // `=> expr`, if present, is the last two forms.
     let clauseForms, finishForm =
         let isArrow =
@@ -911,25 +1032,62 @@ and desugarLoop (forms: SExpr list) (r: Range) : Expr =
     let curNames = fors |> List.map (fun _ -> Gensym.fresh "loopcur")
     let loopName = Gensym.fresh "looplevel"
 
+    let call (name: string) (args: Expr list) (cr: Range) = EApp(EIdent(name, cr), args, cr)
+
+    // One slot per accumulator, in declaration order. `:final` contributes one
+    // of its own: a `folding` seeded with false, whose step is the test.
     let accInfo =
         others
         |> List.choose (function
             | LAcc(name, collector, modifier, cr) ->
                 let collectorExpr, stepForm = splitCollector collector
-                Some(Gensym.fresh "loopcol", name, collectorExpr, stepForm, modifier, cr)
+
+                Some
+                    { Collector = Gensym.fresh "loopcol"
+                      Name = name
+                      CollectorExpr = collectorExpr
+                      StepForm = stepForm
+                      Modifier = modifier
+                      Hidden = false
+                      Range = cr }
+
+            | LFinal(cond, cr) ->
+                Some
+                    { Collector = Gensym.fresh "loopcol"
+                      // A gensym, so a user accumulator that happens to be
+                      // called `tmp` cannot be captured by it.
+                      Name = Gensym.fresh "loopfinal"
+                      CollectorExpr = call "folding" [ EIdent("false", cr) ] cr
+                      StepForm = cond
+                      Modifier = None
+                      Hidden = false
+                      Range = cr }
+                |> Option.map (fun slot -> { slot with Hidden = true })
+
             | _ -> None)
 
-    let accNames = accInfo |> List.map (fun (_, name, _, _, _, _) -> name)
-
-    let call (name: string) (args: Expr list) (cr: Range) = EApp(EIdent(name, cr), args, cr)
+    let accNames = accInfo |> List.map (fun slot -> slot.Name)
 
     /// The jump back to the top: every cursor advanced, every accumulator passed
     /// on as it stands at this point in the clause list.
-    let advance (cr: Range) =
+    ///
+    /// `overrides` replaces individual slots by name, for a named loop's
+    /// `(lp #:name expr)`. The vector is always complete: a `TRecur` carries one
+    /// argument per slot, so a partial update has to be filled in here.
+    let advanceWith (overrides: Map<string, Expr>) (cr: Range) =
         let cursors =
             List.map2 (fun sn cn -> call "next" [ EIdent(sn, cr); EIdent(cn, cr) ] cr) seqNames curNames
 
-        EApp(EIdent(loopName, cr), cursors @ (accNames |> List.map (fun n -> EIdent(n, cr))), cr)
+        let accs =
+            accNames
+            |> List.map (fun n ->
+                match Map.tryFind n overrides with
+                | Some e -> e
+                | None -> EIdent(n, cr))
+
+        EApp(EIdent(loopName, cr), cursors @ accs, cr)
+
+    let advance (cr: Range) = advanceWith Map.empty cr
 
     // `done?` exactly once per iteration, in clause order, short-circuiting:
     // when one sequence is done the level is over and no later `done?` runs.
@@ -948,32 +1106,75 @@ and desugarLoop (forms: SExpr list) (r: Range) : Expr =
     // Every exit runs this. Each accumulator is rebound to its *finished* value,
     // shadowing the slot, so `=> expr` sees the finished one by name.
     let finishBlock =
+        // `:final`'s accumulator is not the author's and has no business in the
+        // result, so only the declared ones are delivered or even finished.
+        let declared = accInfo |> List.filter (fun slot -> not slot.Hidden)
+
         let result =
             match finishForm with
             | Some e -> parseExpr e
             | None ->
-                match accInfo with
+                match declared with
                 // Nothing to deliver: a loop with no accumulators and no `=>`
                 // is pure effect, and types as `void` rather than as unit so
                 // that it can be the body of a `void` function. `when` is the
                 // language's only void-typed expression form, and with a
                 // constant-false condition it is also the emptiest one.
                 | [] -> EWhen(EIdent("false", r), ETuple([], r), false, r)
-                | [ (_, name, _, _, _, cr) ] -> EIdent(name, cr)
-                | _ -> ETuple(accInfo |> List.map (fun (_, name, _, _, _, cr) -> EIdent(name, cr)), r)
+                | [ slot ] -> EIdent(slot.Name, slot.Range)
+                | _ -> ETuple(declared |> List.map (fun slot -> EIdent(slot.Name, slot.Range)), r)
 
         List.foldBack
-            (fun (cn, name, _, _, _, cr) acc ->
-                ELet(name, false, [], None, call "finish" [ EIdent(cn, cr); EIdent(name, cr) ] cr, acc, cr))
-            accInfo
+            (fun slot acc ->
+                ELet(
+                    slot.Name,
+                    false,
+                    [],
+                    None,
+                    call "finish" [ EIdent(slot.Collector, slot.Range); EIdent(slot.Name, slot.Range) ] slot.Range,
+                    acc,
+                    slot.Range
+                ))
+            declared
             result
 
-    // The clauses, in order, ending in the jump back to the top.
-    let rec buildClauses (cs: LoopClause list) (accsLeft: (string * string * Expr * SExpr * SExpr option * Range) list) =
+    /// Steps one accumulator, then carries on.
+    let stepAcc (slot: AccSlot) (rest: Expr) =
+        let cr = slot.Range
+
+        let stepped =
+            call "step" [ EIdent(slot.Collector, cr); EIdent(slot.Name, cr); parseExpr slot.StepForm ] cr
+
+        let value =
+            match slot.Modifier with
+            | None -> stepped
+            | Some cond -> EIf(parseExpr cond, stepped, EIdent(slot.Name, cr), cr)
+
+        ELet(slot.Name, false, [], None, value, rest, cr)
+
+    // The clauses, in order, ending in the jump back to the top — unless a named
+    // loop's final `:do` has taken that edge over.
+    let rec buildClauses (cs: LoopClause list) (accsLeft: AccSlot list) =
         match cs with
         | [] -> advance r
 
         | LLet(pat, value, cr) :: tl -> bindLoopPattern pat (parseExpr value) (buildClauses tl accsLeft) cr
+
+        // In a named loop the *final* `:do` owns the continue edge: if it tail
+        // calls the loop, that is the jump, and if it completes without one the
+        // loop leaves through the finish block like any other exit.
+        | [ LDo(exprs, cr) ] when userLoopName.IsSome ->
+            let name = userLoopName.Value
+            let statements = exprs |> List.take (exprs.Length - 1)
+            let final = List.last exprs
+
+            List.foldBack
+                (fun e acc ->
+                    let parsed = parseExpr e
+                    rejectLoopName name parsed
+                    ELet("_", false, [], None, parsed, acc, cr))
+                statements
+                (continueEdge name (parseExpr final) cr)
 
         | LDo(exprs, cr) :: tl ->
             List.foldBack
@@ -985,20 +1186,97 @@ and desugarLoop (forms: SExpr list) (r: Range) : Expr =
         // so an accumulator stepped before it keeps what it was given.
         | LWhen(cond, cr) :: tl -> EIf(parseExpr cond, buildClauses tl accsLeft, advance cr, cr)
 
+        // Leaves the whole loop, through the finish block. Accumulators stepped
+        // earlier in this iteration keep what they were given.
+        | LBreak(cond, cr) :: tl -> EIf(parseExpr cond, finishBlock, buildClauses tl accsLeft, cr)
+
+        // `:break` on the hidden accumulator, then the accumulator's own step —
+        // in that order. The slot still holds the previous iteration's verdict
+        // when the break reads it, which is what makes this "after the current
+        // iteration" rather than "before the rest of it".
+        | LFinal _ :: tl ->
+            match accsLeft with
+            | slot :: restAcc ->
+                EIf(
+                    EIdent(slot.Name, slot.Range),
+                    finishBlock,
+                    stepAcc slot (buildClauses tl restAcc),
+                    slot.Range
+                )
+            | [] -> failwith "internal error: :final without its accumulator"
+
         | LAcc _ :: tl ->
             match accsLeft with
-            | (cn, name, _, stepForm, modifier, cr) :: restAcc ->
-                let stepped = call "step" [ EIdent(cn, cr); EIdent(name, cr); parseExpr stepForm ] cr
-
-                let value =
-                    match modifier with
-                    | None -> stepped
-                    | Some cond -> EIf(parseExpr cond, stepped, EIdent(name, cr), cr)
-
-                ELet(name, false, [], None, value, buildClauses tl restAcc, cr)
+            | slot :: restAcc -> stepAcc slot (buildClauses tl restAcc)
             | [] -> failwith "internal error: accumulator clause without its info"
 
         | (LFor _ | LSubloop _) :: _ -> failwith "internal error: clause should have been rejected"
+
+    /// Rewrites the tail positions of a named loop's final `:do`.
+    ///
+    /// Every tail position either *is* a call to the loop — which becomes the
+    /// jump, keeping it a tail call so it can be one — or is not, in which case
+    /// it runs for its effect and the loop leaves through the finish block.
+    and continueEdge (name: string) (e: Expr) (cr: Range) : Expr =
+        match e with
+        | EApp(EIdent(n, ir), args, ar) when n = name ->
+            for a in args do
+                rejectLoopName name a
+
+            advanceWith (parseOverrides name args ir) ar
+
+        | EIf(cond, t, f, ir) ->
+            rejectLoopName name cond
+            EIf(cond, continueEdge name t cr, continueEdge name f cr, ir)
+
+        | ELet(n, isFun, args, ann, value, body, ir) ->
+            rejectLoopName name value
+            ELet(n, isFun, args, ann, value, continueEdge name body cr, ir)
+
+        | ELetTuple(names, value, body, ir) ->
+            rejectLoopName name value
+            ELetTuple(names, value, continueEdge name body cr, ir)
+
+        // Anything else completes, and then the loop is over.
+        | other ->
+            rejectLoopName name other
+            ELet("_", false, [], None, other, finishBlock, cr)
+
+    /// `(lp #:name expr ...)` — the slots the call overrides.
+    and parseOverrides (name: string) (args: Expr list) (cr: Range) : Map<string, Expr> =
+        let rec go acc rest =
+            match rest with
+            | [] -> acc
+            | EKeyword(k, kr) :: value :: tl ->
+                if not (List.contains k accNames) then
+                    let known =
+                        accNames |> List.filter (fun n -> not (n.StartsWith "loopfinal")) |> String.concat ", "
+
+                    let known = if known = "" then "(none)" else known
+
+                    failwithf
+                        $"'%s{name}' at line %d{kr.Start.Line} has no slot called '#:%s{k}'. A named loop can override its accumulators — %s{known} — but not a (:for ...) variable, which is derived from its cursor rather than carried."
+
+                go (Map.add k value acc) tl
+            | EKeyword(k, kr) :: [] -> failwithf $"'#:%s{k}' at line %d{kr.Start.Line} has no value"
+            | other :: _ ->
+                let orr = exprRange other
+                failwithf
+                    $"'%s{name}' at line %d{orr.Start.Line} takes only keyword arguments: write ('%s{name}') to advance everything, or ('%s{name}' #:acc expr) to override one accumulator."
+
+        go Map.empty args
+
+    /// The loop name is a jump target, not a value: it has no lowering anywhere
+    /// but tail position, so anything else is refused where it is written.
+    and rejectLoopName (name: string) (e: Expr) : unit =
+        let rec go (x: Expr) =
+            match x with
+            | EIdent(n, ir) when n = name ->
+                failwithf
+                    $"'%s{name}' at line %d{ir.Start.Line} is a loop name, which may only be tail called from the loop's last (:do ...). It is a jump, so it cannot be used as a value or called from anywhere else."
+            | _ -> exprChildren x |> List.iter go
+
+        go e
 
     let bindCurrents (inner: Expr) =
         List.foldBack
@@ -1013,7 +1291,7 @@ and desugarLoop (forms: SExpr list) (r: Range) : Expr =
 
     let initialArgs =
         (List.map2 (fun sn (_, _, cr) -> call "start" [ EIdent(sn, cr) ] cr) seqNames fors)
-        @ (accInfo |> List.map (fun (cn, _, _, _, _, cr) -> call "init" [ EIdent(cn, cr) ] cr))
+        @ (accInfo |> List.map (fun slot -> call "init" [ EIdent(slot.Collector, slot.Range) ] slot.Range))
 
     let level =
         ELetRec([ (loopName, true, slots, None, body) ], EApp(EIdent(loopName, r), initialArgs, r), r)
@@ -1023,7 +1301,10 @@ and desugarLoop (forms: SExpr list) (r: Range) : Expr =
     // collector is typically a bare nullary constructor, which `let` would
     // generalize — and then its element type would never pin down.
     let withCollectors =
-        List.foldBack (fun (cn, _, collectorExpr, _, _, cr) acc -> ELetMono(cn, collectorExpr, acc, cr)) accInfo level
+        List.foldBack
+            (fun slot acc -> ELetMono(slot.Collector, slot.CollectorExpr, acc, slot.Range))
+            accInfo
+            level
 
     List.foldBack
         (fun (sn, (_, sequence, cr)) acc -> ELetMono(sn, parseExpr sequence, acc, cr))
