@@ -47,7 +47,7 @@ Tail recursion does not work except for self recursion (including named lets) an
     (match a
       (0 #t)
       (_ (even? (- a 1)))))
-  (defun (even=? a)
+  (defun (even? a)
     (if (= 0 a)
         #t
         (odd? (- a 1))))
@@ -249,4 +249,4 @@ It also supports subloops. Anything that isn't a for clause followed by a :for c
 ;; => [(1 1) (1 2) (3 1) (3 2)]
 #+end_src
 
- And the best part? It is fast. As fast as a c# while loop. 
+ And the best part? It is fast.
