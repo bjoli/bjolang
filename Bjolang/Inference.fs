@@ -1314,7 +1314,7 @@ let registerTypeDefs (isRec: bool) (typeDefs: TypeDef list) (env: Env) : Env =
         | Alias ftype ->
             let resolved = resolveTypeAnnotation finalRegistry ftype
             finalRegistry <- { finalRegistry with Aliases = Map.add td.Name (tArgs, resolved) finalRegistry.Aliases }
-        | Record fields ->
+        | Record(fields, _) ->
             let resolvedFields = fields |> List.map (fun f -> f.Name, resolveTypeAnnotation finalRegistry f.Type)
             finalRegistry <- { finalRegistry with Records = Map.add td.Name (tArgs, resolvedFields) finalRegistry.Records }
             for (fName, _) in resolvedFields do

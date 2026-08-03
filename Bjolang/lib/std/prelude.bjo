@@ -124,7 +124,11 @@
 ;; `by` must be positive. A `done?` that coped with both directions would test
 ;; the sign on every iteration, and counting down is better served by a sequence
 ;; of its own than by a branch in the common path.
-(type (: Range (Record (: lo int) (: hi int) (: by int))))
+;; A `Struct` rather than a `Record`: it is three ints, it is bound once in a
+;; loop's prologue and read on every iteration, and as a value type it lives in
+;; the enclosing local instead of behind a reference — so the JIT can promote its
+;; fields to registers and fold constant bounds.
+(type (: Range (Struct (: lo int) (: hi int) (: by int))))
 
 (: range (-> int int Range))
 (defun (range lo hi)

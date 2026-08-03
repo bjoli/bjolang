@@ -115,9 +115,33 @@ Two things the spec did not settle, found by building it:
   the later member. Members are emitted outermost-first, which is the order that
   makes this fire.
 
-`M_exit` is still not a member: `:break` and level 0's exhaustion emit the finish
-block inline, so it is duplicated once per exit site. Making it a member is the
-remaining piece of 5c, and is now cheap — the group already has several members.
+**`M_exit` is a member now**, so the finish block is emitted once and every exit
+calls it. It calls nothing itself, so `LetRecify` gives it a component of its own
+and it is bound beside the group rather than becoming a case in the switch —
+indistinguishable from the caller's side, and simpler.
+
+**Part 6 is largely done, and two of its items turned out not to be needed.**
+
+- The single-level peephole is unnecessary: a one-level loop already emits a
+  plain `while` with no switch, even with several `:break`s, because the
+  flat-loop path handles a one-member group and keeping the finish block out of
+  the group is what keeps it at one member.
+- `Range` exists, and a loop over one emits `c = lo`, `c >= hi`, `c += by` with
+  the bounds as direct field reads and no dispatch.
+- `record struct` exists. `Struct` in a type definition used to be nothing but an
+  accepted spelling of `Record`; it now means a C# `record struct`. `Range` is
+  one, so it lives in a local rather than on the heap.
+- Getting there required publishing a record's *fields* in the export metadata,
+  which `serializeTypeDef` had been dropping. Two things followed from that, both
+  silent: `record-get` on an imported record failed outright, and an inline
+  template that read a field could not be re-inferred at the splice and fell back
+  to an interface call.
+
+Still to do: a real measurement. A crude wall-clock comparison of a range loop
+against a hand-written C# `for` gives the same answer in the same time, but 500M
+iterations in ~10ms means the JIT folded both, so it shows only that nothing
+pathological happens. BenchmarkDotNet with a consumed result is the honest test,
+and Part 6's remaining claims should not be built on until it exists.
 
 Not implemented: overriding a `:for` variable from a named loop, which needs the
 `Option` element slot described above.

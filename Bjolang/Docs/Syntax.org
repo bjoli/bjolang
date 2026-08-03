@@ -194,6 +194,19 @@ An associated type is what lets ~fold~ speak about the element type of a
 collection it has not been told the element type of: ~%item~ is whatever the
 implementation for ~(List %a)~ says it is.
 
+*** Records and structs
+~(: Name (Record (: field type) ...))~ defines an immutable record, and
+~(: Name (Struct ...))~ the same thing as a *value* type — a C# ~record struct~
+rather than a ~record~. Both compare by value, so the choice is about
+representation: a struct lives in its enclosing local or field rather than
+behind a reference, which is what a small, hot, non-recursive type wants, while
+a large one is copied where a record would have passed a reference. A struct may
+not contain itself.
+
+The ~struct*~ *expression* forms — ~(struct ...)~, ~(struct-get ...)~,
+~(struct-set ...)~ — remain plain synonyms of the ~record*~ forms and work on
+either kind.
+
 A trait written this way compiles to a C# interface, with each implementation a
 sealed class holding a singleton ~Instance~. A call whose receiver type is known
 is spliced straight into the call site; a call on a type variable is dispatched
@@ -357,7 +370,12 @@ the loop an accumulator's name reads the value as of that point, which is what
 lets ~folding~ refer to what it has so far.
 
 The stock collectors are ~listing~, ~vecing~, ~mapping~, ~summing~, ~counting~
-and ~folding~; the stock sequences are ~List~, ~Vec~ and ~Map~. A new one of
+and ~folding~; the stock sequences are ~List~, ~Vec~, ~Map~ and ~Range~.
+
+~(range lo hi)~ counts ~lo~ up to but not including ~hi~, and ~(range-by lo hi
+by)~ steps by ~by~, which must be positive. A range's cursor is the number
+itself, so a loop over one compiles to ~c = lo~, ~c < hi~, ~c += by~ with the
+bounds read straight out of the value. A new one of
 either is an ordinary implementation of ~Iterable~ or ~Collector~ in the
 prelude — the compiler knows only the clause keywords.
 

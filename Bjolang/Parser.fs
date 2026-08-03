@@ -33,7 +33,16 @@ type RecordField =
 type TypeDefKind =
     | Alias of FType
     | Union of UnionCase list
-    | Record of RecordField list
+    /// A record, and whether it is a *value* type.
+    ///
+    /// `Struct` used to be nothing but an accepted spelling of `Record`. It now
+    /// means what it says: the type compiles to a C# `record struct` rather than
+    /// a `record`, so it lives in its enclosing local or field rather than on
+    /// the heap. Both are immutable and both compare by value, so the choice is
+    /// about representation and nothing else — but it is not free either way: a
+    /// large struct is copied where a record would have passed a reference, and
+    /// a struct may not contain itself, which C# reports.
+    | Record of RecordField list * bool
 
 type TypeDef =
     { Name: string
@@ -287,15 +296,14 @@ let parseTypeDef (s: SExpr) : TypeDef =
     let r = getRange s
 
     match s with
-    // `Struct` is an accepted synonym for `Record`.
     | SList([ SAtom { Token = Colon }
               head
-              SList(SAtom { Token = Symbol("Record" | "Struct") } :: fields, _) ],
+              SList(SAtom { Token = Symbol(("Record" | "Struct") as kind) } :: fields, _) ],
             _) ->
         let name, typeArgs = parseTypeDefHead head
         { Name = name
           TypeArgs = typeArgs
-          Kind = Record(List.map parseRecordField fields)
+          Kind = Record(List.map parseRecordField fields, kind = "Struct")
           Range = r }
     // `Union`, `Enum`, and `Sum` are accepted tags for sum types.
     | SList([ SAtom { Token = Colon }

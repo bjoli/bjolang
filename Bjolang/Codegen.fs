@@ -1988,9 +1988,10 @@ let rec generateDecl (ctx: CodegenContext) (decl: TDecl) : unit =
                 if td.TypeArgs.IsEmpty then "" 
                 else "<" + (td.TypeArgs |> List.map typeParamName |> String.concat ", ") + ">"
             match td.Kind with
-            | Record fields ->
+            | Record(fields, isStruct) ->
                 indent ctx
-                append ctx $"public record %s{sanitizeIdent td.Name}%s{tyArgsStr}("
+                let kind = if isStruct then "record struct" else "record"
+                append ctx $"public %s{kind} %s{sanitizeIdent td.Name}%s{tyArgsStr}("
                 for i, f in List.indexed fields do
                     if i > 0 then append ctx ", "
                     append ctx (typeToString (Inference.resolveTypeAnnotation Prelude.emptyRegistry f.Type))

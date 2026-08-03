@@ -276,11 +276,17 @@ let main argv =
                         // to an interface call. Both were silent — the type name
                         // still resolved, because an unrecognized one passes
                         // through to C# verbatim.
-                        | Parser.Record(fields) ->
+                        | Parser.Record(fields, isStruct) ->
                             let serializeField (f: Parser.RecordField) =
                                 $"(: {f.Name} {serializeFType f.Type})"
 
-                            $"({head} (: {headStr} (Record\n  "
+                            // `Struct` and `Record` are different types on the
+                            // far side, so the spelling has to survive: an
+                            // importer that read a value type back as a
+                            // reference one would emit the wrong C#.
+                            let tag = if isStruct then "Struct" else "Record"
+
+                            $"({head} (: {headStr} ({tag}\n  "
                             + String.concat "\n  " (List.map serializeField fields)
                             + ")))"
                         
