@@ -1,0 +1,58 @@
+(import (std prelude))
+(import (std list))
+
+(defun (main)
+  ;; 1. Basic map operations
+  (def m (map-empty))
+  (println (if (map-empty? m) "empty: yes" "empty: no"))
+  (println (map-count m))
+
+  (def m1 (map-set m "a" 10))
+  (def m2 (map-set (map-set m "a" 10) "b" 20))
+  (println (if (map-empty? m1) "m1 empty: yes" "m1 empty: no"))
+  (println (map-count m1))
+  (println (map-count m2))
+  (println (map-ref m2 "a"))
+  (println (map-get m2 "b"))
+  (println (map-get-or m2 "c" 999))
+  (println (if (map-contains? m2 "a") "has a: yes" "has a: no"))
+  (println (if (map-has-key? m2 "z") "has z: yes" "has z: no"))
+
+  (def m3 (map-remove m2 "a"))
+  (println (map-count m3))
+  (println (if (map-contains? m3 "a") "has a: yes" "has a: no"))
+
+  ;; 2. Merge and higher order functions
+  (def ma (map-set (map-set (map-empty) "x" 1) "y" 2))
+  (def mb (map-set (map-set (map-empty) "y" 20) "z" 30))
+  (def merged (map-merge ma mb))
+  (println (map-count merged))
+  (println (map-ref merged "y"))
+  (println (map-ref merged "z"))
+
+  (def merged-with (map-merge-with ma mb (fun (k v1 v2) (+ v1 v2))))
+  (println (map-ref merged-with "y"))
+
+  (def doubled (map-map ma (fun (k v) (* v 2))))
+  (println (map-ref doubled "x"))
+  (println (map-ref doubled "y"))
+
+  (def filtered (map-filter ma (fun (k v) (> v 1))))
+  (println (map-count filtered))
+  (println (map-ref filtered "y"))
+
+  (def sum (map-fold (fun (acc k v) (+ acc v)) 0 ma))
+  (println sum)
+
+  ;; 3. Conversions
+  (def l (Cons (Tuple "k1" 100) (Cons (Tuple "k2" 200) Nil)))
+  (def mfromlist (list->map l))
+  (println (map-count mfromlist))
+  (println (map-ref mfromlist "k1"))
+  (println (map-ref mfromlist "k2"))
+
+  (def l2 (map->list mfromlist))
+  (println (list-length l2))
+
+  (println "Map tests passed!")
+  0)

@@ -94,6 +94,67 @@ Mutable builders for efficiently constructing vectors.
 - ~(vecbuilder-count builder)~ : Returns the size.
 - ~(vecbuilder->vec builder)~ : Freezes the builder into an immutable vector.
 
+** Maps (~Map~)
+High-performance immutable CHAMP (Compressed Hash-Array Mapped Prefix-tree) maps.
+- ~(map-empty)~ : Returns an empty map.
+- ~(map-ref map key)~ : Returns the value for ~key~; throws if not found.
+- ~(map-get map key)~ : Returns the value for ~key~; throws if not found.
+- ~(map-get-or map key default-val)~ : Returns the value for ~key~, or ~default-val~ if not found.
+- ~(map-try-get map key)~ : Returns ~(Some val)~ if found, or ~None~ if not.
+- ~(map-set map key value)~ : Returns a new map with ~key~ mapped to ~value~.
+- ~(map-add map key value)~ : Returns a new map with ~key~ mapped to ~value~.
+- ~(map-remove map key)~ : Returns a new map with ~key~ removed.
+- ~(map-contains? map key)~ : Returns true if ~key~ is in ~map~.
+- ~(map-has-key? map key)~ : Returns true if ~key~ is in ~map~.
+- ~(map-count map)~ : Returns the number of key-value pairs in ~map~.
+- ~(map-empty? map)~ : Returns true if ~map~ is empty.
+- ~(map-clear map)~ : Returns an empty map.
+- ~(map-keys map)~ : Returns a lazy sequence (~Seq~) of the map's keys.
+- ~(map-values map)~ : Returns a lazy sequence (~Seq~) of the map's values.
+- ~(map-merge map other)~ : Merges two maps, with entries in ~other~ taking precedence.
+- ~(map-merge-with map other f)~ : Merges two maps using resolver function ~(f key val1 val2)~ for duplicate keys.
+- ~(map-for-each map f)~ : Applies ~(f key value)~ to each entry for side effects.
+- ~(map-iter map f)~ : Iterates with early exit; ~f~ receives ~(key value)~ and returns a boolean.
+- ~(map-fold f init map)~ : Folds over the map; ~f~ receives ~(acc key value)~.
+- ~(map-filter map f)~ : Returns a new map containing only entries where ~(f key value)~ is true.
+- ~(map-map map f)~ : Returns a new map with values transformed by ~(f key value)~.
+- ~(list->map lst)~ : Constructs a map from a list of ~(key . val)~ pairs/tuples.
+- ~(map->list map)~ : Converts the map to a list of pairs/tuples.
+- ~(vec->map vec)~ : Constructs a map from a vector of pairs/tuples.
+- ~(map->vec map)~ : Converts the map to a vector of pairs/tuples.
+- ~(seq->map seq)~ : Constructs a map from a sequence of pairs/tuples.
+- ~(map->seq map)~ : Converts the map to a sequence of pairs/tuples.
+
+** Options (~Option~)
+Optional value type representing presence (~Some~) or absence (~None~).
+- ~(Some val)~ : Wraps ~val~ in an option.
+- ~None~ : Represents no value.
+- ~(some? opt)~ : Returns true if ~opt~ is ~Some~.
+- ~(none? opt)~ : Returns true if ~opt~ is ~None~.
+- ~(option-get opt)~ : Returns the unwrapped value; throws if ~None~.
+- ~(option-get-or opt default-val)~ : Returns the unwrapped value, or ~default-val~ if ~None~.
+
+** Sequences (~Seq~)
+Lazy, demand-driven sequences.
+- ~(seq-empty)~ : Returns an empty sequence.
+- ~(seq-empty? s)~ : Returns true if the sequence is empty.
+- ~(seq-head s)~ : Returns the first element of the sequence.
+- ~(seq-tail s)~ : Returns the rest of the sequence.
+- ~(seq-map s f)~ : Lazily maps ~f~ over the sequence.
+- ~(seq-filter s f)~ : Lazily filters elements satisfying ~f~.
+- ~(seq-fold f init s)~ : Folds over the sequence; ~f~ receives ~(acc item)~.
+- ~(seq-unfold generator state)~ : Produces a sequence from ~state~ and a ~generator~ function returning ~(Some (Tuple next-item next-state))~ or ~None~.
+- ~(seq-take s n)~ : Takes the first ~n~ elements lazily.
+- ~(seq-skip s n)~ : Skips the first ~n~ elements lazily.
+- ~(seq-append s1 s2)~ : Lazily concatenates two sequences.
+- ~(seq-for-each s f)~ : Applies ~f~ to each element for side effects.
+- ~(seq-count s)~ : Consumes the sequence and returns the count.
+- ~(seq-range start count)~ : Returns a lazy integer range sequence.
+- ~(list->seq lst)~ : Converts a list to a lazy sequence.
+- ~(seq->list s)~ : Consumes a sequence into a list.
+- ~(vec->seq vec)~ : Converts a vector to a lazy sequence.
+- ~(seq->vec s)~ : Consumes a sequence into a vector.
+
 ** Iterators
 Standard iterator protocol for collections.
 - ~(iterate col)~ : Returns an iterator for the collection.
