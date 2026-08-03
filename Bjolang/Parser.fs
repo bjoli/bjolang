@@ -584,6 +584,45 @@ let rec parseExpr (s: SExpr) : Expr =
                 match args with
                 | [ Ident target; valExpr ] -> ESet(target, parseExpr valExpr, r)
                 | _ -> failwithf $"Invalid set! syntax at line %d{r.Start.Line}. Expected: (set! name value)"
+            | "->" ->
+                match args with
+                | init :: steps ->
+                    let rec buildThread (prev: SExpr) (step: SExpr) : SExpr =
+                        match step with
+                        | SAtom { Token = Symbol _ } as sym ->
+                            SList([sym; prev], getRange sym)
+                        | SList(items, stepR) ->
+                            let rec replaceListItems (items: SExpr list) : SExpr list * bool =
+                                match items with
+                                | [] -> [], false
+                                | SAtom { Token = Hash } as h :: SList(subItems, subR) :: tail ->
+                                    let rest, foundInRest = replaceListItems tail
+                                    h :: SList(subItems, subR) :: rest, foundInRest
+                                | head :: tail ->
+                                    let newHead, foundHead = replaceAmpersand head
+                                    let newTail, foundTail = replaceListItems tail
+                                    newHead :: newTail, foundHead || foundTail
+
+                            and replaceAmpersand (expr: SExpr) : SExpr * bool =
+                                match expr with
+                                | SAtom { Token = Symbol "&" } -> prev, true
+                                | SList(subItems, subR) ->
+                                    let newItems, found = replaceListItems subItems
+                                    SList(newItems, subR), found
+                                | _ -> expr, false
+                            
+                            let newItems, hasAmp = replaceListItems items
+                            if hasAmp then
+                                SList(newItems, stepR)
+                            else
+                                match items with
+                                | head :: tail -> SList(head :: prev :: tail, stepR)
+                                | [] -> failwithf $"Invalid empty list in -> macro at line %d{stepR.Start.Line}"
+                        | _ -> failwithf $"Invalid step in -> macro at line %d{(getRange step).Start.Line}"
+
+                    let threadExpr = steps |> List.fold buildThread init
+                    parseExpr threadExpr
+                | _ -> failwithf $"-> requires at least one argument at line %d{r.Start.Line}"
             | "if" ->
                 match args with
                 | [ cond; t; f ] -> EIf(parseExpr cond, parseExpr t, parseExpr f, r)

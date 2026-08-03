@@ -1,5 +1,3 @@
-using System;
-using System.Collections.Generic;
 using System.Runtime.CompilerServices;
 
 public static class BjolangRuntime {
@@ -16,6 +14,60 @@ public static class BjolangRuntime {
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static void newline() => Console.WriteLine();
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static IEnumerable<string> filesubreadsublinesdivseq(string path) => System.IO.File.ReadLines(path);
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static string filesubreadsubtext(string path) => System.IO.File.ReadAllText(path);
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static void filesubwritesubtext(string path, string contents) => System.IO.File.WriteAllText(path, contents);
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static void filesubappendsubtext(string path, string contents) => System.IO.File.AppendAllText(path, contents);
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static bool filesubexists_QMARK(string path) => System.IO.File.Exists(path);
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static void filesubdelete(string path) => System.IO.File.Delete(path);
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static string pathsubabsolute(string path) => System.IO.Path.GetFullPath(path);
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static string pathsubcombine(params string[] paths) => System.IO.Path.Combine(paths);
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static string pathsubdirectory(string path) => System.IO.Path.GetDirectoryName(path) ?? "";
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static string pathsubfilename(string path) => System.IO.Path.GetFileName(path);
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static string pathsubfilesubextension(string path) => System.IO.Path.GetExtension(path);
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static System.IO.TextReader opensubtextsubreader(string path) => System.IO.File.OpenText(path);
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static System.IO.TextWriter opensubtextsubwriter(string path) => System.IO.File.CreateText(path);
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static string readersubreadsubline(System.IO.TextReader reader) => reader.ReadLine() ?? "";
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static string readersubreadsubtosubend(System.IO.TextReader reader) => reader.ReadToEnd();
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static void writersubwritesubline(System.IO.TextWriter writer, string text) => writer.WriteLine(text);
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static void writersubflush(System.IO.TextWriter writer) => writer.Flush();
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static void closesubhandle(IDisposable handle) => handle.Dispose();
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static string stringsubappend(string a, string b) => a + b;
@@ -325,14 +377,14 @@ public static class BjolangRuntime {
     }
 
     public static IEnumerable<T> vecsubgtseq<T>(Collections.RrbList<T> vec) {
-        var count = Collections.RrbFun.Count(vec);
-        for (var i = 0; i < count; i++) yield return Collections.RrbFun.Get(vec, i);
+        var count = vec.Count;
+        for (var i = 0; i < count; i++) yield return vec[i];
     }
 
     public static Collections.RrbList<T> seqsubgtvec<T>(IEnumerable<T> source) {
         var builder = Collections.RrbBuilderFun.Empty<T>();
-        foreach (var item in source) builder = Collections.RrbBuilderFun.Add(builder, item);
-        return Collections.RrbBuilderFun.ToImmutable(builder);
+        foreach (var item in source)  builder.Add(item);
+        return builder.ToImmutable();
     }
 
     // --- List (SchemeList) Wrappers ---

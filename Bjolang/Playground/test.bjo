@@ -1,7 +1,11 @@
 (import (std prelude))
 
+(: add-all (-> #:rest int int))
+(defun (add-all #:rest myarr)
+  (let loop ((a 0) (acc 0))
+    (if (= a (array-length myarr))
+        acc
+        (loop (+ a 1) (+ acc (array-ref myarr a))))))
+
 (defun (main args)
-    (let loop ((a 0L))
-      (if (> a 4000000000L)
-          (println a)
-          (loop (+ a 1L)))))
+  (println (add-all 1 2 3 4)))

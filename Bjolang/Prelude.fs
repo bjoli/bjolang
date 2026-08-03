@@ -61,6 +61,27 @@ let prelude : Env =
         ("read-line", {Scheme = Scheme([], [], makeFunType [] stringType); IsMutable = false })
         ("newline", {Scheme = Scheme([], [], makeFunType [] voidType); IsMutable = false })
 
+        ("file-read-lines/seq", {Scheme = Scheme([], [], makeFunType [stringType] (makeSeqType stringType)); IsMutable = false })
+        ("file-read-text", {Scheme = Scheme([], [], makeFunType [stringType] stringType); IsMutable = false })
+        ("file-write-text", {Scheme = Scheme([], [], makeFunType [stringType; stringType] voidType); IsMutable = false })
+        ("file-append-text", {Scheme = Scheme([], [], makeFunType [stringType; stringType] voidType); IsMutable = false })
+        ("file-exists?", {Scheme = Scheme([], [], makeFunType [stringType] boolType); IsMutable = false })
+        ("file-delete", {Scheme = Scheme([], [], makeFunType [stringType] voidType); IsMutable = false })
+
+        ("path-absolute", {Scheme = Scheme([], [], makeFunType [stringType] stringType); IsMutable = false })
+        ("path-combine", {Scheme = Scheme([], [], makeFunType [makeArrayType stringType] stringType); IsMutable = false })
+        ("path-directory", {Scheme = Scheme([], [], makeFunType [stringType] stringType); IsMutable = false })
+        ("path-filename", {Scheme = Scheme([], [], makeFunType [stringType] stringType); IsMutable = false })
+        ("path-file-extension", {Scheme = Scheme([], [], makeFunType [stringType] stringType); IsMutable = false })
+
+        ("open-text-reader", {Scheme = Scheme([], [], makeFunType [stringType] (TCon("System.IO.TextReader", []))); IsMutable = false })
+        ("open-text-writer", {Scheme = Scheme([], [], makeFunType [stringType] (TCon("System.IO.TextWriter", []))); IsMutable = false })
+        ("reader-read-line", {Scheme = Scheme([], [], makeFunType [TCon("System.IO.TextReader", [])] stringType); IsMutable = false })
+        ("reader-read-to-end", {Scheme = Scheme([], [], makeFunType [TCon("System.IO.TextReader", [])] stringType); IsMutable = false })
+        ("writer-write-line", {Scheme = Scheme([], [], makeFunType [TCon("System.IO.TextWriter", []); stringType] voidType); IsMutable = false })
+        ("writer-flush", {Scheme = Scheme([], [], makeFunType [TCon("System.IO.TextWriter", [])] voidType); IsMutable = false })
+        ("close-handle", {Scheme = Scheme([], [], makeFunType [TCon("System.IDisposable", [])] voidType); IsMutable = false })
+
         // String operations
         ("string-append", {Scheme = Scheme([], [], makeFunType [stringType; stringType] stringType); IsMutable = false })
         ("string-length", {Scheme = Scheme([], [], makeFunType [stringType] intType); IsMutable = false })
@@ -214,5 +235,7 @@ let prelude : Env =
         ("map->seq", {Scheme = Scheme(["k"; "v"], [], makeFunType [makeMapType (TVar "k") (TVar "v")] (makeSeqType (TTuple [TVar "k"; TVar "v"]))); IsMutable = false })
       ]
       Registry = emptyRegistry
-      FunMetas = Map.empty
+      FunMetas = Map.ofList [
+          ("path-combine", { MandatoryCount = 0; KeywordParams = []; RestParam = Some stringType })
+      ]
       CurrentModule = "" }

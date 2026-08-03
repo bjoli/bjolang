@@ -202,3 +202,33 @@ Have the same syntax. This is a record example:
   ((List 1 2 _) 2)
   ((List a b c) (+ a (+ b c)))
 #+end_src
+
+*** A proper looping facility
+
+I got tired of shitty looping facilities a long time ago. I took Alex Shinn's (chibi loop) and made (goof loop) for guile scheme. Not only was it extensible and much more flexible than most looping facilities, it also had the fantastic feature that the code it produced was as fast as a hand-rolled loop (looking at you, python's for loop).
+
+Bjolangs loop is based on what I learned writing goof-loop, but instead of using macros, it uses traits.
+
+#+begin_src scheme
+(defun (main args)
+  (def my-vec (get-a-huge-vec))
+  (def my-list (get-an-equally-huge-list))
+  (loop (:for a my-vec)
+        (:for b my-vec)
+        (:break (= a (* b 2)))
+        (:when (not (= a b)))
+        (:acc acc (listing (+ a b)))))
+#+end_src
+
+It also supports subloops. Anything that isn't a for clause followed by a :for clause starts a subloop:
+
+#+begin_src scheme
+(defun (main args)
+  (loop (:for a '(1 2 3))
+        (:when (odd? a))
+        (:for b [1 2])
+        (:acc (vectoring (a . b)))))
+;; => [(1 1) (1 2) (3 1) (3 2)]
+#+end_src
+
+ And the best part? It is fast. As fast as a c# while loop. 
