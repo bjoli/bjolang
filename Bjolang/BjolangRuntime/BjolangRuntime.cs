@@ -10,7 +10,7 @@ public static class BjolangRuntime {
     public static void displayln(object o) => Console.WriteLine(o);
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public static string readsubline() => Console.ReadLine();
+    public static string readsubline() => Console.ReadLine() ?? "";
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static void newline() => Console.WriteLine();
@@ -120,92 +120,92 @@ public static class BjolangRuntime {
 
     // Vec operations mapped from RrbFun
     [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.AggressiveInlining)]
-    public static Collections.RrbList<T> vecsubempty<T>() => Collections.RrbFun.Empty<T>();
+    public static Collections.RrbList<T> vecsubempty<T>() where T : notnull => Collections.RrbFun.Empty<T>();
 
     [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.AggressiveInlining)]
-    public static T vecsubget<T>(Collections.RrbList<T> list, int index) => Collections.RrbFun.Get(list, index);
+    public static T vecsubget<T>(Collections.RrbList<T> list, int index) where T : notnull => Collections.RrbFun.Get(list, index);
 
     [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.AggressiveInlining)]
-    public static Collections.RrbList<T> vecsubset<T>(Collections.RrbList<T> list, int index, T value) => Collections.RrbFun.SetItem(list, index, value);
+    public static Collections.RrbList<T> vecsubset<T>(Collections.RrbList<T> list, int index, T value) where T : notnull => Collections.RrbFun.SetItem(list, index, value);
 
     [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.AggressiveInlining)]
-    public static Collections.RrbList<T> vecsubadd<T>(Collections.RrbList<T> list, T item) => Collections.RrbFun.Add(list, item);
+    public static Collections.RrbList<T> vecsubadd<T>(Collections.RrbList<T> list, T item) where T : notnull => Collections.RrbFun.Add(list, item);
 
     [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.AggressiveInlining)]
-    public static Collections.RrbList<T> vecsubinsert<T>(Collections.RrbList<T> list, int index, T item) => Collections.RrbFun.Insert(list, index, item);
+    public static Collections.RrbList<T> vecsubinsert<T>(Collections.RrbList<T> list, int index, T item) where T : notnull => Collections.RrbFun.Insert(list, index, item);
 
     [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.AggressiveInlining)]
-    public static Collections.RrbList<T> vecsubremovesubat<T>(Collections.RrbList<T> list, int index) => Collections.RrbFun.RemoveAt(list, index);
+    public static Collections.RrbList<T> vecsubremovesubat<T>(Collections.RrbList<T> list, int index) where T : notnull => Collections.RrbFun.RemoveAt(list, index);
 
     [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.AggressiveInlining)]
-    public static Collections.RrbList<T> vecsubpop<T>(Collections.RrbList<T> list) => Collections.RrbFun.Pop(list);
+    public static Collections.RrbList<T> vecsubpop<T>(Collections.RrbList<T> list) where T : notnull => Collections.RrbFun.Pop(list);
 
     [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.AggressiveInlining)]
-    public static Collections.RrbList<T> vecsubpopsubfirst<T>(Collections.RrbList<T> list) => Collections.RrbFun.PopFirst(list);
+    public static Collections.RrbList<T> vecsubpopsubfirst<T>(Collections.RrbList<T> list) where T : notnull => Collections.RrbFun.PopFirst(list);
 
     [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.AggressiveInlining)]
-    public static Collections.RrbList<T> vecsubslice<T>(Collections.RrbList<T> list, int start, int count) => Collections.RrbFun.Slice(list, start, count);
+    public static Collections.RrbList<T> vecsubslice<T>(Collections.RrbList<T> list, int start, int count) where T : notnull => Collections.RrbFun.Slice(list, start, count);
 
     [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.AggressiveInlining)]
-    public static Collections.RrbList<T> vecsubmerge<T>(Collections.RrbList<T> list, Collections.RrbList<T> other) => Collections.RrbFun.Merge(list, other, false);
+    public static Collections.RrbList<T> vecsubmerge<T>(Collections.RrbList<T> list, Collections.RrbList<T> other) where T : notnull => Collections.RrbFun.Merge(list, other, false);
 
     [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.AggressiveInlining)]
-    public static Collections.RrbList<T> vecsubmergedivpure<T>(Collections.RrbList<T> list, Collections.RrbList<T> other) => Collections.RrbFun.Merge(list, other, true);
+    public static Collections.RrbList<T> vecsubmergedivpure<T>(Collections.RrbList<T> list, Collections.RrbList<T> other) where T : notnull => Collections.RrbFun.Merge(list, other, true);
 
     [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.AggressiveInlining)]
-    public static ValueTuple<Collections.RrbList<T>, Collections.RrbList<T>> vecsubsplit<T>(Collections.RrbList<T> list, int index) => Collections.RrbFun.Split(list, index);
+    public static ValueTuple<Collections.RrbList<T>, Collections.RrbList<T>> vecsubsplit<T>(Collections.RrbList<T> list, int index) where T : notnull => Collections.RrbFun.Split(list, index);
 
     [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.AggressiveInlining)]
-    public static Collections.RrbList<TResult> vecsubmap<T, TResult>(Func<T, TResult> mapper, Collections.RrbList<T> list) => Collections.RrbFun.Map(list, mapper);
+    public static Collections.RrbList<TResult> vecsubmap<T, TResult>(Func<T, TResult> mapper, Collections.RrbList<T> list) where T : notnull where TResult : notnull => Collections.RrbFun.Map(list, mapper);
 
     [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.AggressiveInlining)]
-    public static Collections.RrbList<T> vecsubfilter<T>(Func<T, bool> predicate, Collections.RrbList<T> list) => Collections.RrbFun.Filter(list, predicate);
+    public static Collections.RrbList<T> vecsubfilter<T>(Func<T, bool> predicate, Collections.RrbList<T> list) where T : notnull => Collections.RrbFun.Filter(list, predicate);
 
     [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.AggressiveInlining)]
-    public static TState vecsubfold<T, TState>(Func<TState, T, TState> func, TState seed, Collections.RrbList<T> list) => Collections.RrbFun.Fold(list, seed, func);
+    public static TState vecsubfold<T, TState>(Func<TState, T, TState> func, TState seed, Collections.RrbList<T> list) where T : notnull => Collections.RrbFun.Fold(list, seed, func);
 
     [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.AggressiveInlining)]
-    public static T vecsubreduce<T>(Func<T, T, T> func, Collections.RrbList<T> list) => Collections.RrbFun.Reduce(list, func);
+    public static T vecsubreduce<T>(Func<T, T, T> func, Collections.RrbList<T> list) where T : notnull => Collections.RrbFun.Reduce(list, func);
 
     [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.AggressiveInlining)]
-    public static void vecsubforsubeach<T>(Action<T> action, Collections.RrbList<T> list) => Collections.RrbFun.ForEach(list, action);
+    public static void vecsubforsubeach<T>(Action<T> action, Collections.RrbList<T> list) where T : notnull => Collections.RrbFun.ForEach(list, action);
 
     [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.AggressiveInlining)]
-    public static void vecsubforsubeachdivrange<T>(Action<T> action, Collections.RrbList<T> list, int index, int count) => Collections.RrbFun.ForEach(list, action, index, count);
+    public static void vecsubforsubeachdivrange<T>(Action<T> action, Collections.RrbList<T> list, int index, int count) where T : notnull => Collections.RrbFun.ForEach(list, action, index, count);
 
     [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.AggressiveInlining)]
-    public static bool vecsubiter<T>(Func<T, bool> action, Collections.RrbList<T> list) => Collections.RrbFun.Iter(list, action);
+    public static bool vecsubiter<T>(Func<T, bool> action, Collections.RrbList<T> list) where T : notnull => Collections.RrbFun.Iter(list, action);
 
     [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.AggressiveInlining)]
-    public static int vecsubcount<T>(Collections.RrbList<T> list) => Collections.RrbFun.Count(list);
+    public static int vecsubcount<T>(Collections.RrbList<T> list) where T : notnull => Collections.RrbFun.Count(list);
 
     [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.AggressiveInlining)]
-    public static bool vecsubcontains<T>(Collections.RrbList<T> list, T item) => Collections.RrbFun.Contains(list, item);
+    public static bool vecsubcontains<T>(Collections.RrbList<T> list, T item) where T : notnull => Collections.RrbFun.Contains(list, item);
 
     [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.AggressiveInlining)]
-    public static Collections.RrbList<T> vecsubcompact<T>(Collections.RrbList<T> list) => Collections.RrbFun.Compact(list);
+    public static Collections.RrbList<T> vecsubcompact<T>(Collections.RrbList<T> list) where T : notnull => Collections.RrbFun.Compact(list);
 
     // --- VecBuilder Wrappers ---
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public static Collections.RrbBuilder<T> vecbuildersubempty<T>() => Collections.RrbBuilderFun.Empty<T>();
+    public static Collections.RrbBuilder<T> vecbuildersubempty<T>() where T : notnull => Collections.RrbBuilderFun.Empty<T>();
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public static Collections.RrbBuilder<T> vecsubgtvecbuilder<T>(Collections.RrbList<T> list) => Collections.RrbBuilderFun.FromList(list);
+    public static Collections.RrbBuilder<T> vecsubgtvecbuilder<T>(Collections.RrbList<T> list) where T : notnull => Collections.RrbBuilderFun.FromList(list);
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public static Collections.RrbBuilder<T> vecbuildersubadd_BANG<T>(Collections.RrbBuilder<T> builder, T item) => Collections.RrbBuilderFun.Add(builder, item);
+    public static Collections.RrbBuilder<T> vecbuildersubadd_BANG<T>(Collections.RrbBuilder<T> builder, T item) where T : notnull => Collections.RrbBuilderFun.Add(builder, item);
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public static Collections.RrbBuilder<T> vecbuildersubset_BANG<T>(Collections.RrbBuilder<T> builder, int index, T item) => Collections.RrbBuilderFun.SetItem(builder, index, item);
+    public static Collections.RrbBuilder<T> vecbuildersubset_BANG<T>(Collections.RrbBuilder<T> builder, int index, T item) where T : notnull => Collections.RrbBuilderFun.SetItem(builder, index, item);
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public static T vecbuildersubget<T>(Collections.RrbBuilder<T> builder, int index) => Collections.RrbBuilderFun.Get(builder, index);
+    public static T vecbuildersubget<T>(Collections.RrbBuilder<T> builder, int index) where T : notnull => Collections.RrbBuilderFun.Get(builder, index);
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public static int vecbuildersubcount<T>(Collections.RrbBuilder<T> builder) => Collections.RrbBuilderFun.Count(builder);
+    public static int vecbuildersubcount<T>(Collections.RrbBuilder<T> builder) where T : notnull => Collections.RrbBuilderFun.Count(builder);
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public static Collections.RrbList<T> vecbuildersubgtvec<T>(Collections.RrbBuilder<T> builder) => Collections.RrbBuilderFun.ToImmutable(builder);
+    public static Collections.RrbList<T> vecbuildersubgtvec<T>(Collections.RrbBuilder<T> builder) where T : notnull => Collections.RrbBuilderFun.ToImmutable(builder);
 
     // --- ListBuilder ---
     //
@@ -476,12 +476,12 @@ public static class BjolangRuntime {
         return result;
     }
 
-    public static IEnumerable<T> vecsubgtseq<T>(Collections.RrbList<T> vec) {
+    public static IEnumerable<T> vecsubgtseq<T>(Collections.RrbList<T> vec) where T : notnull {
         var count = vec.Count;
         for (var i = 0; i < count; i++) yield return vec[i];
     }
 
-    public static Collections.RrbList<T> seqsubgtvec<T>(IEnumerable<T> source) {
+    public static Collections.RrbList<T> seqsubgtvec<T>(IEnumerable<T> source) where T : notnull {
         var builder = Collections.RrbBuilderFun.Empty<T>();
         foreach (var item in source)  builder.Add(item);
         return builder.ToImmutable();
@@ -605,6 +605,8 @@ public static class BjolangRuntime {
     // the trait has one `%item`, not two.
     //
     // The pair is a `ValueTuple`, so passing it costs no allocation.
+    // TODO: this should be fixed. Map should have an interface that works with ValueTuples instead of kvp so that we
+    // do not have to create valuetuples
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static Map.Map<TK, TV> mapsubmergesubwith<TK, TV>(Func<ValueTuple<TK, TV, TV>, TV> resolver, Map.Map<TK, TV> map, Map.Map<TK, TV> other) where TK : notnull =>
