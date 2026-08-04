@@ -206,11 +206,12 @@ let prelude : Env =
         "vecbuilder-count", {Scheme = Scheme(["a"], [], makeFunType [makeVecBuilderType (TVar "a")] intType); IsMutable = false }
         "vecbuilder->vec", {Scheme = Scheme(["a"], [], makeFunType [makeVecBuilderType (TVar "a")] (makeVecType (TVar "a"))); IsMutable = false }
 
-        // A builder for `List`, which the runtime's SchemeList has none of.
-        // Consing then reversing allocates two cells per element; buffering and
-        // handing the span to `Create` allocates one.
+        // SchemeListBuilder operations
         "listbuilder-empty", {Scheme = Scheme(["a"], [], makeFunType [] (makeListBuilderType (TVar "a"))); IsMutable = false }
+        "list->builder", {Scheme = Scheme(["a"], [], makeFunType [makeListType (TVar "a")] (makeListBuilderType (TVar "a"))); IsMutable = false }
+        "list->listbuilder", {Scheme = Scheme(["a"], [], makeFunType [makeListType (TVar "a")] (makeListBuilderType (TVar "a"))); IsMutable = false }
         "listbuilder-add!", {Scheme = Scheme(["a"], [], makeFunType [makeListBuilderType (TVar "a"); TVar "a"] (makeListBuilderType (TVar "a"))); IsMutable = false }
+        "listbuilder-add-range!", {Scheme = Scheme(["a"], [], makeFunType [makeListBuilderType (TVar "a"); makeSeqType (TVar "a")] (makeListBuilderType (TVar "a"))); IsMutable = false }
         "listbuilder-count", {Scheme = Scheme(["a"], [], makeFunType [makeListBuilderType (TVar "a")] intType); IsMutable = false }
         "listbuilder->list", {Scheme = Scheme(["a"], [], makeFunType [makeListBuilderType (TVar "a")] (makeListType (TVar "a"))); IsMutable = false }
 

@@ -104,6 +104,15 @@ Mutable builders for efficiently constructing vectors.
 - ~(vecbuilder-count builder)~ : Returns the size.
 - ~(vecbuilder->vec builder)~ : Freezes the builder into an immutable vector.
 
+** List Builders
+Mutable builders (~SchemeListBuilder~) for efficiently constructing Scheme lists front-to-back in O(1) time per item.
+- ~(listbuilder-empty)~ : Creates an empty builder.
+- ~(list->builder list)~ / ~(list->listbuilder list)~ : Creates a builder initialized with a copy of the list.
+- ~(listbuilder-add! builder item)~ : Appends ~item~ to the end of the builder.
+- ~(listbuilder-add-range! builder seq)~ : Appends all elements in ~seq~ to the builder.
+- ~(listbuilder-count builder)~ : Returns the count of elements in the builder.
+- ~(listbuilder->list builder)~ : Freezes the builder into an immutable ~List~.
+
 ** Maps (~Map~)
 High-performance immutable CHAMP (Compressed Hash-Array Mapped Prefix-tree) maps.
 - ~(map-empty)~ : Returns an empty map.

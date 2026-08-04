@@ -208,34 +208,35 @@ public static class BjolangRuntime {
     public static Collections.RrbList<T> vecbuildersubgtvec<T>(Collections.RrbBuilder<T> builder) where T : notnull => Collections.RrbBuilderFun.ToImmutable(builder);
 
     // --- ListBuilder ---
-    //
-    // SchemeList has no builder of its own, and the obvious way to build one
-    // front-to-back — cons each element then reverse — allocates two cells per
-    // element. Buffering into a List<T> and handing the span to `Create`, which
-    // builds back-to-front in one pass, allocates one cell per element plus the
-    // buffer's amortized array.
-    public sealed class ListBuilder<T> {
-        public readonly List<T> Items = new List<T>();
-    }
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static SchemeList.SchemeListBuilder<T> listbuildersubempty<T>() => new SchemeList.SchemeListBuilder<T>();
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public static ListBuilder<T> listbuildersubempty<T>() => new ListBuilder<T>();
+    public static SchemeList.SchemeListBuilder<T> listsubgtbuilder<T>(SchemeList.SchemeList<T> list) => list.ToBuilder();
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static SchemeList.SchemeListBuilder<T> listsubgtlistbuilder<T>(SchemeList.SchemeList<T> list) => list.ToBuilder();
 
     // Returns the builder rather than void, so that it threads through a loop
     // slot the same way an immutable accumulator does.
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public static ListBuilder<T> listbuildersubadd_BANG<T>(ListBuilder<T> builder, T item) {
-        builder.Items.Add(item);
+    public static SchemeList.SchemeListBuilder<T> listbuildersubadd_BANG<T>(SchemeList.SchemeListBuilder<T> builder, T item) {
+        builder.Add(item);
         return builder;
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public static int listbuildersubcount<T>(ListBuilder<T> builder) => builder.Items.Count;
+    public static SchemeList.SchemeListBuilder<T> listbuildersubaddsubrange_BANG<T>(SchemeList.SchemeListBuilder<T> builder, IEnumerable<T> items) {
+        builder.AddRange(items);
+        return builder;
+    }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public static SchemeList.SchemeList<T> listbuildersubgtlist<T>(ListBuilder<T> builder) =>
-        SchemeList.SchemeList.Create<T>(
-            System.Runtime.InteropServices.CollectionsMarshal.AsSpan(builder.Items));
+    public static int listbuildersubcount<T>(SchemeList.SchemeListBuilder<T> builder) => builder.Count;
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static SchemeList.SchemeList<T> listbuildersubgtlist<T>(SchemeList.SchemeListBuilder<T> builder) =>
+        builder.ToSchemeList();
 
     // --- MapBuilder ---
     //
@@ -467,14 +468,9 @@ public static class BjolangRuntime {
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static IEnumerable<T> listsubgtseq<T>(SchemeList.SchemeList<T> list) => list;
 
-    public static SchemeList.SchemeList<T> seqsubgtlist<T>(IEnumerable<T> source) {
-        // A cons list is built back to front, so the sequence has to be drained
-        // first. This is the point at which a sequence stops being lazy.
-        var buffer = new List<T>(source);
-        var result = SchemeList.SchemeList.Empty<T>();
-        for (var i = buffer.Count - 1; i >= 0; i--) result = SchemeList.SchemeList.Cons(buffer[i], result);
-        return result;
-    }
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static SchemeList.SchemeList<T> seqsubgtlist<T>(IEnumerable<T> source) =>
+        new SchemeList.SchemeListBuilder<T>(source).ToSchemeList();
 
     public static IEnumerable<T> vecsubgtseq<T>(Collections.RrbList<T> vec) where T : notnull {
         var count = vec.Count;

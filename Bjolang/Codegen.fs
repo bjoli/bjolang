@@ -91,7 +91,7 @@ let mapPrimitiveType (name: string) =
     // Builders and cursors. All three live inside the runtime's static class,
     // which `using static` also imports the nested types of — but a declaration
     // spells the type out, so they are qualified here.
-    | "ListBuilder" -> "BjolangRuntime.ListBuilder"
+    | "ListBuilder" -> "SchemeList.SchemeListBuilder"
     | "MapBuilder" -> "Map.MapBuilder"
     | "VecCursor" -> "BjolangRuntime.VecCursor"
     | "MapCursor" -> "BjolangRuntime.MapCursor"
@@ -1400,7 +1400,7 @@ and generateBlock (ctx: CodegenContext) (target: BlockTarget) (expr: TypedExpr) 
         | Some (lambdaArgs, argTypes, retType, lambdaBody) ->
             generateLocalFunction ctx name lambdaArgs argTypes retType lambdaBody value.Type
         | None ->
-            if isVoidType value.Type then
+            if isVoidType value.Type || name = "_" then
                 // `(begin a b)` is `TLet ("_", …, a, b)`: `a` runs, then `b`. The
                 // block is not over, so this is an `Effect`, not a `Discard`.
                 generateBlock ctx Effect value
