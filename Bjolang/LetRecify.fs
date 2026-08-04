@@ -297,7 +297,24 @@ let rec letrecifyExpr (expr: Expr) : Expr =
 
         List.foldBack
             (fun scc accBody ->
-                let componentNodes = Set.toList scc
+                // Source order, not `Set.toList`'s. A set of strings comes back
+                // sorted ordinally, and every name here is a gensym `p__N` with
+                // a decimal counter — so `p__11` sorts before `p__8` and the
+                // group's members come out in an order that depends on how many
+                // names the compilation happened to invent earlier.
+                //
+                // That is not cosmetic. `Inference`'s `ELetRec` checks members in
+                // list order and relies on an earlier member's call site having
+                // pinned a later member's argument types; a body checked against
+                // bare metavariables cannot resolve an associated-type
+                // projection. A loop's levels are emitted outermost-first, which
+                // is exactly the order that works, and sorting by name threw it
+                // away.
+                let componentNodes =
+                    optBindings
+                    |> List.map (fun (n, _, _, _, _) -> n)
+                    |> List.filter (fun n -> Set.contains n scc)
+
                 let componentBindings = componentNodes |> List.map (fun n -> Map.find n bindingMap)
 
                 if componentNodes.Length = 1 then
