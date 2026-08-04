@@ -4,7 +4,7 @@
              (: y int))))
 
 (defun (main args)
-    (def p1 (struct (x 10) (y 20)))
+    (def p1 (Point (x 10) (y 20)))
     (displayln (int->string (struct-get p1 x)))
     (displayln (int->string (struct-get p1 y)))
 

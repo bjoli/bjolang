@@ -1,5 +1,5 @@
 (import (std prelude))
-(defun (main)
+(defun (main args)
   (-> 4
       (+ 5)           ;; => 9
       (- & 3)         ;; => 6

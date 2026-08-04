@@ -247,12 +247,25 @@ let prelude : Env =
         "map-keys", {Scheme = Scheme(["k"; "v"], [], makeFunType [makeMapType (TVar "k") (TVar "v")] (makeSeqType (TVar "k"))); IsMutable = false }
         "map-values", {Scheme = Scheme(["k"; "v"], [], makeFunType [makeMapType (TVar "k") (TVar "v")] (makeSeqType (TVar "v"))); IsMutable = false }
         "map-merge", {Scheme = Scheme(["k"; "v"], [], makeFunType [makeMapType (TVar "k") (TVar "v"); makeMapType (TVar "k") (TVar "v")] (makeMapType (TVar "k") (TVar "v"))); IsMutable = false }
-        "map-merge-with", {Scheme = Scheme(["k"; "v"], [], makeFunType [makeFunType [TVar "k"; TVar "v"; TVar "v"] (TVar "v"); makeMapType (TVar "k") (TVar "v"); makeMapType (TVar "k") (TVar "v")] (makeMapType (TVar "k") (TVar "v"))); IsMutable = false }
-        "map-for-each", {Scheme = Scheme(["k"; "v"], [], makeFunType [makeFunType [TVar "k"; TVar "v"] voidType; makeMapType (TVar "k") (TVar "v")] voidType); IsMutable = false }
-        "map-iter", {Scheme = Scheme(["k"; "v"], [], makeFunType [makeFunType [TVar "k"; TVar "v"] boolType; makeMapType (TVar "k") (TVar "v")] boolType); IsMutable = false }
-        "map-fold", {Scheme = Scheme(["k"; "v"; "s"], [], makeFunType [makeFunType [TVar "s"; TVar "k"; TVar "v"] (TVar "s"); TVar "s"; makeMapType (TVar "k") (TVar "v")] (TVar "s")); IsMutable = false }
-        "map-filter", {Scheme = Scheme(["k"; "v"], [], makeFunType [makeFunType [TVar "k"; TVar "v"] boolType; makeMapType (TVar "k") (TVar "v")] (makeMapType (TVar "k") (TVar "v"))); IsMutable = false }
-        "map-map", {Scheme = Scheme(["k"; "v"; "v2"], [], makeFunType [makeFunType [TVar "k"; TVar "v"] (TVar "v2"); makeMapType (TVar "k") (TVar "v")] (makeMapType (TVar "k") (TVar "v2"))); IsMutable = false }
+        // Every callback below takes the *pair*, as one argument. A Map's
+        // element is its `(Tuple %k %v)`: `Iterable`'s `%elem` and `Foldable`'s
+        // `%item` say so, and so do `map->list`, `map->seq`,
+        // `map-cursor-current` and the `#map(...)` literal. A trait signature
+        // mentioning one element takes a one-argument callback, so a
+        // two-argument function over a key and a value could not be passed
+        // where one is expected.
+        "map-merge-with", {Scheme = Scheme(["k"; "v"], [], makeFunType [makeFunType [TTuple [TVar "k"; TVar "v"; TVar "v"]] (TVar "v"); makeMapType (TVar "k") (TVar "v"); makeMapType (TVar "k") (TVar "v")] (makeMapType (TVar "k") (TVar "v"))); IsMutable = false }
+        "map-for-each", {Scheme = Scheme(["k"; "v"], [], makeFunType [makeFunType [TTuple [TVar "k"; TVar "v"]] voidType; makeMapType (TVar "k") (TVar "v")] voidType); IsMutable = false }
+        "map-iter", {Scheme = Scheme(["k"; "v"], [], makeFunType [makeFunType [TTuple [TVar "k"; TVar "v"]] boolType; makeMapType (TVar "k") (TVar "v")] boolType); IsMutable = false }
+        "map-fold", {Scheme = Scheme(["k"; "v"; "s"], [], makeFunType [makeFunType [TVar "s"; TTuple [TVar "k"; TVar "v"]] (TVar "s"); TVar "s"; makeMapType (TVar "k") (TVar "v")] (TVar "s")); IsMutable = false }
+        "map-filter", {Scheme = Scheme(["k"; "v"], [], makeFunType [makeFunType [TTuple [TVar "k"; TVar "v"]] boolType; makeMapType (TVar "k") (TVar "v")] (makeMapType (TVar "k") (TVar "v"))); IsMutable = false }
+        "map-map", {Scheme = Scheme(["k"; "v"; "v2"], [], makeFunType [makeFunType [TTuple [TVar "k"; TVar "v"]] (TVar "v2"); makeMapType (TVar "k") (TVar "v")] (makeMapType (TVar "k") (TVar "v2"))); IsMutable = false }
+
+        // The one place a pair will not do. `Functor`'s `(-> %a %b)` has to
+        // replace the element type and give back the same shape, and the only
+        // argument of `(Map %k %v)` free to move is `%v` — so a functorial map
+        // over a Map sees the value, with the key riding along.
+        "map-map-values", {Scheme = Scheme(["k"; "v"; "v2"], [], makeFunType [makeFunType [TVar "v"] (TVar "v2"); makeMapType (TVar "k") (TVar "v")] (makeMapType (TVar "k") (TVar "v2"))); IsMutable = false }
 
         // Map conversions
         "list->map", {Scheme = Scheme(["k"; "v"], [], makeFunType [makeListType (TTuple [TVar "k"; TVar "v"])] (makeMapType (TVar "k") (TVar "v"))); IsMutable = false }

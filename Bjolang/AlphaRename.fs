@@ -56,6 +56,7 @@ let rec patternBinders (pat: Pattern) : string list =
     | PVec(items, tailOpt, _) ->
         (items |> List.collect patternBinders)
         @ (tailOpt |> Option.map patternBinders |> Option.defaultValue [])
+    | PTuple(items, _) -> items |> List.collect patternBinders
     | PConstruct(_, args, _) -> args |> List.collect patternBinders
 
 let rec private renamePattern (subst: Map<string, string>) (pat: Pattern) : Pattern =
@@ -65,6 +66,8 @@ let rec private renamePattern (subst: Map<string, string>) (pat: Pattern) : Patt
         PList(List.map (renamePattern subst) items, Option.map (renamePattern subst) tailOpt, r)
     | PVec(items, tailOpt, r) ->
         PVec(List.map (renamePattern subst) items, Option.map (renamePattern subst) tailOpt, r)
+    | PTuple(items, r) ->
+        PTuple(List.map (renamePattern subst) items, r)
     | PConstruct(n, args, r) -> PConstruct(n, List.map (renamePattern subst) args, r)
     | leaf -> leaf
 
@@ -152,7 +155,6 @@ let freshen (roots: string list) (expr: Expr) : Expr * Map<string, string> =
             let args', bodySubst = bind args subst
             EFun(args', go bodySubst body, r)
 
-        | ERecord(fields, r) -> ERecord(fields |> List.map (fun (k, v) -> k, sub v), r)
         | ERecordUpdate(n, fields, r) ->
             ERecordUpdate(reference n, fields |> List.map (fun (k, v) -> k, sub v), r)
         | EGetField(target, f, r) -> EGetField(sub target, f, r)
@@ -238,7 +240,6 @@ let freeNames (bound: Set<string>) (expr: Expr) : Set<string> =
             sub c
             sub b
         | EFun(args, body, _) -> go (Set.union bound (Set.ofList args)) body
-        | ERecord(fields, _) -> fields |> List.iter (snd >> sub)
         | ERecordUpdate(n, fields, _) ->
             reference n
             fields |> List.iter (snd >> sub)
@@ -278,6 +279,7 @@ let rec private typedPatternBinders (pat: TypedPattern) : string list =
     | TPVec(items, tailOpt) ->
         (items |> List.collect typedPatternBinders)
         @ (tailOpt |> Option.map typedPatternBinders |> Option.defaultValue [])
+    | TPTuple items -> items |> List.collect typedPatternBinders
     | TPConstruct(_, args) -> args |> List.collect typedPatternBinders
     // `TPApp` holds an expression, not a binder; the pattern it wraps binds.
     | TPApp(_, inner) -> typedPatternBinders inner
@@ -386,6 +388,7 @@ let rec private renameCore
                                 TPApp(sub e, goPat inner')
                             | TPList(items, tailOpt) -> TPList(List.map goPat items, Option.map goPat tailOpt)
                             | TPVec(items, tailOpt) -> TPVec(List.map goPat items, Option.map goPat tailOpt)
+                            | TPTuple items -> TPTuple(List.map goPat items)
                             | TPConstruct(n, args) -> TPConstruct(n, List.map goPat args)
                             | leaf -> leaf
 

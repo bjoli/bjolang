@@ -60,6 +60,7 @@ type Pattern =
     | PQuotedSymbol of string * Range
     | PList of Pattern list * Pattern option * Range // (items, optional tail, range)
     | PVec of Pattern list * Pattern option * Range // (items, optional tail, range)
+    | PTuple of Pattern list * Range
     | PConstruct of string * Pattern list * Range
 
 and Expr =
@@ -101,7 +102,11 @@ and Expr =
     /// a conditional with only one arm, evaluated for effect.
     | EWhen of Expr * Expr * bool * Range
     | EFun of string list * Expr * Range
-    | ERecord of (string * Expr) list * Range
+    /// Record and struct construction has no node of its own. `(Car (brand "x")
+    /// (year 3000))` parses as an ordinary application of `Car`, and inference
+    /// recognizes the head as a record type and rereads the arguments as
+    /// fields. The type name *is* the constructor, so there is nothing for the
+    /// parser to guess and nothing for a dedicated node to carry.
     | ERecordUpdate of string * (string * Expr) list * Range
     | EGetField of Expr * string * Range
     | EList of Expr list * Range
@@ -189,6 +194,10 @@ let rec parsePattern (s: SExpr) : Pattern =
     | SList(SAtom { Token = Symbol("Vec" | "vec-literal") } :: args, _) ->
         let elements, tail = parseSpreadArgs r args
         PVec(elements, tail, r)
+
+    // `(Tuple a b ...)` and dotted pairs `(a . b ...)` which the reader rewrites to `(Tuple a b ...)`
+    | SList(SAtom { Token = Symbol "Tuple" } :: args, _) ->
+        PTuple(List.map parsePattern args, r)
 
     | SList(SAtom { Token = Symbol name } :: args, _) -> PConstruct(name, List.map parsePattern args, r)
 
@@ -395,7 +404,6 @@ let exprRange (e: Expr) : Range =
     | EIf(_, _, _, r)
     | EWhen(_, _, _, r)
     | EFun(_, _, r)
-    | ERecord(_, r)
     | ERecordUpdate(_, _, r)
     | EGetField(_, _, r)
     | EList(_, r)
@@ -436,7 +444,6 @@ let exprChildren (e: Expr) : Expr list =
     | EIf(c, t, f, _) -> [ c; t; f ]
     | EWhen(c, b, _, _) -> [ c; b ]
     | EFun(_, b, _) -> [ b ]
-    | ERecord(fields, _) -> fields |> List.map snd
     | ERecordUpdate(_, fields, _) -> fields |> List.map snd
     | ETryFinally(b, c, _) -> [ b; c ]
     | EMatch(target, clauses, _) ->
@@ -449,6 +456,20 @@ let exprChildren (e: Expr) : Expr list =
 /// its own condition, and iteration order is clause order.
 type private LoopClause =
     | LFor of SExpr * SExpr * Range
+    /// `(:with pat start [update [end]])`. A loop variable that carries its own
+    /// state instead of drawing it from a cursor — the general case of a
+    /// sequence whose state *is* the value.
+    ///
+    /// Structurally it is a `:for` in every respect that matters: it belongs to
+    /// a level, it advances in lockstep with that level's cursors, and its `end`
+    /// is one of the level's termination tests. The only difference is where the
+    /// value comes from.
+    ///
+    /// `update` absent is a loop-invariant binding, and contributes no override
+    /// to the jump rather than a self-assignment. `end` absent is a `:with` that
+    /// never ends the level on its own, and contributes no test rather than a
+    /// folded constant.
+    | LWith of SExpr * SExpr * SExpr option * SExpr option * Range
     | LLet of SExpr * SExpr * Range
     | LDo of SExpr list * Range
     | LWhen of SExpr * Range
@@ -498,6 +519,7 @@ type private AccSlot =
 let private loopClauseRange (c: LoopClause) : Range =
     match c with
     | LFor(_, _, r)
+    | LWith(_, _, _, _, r)
     | LLet(_, _, r)
     | LDo(_, r)
     | LWhen(_, r)
@@ -549,6 +571,23 @@ let rec parseExpr (s: SExpr) : Expr =
                         (fun bind acc ->
                             match bind with
                             | SList([ Ident k; v ], _) -> ELet(k, false, [], None, parseExpr v, acc, getRange bind)
+                            | SList([ SList(names, _); v ], bindRange) when
+                                not names.IsEmpty
+                                && names
+                                   |> List.forall (function
+                                       | SAtom { Token = Symbol _ }
+                                       | SAtom { Token = Comma } -> true
+                                       | _ -> false) ->
+                                let rawNames =
+                                    names
+                                    |> List.choose (function
+                                        | SAtom { Token = Symbol n } -> Some n
+                                        | _ -> None)
+                                let tupleNames =
+                                    match rawNames with
+                                    | "Tuple" :: restNames -> restNames
+                                    | _ -> rawNames
+                                ELetTuple(tupleNames, parseExpr v, acc, bindRange)
                             | _ -> failwith "Invalid let binding")
                         bindings
                         body
@@ -683,6 +722,11 @@ let rec parseExpr (s: SExpr) : Expr =
             // is a keyword-headed list, which an argument expression is not.
             | "loop" when isLoopForm args -> desugarLoop args listRange
 
+            // Claimed outright rather than guarded like `loop`: `seql` collides
+            // with nothing, and a guard would turn a malformed one into an
+            // unbound-variable error instead of a loop diagnostic.
+            | "seql" -> desugarSeqLoop args listRange
+
             | "yield" ->
                 match args with
                 | [ value ] -> EYield(parseExpr value, listRange)
@@ -751,18 +795,23 @@ let rec parseExpr (s: SExpr) : Expr =
                     EMatch(target, parsedClauses, r)
                 | _ -> failwithf $"Invalid match syntax at line %d{r.Start.Line}"
 
-            // `struct*` forms are accepted synonyms for the `record*` forms.
+            // Construction is spelled with the type name — `(Car (brand "x")
+            // (year 3000))` — so there is no anonymous `record` form to infer a
+            // type for. The old spelling is caught here rather than left to
+            // fail as an unbound `record`, because the fix is not obvious from
+            // "unknown identifier".
             | "record" | "struct" ->
-                let fields =
+                let shown =
                     args
                     |> List.map (function
-                        | SList([ Ident k; v ], _) -> (k, parseExpr v)
-                        | bad ->
-                            failwithf
-                                $"Invalid %s{sym} field at line %d{(getRange bad).Start.Line}: expected (field-name value)")
+                        | SList(Ident k :: _, _) -> $"(%s{k} ...)"
+                        | _ -> "...")
+                    |> String.concat " "
 
-                ERecord(fields, r)
+                failwithf
+                    $"Invalid %s{sym} at line %d{r.Start.Line}: record and struct construction names its type, so write (TypeName %s{shown}) instead of (%s{sym} %s{shown})."
 
+            // `struct*` forms are accepted synonyms for the `record*` forms.
             | "record-set" | "struct-set" ->
                 match args with
                 | Ident baseRec :: fields ->
@@ -890,6 +939,19 @@ and private parseLoopClause (s: SExpr) : LoopClause =
         match rest with
         | [ pat; sequence ] -> LFor(pat, sequence, r)
         | _ -> failwithf $"Invalid (:for ...) at line %d{r.Start.Line}. Expected: (:for pattern sequence)"
+
+    // Two expressions is a loop-invariant binding, three the usual recurrence,
+    // four one that ends the level on its own. Nothing is optional in the
+    // middle: an omitted `update` with a given `end` would have to be spelled,
+    // and there is no spelling worth inventing for it — write `var` and mean it.
+    | SList(SAtom { Token = Keyword "with" } :: rest, r) ->
+        match rest with
+        | [ pat; start ] -> LWith(pat, start, None, None, r)
+        | [ pat; start; update ] -> LWith(pat, start, Some update, None, r)
+        | [ pat; start; update; endCond ] -> LWith(pat, start, Some update, Some endCond, r)
+        | _ ->
+            failwithf
+                $"Invalid (:with ...) at line %d{r.Start.Line}. Expected: (:with pattern start [update [end]])"
 
     | SList(SAtom { Token = Keyword "let" } :: rest, r) ->
         match rest with
@@ -1023,6 +1085,109 @@ and private splitCollector (s: SExpr) : Expr * SExpr =
         failwithf
             $"Expected a collector at line %d{r.Start.Line}, as in (listing x) or (folding seed expr)"
 
+/// `(seql ...)` — a loop that produces a lazy sequence instead of a value.
+///
+/// A plain rewrite over the clause list, and deliberately nothing more:
+///
+///     (seql clauses...)        →  (seq (loop clauses'...))
+///     (seql clauses... => e)   →  (seq (loop clauses'...) (yield e))
+///     (:yield e)               →  (:do (yield e))
+///
+/// Every level, cursor, `:break` and `:with` is the loop facility's, unchanged.
+/// The loop group is promoted to a `while`/`switch` like any other, and a
+/// `yield return` sitting inside that switch is ordinary C# — which is the only
+/// reason this can be a rewrite rather than a second implementation.
+///
+/// `:acc` is refused. A `seql` hands its elements out one at a time and has no
+/// result to accumulate into, and the ban is also what keeps the rewrite honest:
+/// an accumulator would have to be read *after* the loop, which is exactly where
+/// the `=>` yield now lives.
+///
+/// That placement is the one thing here that is not free. The `=>` yield goes
+/// *outside* the loop rather than into its finish block, because a finish block
+/// is emitted as a C# local function and C# forbids `yield return` inside one.
+/// Outside costs nothing: with no accumulators a `=>` expression cannot mention
+/// anything the loop bound, and every exit leaves the loop and then reaches the
+/// yield — which is what running it in the finish block would have meant.
+and private desugarSeqLoop (allForms: SExpr list) (r: Range) : Expr =
+    let isArrow =
+        function
+        | SAtom { Token = Symbol "=>" } -> true
+        | _ -> false
+
+    let clauseForms, finishForm =
+        match allForms |> List.tryFindIndex isArrow with
+        | None -> allForms, None
+        | Some i when i = allForms.Length - 2 -> allForms |> List.take i, Some(List.last allForms)
+        | Some i ->
+            let ar = getRange allForms[i]
+            failwithf
+                $"'=>' at line %d{ar.Start.Line} must be followed by exactly one expression, at the end of the seql."
+
+    let rewriteClause (s: SExpr) : SExpr =
+        match s with
+        | SList(SAtom { Token = Keyword "yield" } :: rest, cr) ->
+            match rest with
+            | [ value ] ->
+                SList(
+                    [ SAtom { Token = Keyword "do"; Range = cr }
+                      SList([ SAtom { Token = Symbol "yield"; Range = cr }; value ], cr) ],
+                    cr
+                )
+            | _ -> failwithf $"Invalid (:yield ...) at line %d{cr.Start.Line}. Expected: (:yield expr)"
+
+        | SList(SAtom { Token = Keyword "acc" } :: _, cr) ->
+            failwithf
+                $"(:acc ...) at line %d{cr.Start.Line} has no meaning in a (seql ...): a seql yields its elements one at a time rather than accumulating a result. Use (:yield expr), or write a (loop ...) if you wanted the fold."
+
+        | other -> other
+
+    if clauseForms.IsEmpty then
+        failwithf $"Invalid seql at line %d{r.Start.Line}: it has no clauses"
+
+    // One level only, and refused here rather than left to the code generator.
+    //
+    // A single-level loop is emitted inline, so its `yield return` sits in the
+    // sequence's own iterator method and is ordinary C#. Two or more levels are
+    // emitted as one *merged* local function — the members jump between each
+    // other, and a switch section is the only jump target C# offers — and a
+    // local function may not `yield return`. The codegen diagnostic for that
+    // talks about lambdas and loops-used-as-values, which is true but useless
+    // advice to someone who wrote a `:subloop`.
+    //
+    // The rule below restates `desugarLoop`'s, which is a duplication and the
+    // one place this rewrite is not self-maintaining. It is written over the
+    // raw forms so that a `:let` between two `:for` clauses — which opens a
+    // level just as a `(:subloop)` does — is caught the same way.
+    let levelCount =
+        let mutable levels = 0
+        let mutable prevWasIter = false
+
+        for c in clauseForms do
+            match c with
+            | SList(SAtom { Token = Keyword("for" | "with") } :: _, _) ->
+                if not prevWasIter then levels <- levels + 1
+                prevWasIter <- true
+            | SList(SAtom { Token = Keyword _ } :: _, _) -> prevWasIter <- false
+            | _ -> ()
+
+        levels
+
+    if levelCount > 1 then
+        failwithf
+            $"The (seql ...) at line %d{r.Start.Line} has %d{levelCount} levels, and a seql can only have one. A nested loop compiles to a group of mutually jumping members emitted as a single C# local function, and a local function cannot yield. Write the inner level as a seql of its own and splice it in with (yield-from ...), or use a (loop ...) if you did not need laziness."
+
+    let loopExpr = desugarLoop (clauseForms |> List.map rewriteClause) r
+
+    let body =
+        match finishForm with
+        | None -> loopExpr
+        // The loop runs for effect and then the trailing yield does; `_` is how
+        // every other statement position in this file is spelled.
+        | Some e -> ELet("_", false, [], None, loopExpr, EYield(parseExpr e, getRange e), r)
+
+    ESeq(body, r)
+
 /// Desugars `(loop clause... [=> expr])`.
 ///
 /// A loop is a left fold with early exit that always delivers a result: every
@@ -1055,31 +1220,38 @@ and desugarLoop (allForms: SExpr list) (r: Range) : Expr =
     let clauses = clauseForms |> List.map parseLoopClause
 
     match clauses with
-    | LFor _ :: _ -> ()
+    | (LFor _ | LWith _) :: _ -> ()
     | c :: _ ->
         let cr = loopClauseRange c
         failwithf
-            $"A loop must begin with a (:for ...) at line %d{cr.Start.Line}: every other clause belongs to the level open at its position, and before the first (:for ...) there is none."
+            $"A loop must begin with a (:for ...) or (:with ...) at line %d{cr.Start.Line}: every other clause belongs to the level open at its position, and before the first one there is none."
     | [] -> ()
 
-    // Level assignment, in one left-to-right pass. A `:for` preceded by anything
-    // other than a `:for` opens a new level; every other clause belongs to the
-    // level that was current at its own position — so an `:acc` above an inner
-    // `:for`, or a `:let` between a `:subloop` and the `:for` it opens, stays in
-    // the enclosing level.
+    // Level assignment, in one left-to-right pass. An *iterating* clause — a
+    // `:for` or a `:with` — preceded by anything other than another iterating
+    // clause opens a new level; every other clause belongs to the level that was
+    // current at its own position, so an `:acc` above an inner `:for`, or a
+    // `:let` between a `:subloop` and the `:for` it opens, stays in the
+    // enclosing level.
+    //
+    // A `:with` counts here for the same reason it is tested here: it advances
+    // with the level, so it is in lockstep with the level's cursors rather than
+    // an interruption between two of them. `(:subloop)` is still the only way to
+    // separate two iterating clauses.
     let levelOf =
         let mutable current = -1
-        let mutable prevWasFor = false
+        let mutable prevWasIter = false
 
         clauses
         |> List.map (fun c ->
             match c with
-            | LFor _ ->
-                if not prevWasFor then current <- current + 1
-                prevWasFor <- true
+            | LFor _
+            | LWith _ ->
+                if not prevWasIter then current <- current + 1
+                prevWasIter <- true
                 current
             | _ ->
-                prevWasFor <- false
+                prevWasIter <- false
                 current)
 
     let maxLevel = List.max levelOf
@@ -1097,6 +1269,18 @@ and desugarLoop (allForms: SExpr list) (r: Range) : Expr =
                 | _ -> None)
         | _ -> []
 
+    /// The slot a `:with` carries its value in.
+    ///
+    /// A plain identifier names its own slot. That is not only an economy: a
+    /// `:with`'s `end` is tested at the very top of the iteration, before
+    /// anything has been bound, so the variable has to *be* a parameter of the
+    /// member for `end` to name it. A tuple pattern has no single name to give,
+    /// so it gets a gensym and is destructured from it.
+    let withSlotName (pat: SExpr) =
+        match pat with
+        | SAtom { Token = Symbol n } -> n
+        | _ -> Gensym.fresh "loopwith"
+
     // One member per level, plus the names each of them needs.
     let levels =
         [ for i in 0..maxLevel ->
@@ -1108,15 +1292,45 @@ and desugarLoop (allForms: SExpr list) (r: Range) : Expr =
                     | LFor(p, sq, cr) -> Some(p, sq, cr)
                     | _ -> None)
 
-            // `:subloop` emits nothing. Its only role is to have not been a
-            // `:for`, which the pass above has already taken account of.
+            let withs =
+                mine
+                |> List.choose (function
+                    | LWith(p, st, up, en, cr) -> Some(p, st, up, en, cr)
+                    | _ -> None)
+
+            // The level's iterating clauses in source order, as indices into
+            // `fors` and `withs`. Termination tests are built from this rather
+            // than from the two lists in turn: `done?` may be effectful, so
+            // which test runs before which is observable and has to be what the
+            // author wrote.
+            let iterOrder =
+                let mutable fi = -1
+                let mutable wi = -1
+
+                mine
+                |> List.choose (function
+                    | LFor _ ->
+                        fi <- fi + 1
+                        Some(Choice1Of2 fi)
+                    | LWith _ ->
+                        wi <- wi + 1
+                        Some(Choice2Of2 wi)
+                    | _ -> None)
+
+            // `:subloop` emits nothing. Its only role is to have not been an
+            // iterating clause, which the pass above has already taken account
+            // of.
             let others =
                 mine
                 |> List.filter (function
                     | LFor _
+                    | LWith _
                     | LSubloop _ -> false
                     | _ -> true)
 
+            // A `:with` contributes nothing here: its value travels as a slot of
+            // every level from its own inward, so an inner level reads it as a
+            // parameter rather than being handed a copy under another name.
             let bound =
                 mine
                 |> List.collect (function
@@ -1126,10 +1340,13 @@ and desugarLoop (allForms: SExpr list) (r: Range) : Expr =
 
             {| Index = i
                Fors = fors
+               Withs = withs
+               IterOrder = iterOrder
                Others = others
                Bound = bound
                SeqNames = fors |> List.map (fun _ -> Gensym.fresh "loopseq")
                CurNames = fors |> List.map (fun _ -> Gensym.fresh "loopcur")
+               WithNames = withs |> List.map (fun (p, _, _, _, _) -> withSlotName p)
                Member = Gensym.fresh "looplevel" |} ]
 
     // One slot per accumulator, in declaration order across *every* level: an
@@ -1170,6 +1387,23 @@ and desugarLoop (allForms: SExpr list) (r: Range) : Expr =
 
     let accNames = accInfo |> List.map (fun slot -> slot.Name)
 
+    /// Every name a `:with` clause binds, at any level.
+    let withVarNames =
+        levels
+        |> List.collect (fun lvl -> lvl.Withs |> List.collect (fun (p, _, _, _, _) -> patternNames p))
+
+    /// The `:with` variables a named loop may override — the plain-identifier
+    /// ones, whose slot *is* the variable. A tuple pattern has no single name to
+    /// put after `#:`, and offering one of its parts would override a part of a
+    /// slot that is written whole.
+    let overridableWithNames =
+        levels
+        |> List.collect (fun lvl -> lvl.Withs)
+        |> List.choose (fun (p, _, _, _, _) ->
+            match p with
+            | SAtom { Token = Symbol n } -> Some n
+            | _ -> None)
+
     /// The slot vector of level `i`, in emission order.
     ///
     /// Every enclosing level's sequences and cursors are carried, because an
@@ -1182,10 +1416,16 @@ and desugarLoop (allForms: SExpr list) (r: Range) : Expr =
     ///
     /// Level 0's sequences are absent by design: they are loop-invariant, so
     /// they sit in the prologue and are lexically in scope for the whole group.
+    /// A `:with` is carried exactly like a cursor, and from its own level
+    /// inward: an inner clause may name it, and the jump back out has to hand it
+    /// over unchanged. Unlike an accumulator it is *not* on every member — it
+    /// does not exist above the level that owns it, which is the same reason it
+    /// is out of scope in the finish block.
     let slotNames (i: int) : string list =
         [ for j in 0..i do
               if j > 0 then yield! levels[j].SeqNames
               yield! levels[j].CurNames
+              yield! levels[j].WithNames
           for j in 0 .. i - 1 do
               yield! levels[j].Bound
           yield! accNames ]
@@ -1205,13 +1445,31 @@ and desugarLoop (allForms: SExpr list) (r: Range) : Expr =
 
         EApp(EIdent(levels[target].Member, cr), args, cr)
 
-    /// Level `i`'s cursors, one step on.
+    /// Level `i` one step on: its cursors advanced and its `:with` slots
+    /// updated.
+    ///
+    /// Both go into the *same* override map, which `jump` turns into one
+    /// complete argument vector. That is what makes a level's updates
+    /// simultaneous: every one of them is computed from this iteration's values
+    /// before any slot is written, so `(:with a 0 b) (:with b 1 (+ a b))` is
+    /// fibonacci rather than a sequence of assignments. An author who wants the
+    /// sequential reading names the new value with a `:let` first.
     let advanced (i: int) (cr: Range) =
-        List.map2
-            (fun sn cn -> cn, call "next" [ EIdent(sn, cr); EIdent(cn, cr) ] cr)
-            levels[i].SeqNames
-            levels[i].CurNames
-        |> Map.ofList
+        let cursors =
+            List.map2
+                (fun sn cn -> cn, call "next" [ EIdent(sn, cr); EIdent(cn, cr) ] cr)
+                levels[i].SeqNames
+                levels[i].CurNames
+
+        // No update is a loop-invariant `:with`: contributing no override leaves
+        // the slot holding what it held, and emits nothing at all rather than a
+        // self-assignment.
+        let withs =
+            List.zip levels[i].WithNames levels[i].Withs
+            |> List.choose (fun (slot, (_, _, update, _, _)) ->
+                update |> Option.map (fun u -> slot, parseExpr u))
+
+        cursors @ withs |> Map.ofList
 
     /// The next iteration of level `i`: its own cursors advanced, everything
     /// else as it stands.
@@ -1221,14 +1479,28 @@ and desugarLoop (allForms: SExpr list) (r: Range) : Expr =
 
     let advanceLevel (i: int) (cr: Range) = advanceLevelWith i Map.empty cr
 
-    // `done?` exactly once per iteration, in clause order, short-circuiting:
-    // when one sequence is done the level is over and no later `done?` runs.
+    // The level's termination tests, in clause order, short-circuiting: a
+    // `:for`'s `done?` and a `:with`'s `end` interleaved exactly as written.
+    // When one holds the level is over and no later test runs.
+    //
+    // The order is not a detail. `done?` may be effectful — an enumerator-backed
+    // cursor advances in it — so a `:with` whose `end` holds must leave a later
+    // `:for`'s cursor un-advanced, and that only follows if the tests are built
+    // from the source order rather than from the two lists in turn.
+    //
+    // A `:with` with no `end` contributes nothing, so the common case emits no
+    // branch instead of a folded constant. A level of nothing but such `:with`
+    // clauses yields `false` and never ends on its own — the same as a `:for`
+    // over an infinite sequence, and equally the author's business.
     let exhausted (i: int) =
         let tests =
-            List.map2
-                (fun sn cn -> call "done?" [ EIdent(sn, r); EIdent(cn, r) ] r)
-                levels[i].SeqNames
-                levels[i].CurNames
+            levels[i].IterOrder
+            |> List.choose (function
+                | Choice1Of2 fi ->
+                    Some(call "done?" [ EIdent(levels[i].SeqNames[fi], r); EIdent(levels[i].CurNames[fi], r) ] r)
+                | Choice2Of2 wi ->
+                    let (_, _, _, endCond, _) = levels[i].Withs[wi]
+                    endCond |> Option.map parseExpr)
 
         let rec anyOf ts =
             match ts with
@@ -1247,6 +1519,67 @@ and desugarLoop (allForms: SExpr list) (r: Range) : Expr =
     // of the `=>` expression as there are ways out.
     let exitName = Gensym.fresh "loopexit"
 
+    /// Refuses a `:with` variable named in the finish block.
+    ///
+    /// The finish block is reached from *every* exit, including one taken from a
+    /// level where an inner `:with` does not exist — so "sometimes in scope"
+    /// would be the only honest alternative to "never". Accumulators are hoisted
+    /// and so have no such problem, which is why they are the way to carry a
+    /// value out.
+    ///
+    /// Scope-aware, because a finish block is an ordinary expression and may
+    /// perfectly well bind a name of its own that happens to collide.
+    let rejectWithInFinish (e: Expr) : unit =
+        let names = Set.ofList withVarNames
+
+        let rec patternBinds (p: Pattern) : string list =
+            match p with
+            | PIdent(n, _) -> [ n ]
+            | PList(items, tail, _)
+            | PVec(items, tail, _) -> (items @ Option.toList tail) |> List.collect patternBinds
+            | PTuple(items, _)
+            | PConstruct(_, items, _) -> items |> List.collect patternBinds
+            | _ -> []
+
+        let rec go (bound: Set<string>) (x: Expr) =
+            let sub = go bound
+
+            match x with
+            | EIdent(n, ir) when Set.contains n names && not (Set.contains n bound) ->
+                failwithf
+                    $"'%s{n}' at line %d{ir.Start.Line} is a (:with ...) variable, and a loop variable is not in scope after the loop: the finish block is reached from every exit, and an inner level's variables do not exist at an exit taken from an outer one. Carry it out with an accumulator — (:acc last (folding 0 %s{n})) — and name that in the '=>' instead."
+            | EFun(args, body, _) -> go (Set.union bound (Set.ofList args)) body
+            | ELet(n, _, args, _, value, body, _) ->
+                go (Set.union bound (Set.ofList args)) value
+                go (Set.add n bound) body
+            | ELetMono(n, value, body, _) ->
+                sub value
+                go (Set.add n bound) body
+            | ELetMutable(n, _, value, body, _) ->
+                sub value
+                go (Set.add n bound) body
+            | ELetTuple(ns, value, body, _) ->
+                sub value
+                go (Set.union bound (Set.ofList ns)) body
+            | ELetRec(bindings, body, _) ->
+                let inner =
+                    Set.union bound (bindings |> List.map (fun (n, _, _, _, _) -> n) |> Set.ofList)
+
+                for (_, _, args, _, v) in bindings do
+                    go (Set.union inner (Set.ofList args)) v
+
+                go inner body
+            | EMatch(target, clauses, _) ->
+                sub target
+
+                for (pat, guard, body) in clauses do
+                    let inner = Set.union bound (patternBinds pat |> Set.ofList)
+                    Option.iter (go inner) guard
+                    go inner body
+            | _ -> exprChildren x |> List.iter sub
+
+        go Set.empty e
+
     let finishBlockBody =
         // `:final`'s accumulator is not the author's and has no business in the
         // result, so only the declared ones are delivered or even finished.
@@ -1254,7 +1587,10 @@ and desugarLoop (allForms: SExpr list) (r: Range) : Expr =
 
         let result =
             match finishForm with
-            | Some e -> parseExpr e
+            | Some e ->
+                let parsed = parseExpr e
+                rejectWithInFinish parsed
+                parsed
             | None ->
                 match declared with
                 // Nothing to deliver: a loop with no accumulators and no `=>`
@@ -1307,12 +1643,19 @@ and desugarLoop (allForms: SExpr list) (r: Range) : Expr =
     /// The sequences are bound to temporaries first — the jump needs their
     /// values, and `start` needs them too, so evaluating the expression twice
     /// would be both wrong and slow.
+    /// Its `:with` clauses take their `start` here too, for the same reason and
+    /// on the same edge as a cursor's: `start` is per *entry to the level that
+    /// owns the clause*, so a `:with` inside a subloop is reset on every entry
+    /// to that subloop. This is the opposite of an accumulator, which is hoisted
+    /// and persists across the outer iterations.
     let enterLevel (i: int) (cr: Range) =
         let temps = levels[i].Fors |> List.map (fun _ -> Gensym.fresh "loopenter")
 
         let overrides =
             (List.map2 (fun sn t -> sn, EIdent(t, cr)) levels[i].SeqNames temps)
             @ (List.map2 (fun cn t -> cn, call "start" [ EIdent(t, cr) ] cr) levels[i].CurNames temps)
+            @ (List.zip levels[i].WithNames levels[i].Withs
+               |> List.map (fun (slot, (_, start, _, _, _)) -> slot, parseExpr start))
             |> Map.ofList
 
         List.foldBack
@@ -1403,7 +1746,7 @@ and desugarLoop (allForms: SExpr list) (r: Range) : Expr =
             | slot :: restAcc -> stepAcc slot (buildClauses level tl restAcc)
             | [] -> failwith "internal error: accumulator clause without its info"
 
-        | (LFor _ | LSubloop _) :: _ -> failwith "internal error: clause should have been rejected"
+        | (LFor _ | LWith _ | LSubloop _) :: _ -> failwith "internal error: clause should have been rejected"
 
     /// Rewrites the tail positions of a named loop's final `:do`.
     ///
@@ -1441,14 +1784,16 @@ and desugarLoop (allForms: SExpr list) (r: Range) : Expr =
             match rest with
             | [] -> acc
             | EKeyword(k, kr) :: value :: tl ->
-                if not (List.contains k accNames) then
+                if not (List.contains k accNames || List.contains k overridableWithNames) then
                     let known =
-                        accNames |> List.filter (fun n -> not (n.StartsWith "loopfinal")) |> String.concat ", "
+                        (accNames |> List.filter (fun n -> not (n.StartsWith "loopfinal")))
+                        @ overridableWithNames
+                        |> String.concat ", "
 
                     let known = if known = "" then "(none)" else known
 
                     failwithf
-                        $"'%s{name}' at line %d{kr.Start.Line} has no slot called '#:%s{k}'. A named loop can override its accumulators — %s{known} — but not a (:for ...) variable, which is derived from its cursor rather than carried."
+                        $"'%s{name}' at line %d{kr.Start.Line} has no slot called '#:%s{k}'. A named loop can override the slots it carries — %s{known} — but not a (:for ...) variable, which is derived from its cursor rather than carried. A variable you want to jump ahead is a (:with ...), not a (:for ...)."
 
                 go (Map.add k value acc) tl
             | EKeyword(k, kr) :: [] -> failwithf $"'#:%s{k}' at line %d{kr.Start.Line} has no value"
@@ -1478,6 +1823,33 @@ and desugarLoop (allForms: SExpr list) (r: Range) : Expr =
             (List.zip levels[i].Fors (List.zip levels[i].SeqNames levels[i].CurNames))
             inner
 
+    /// Destructures the tuple-pattern `:with` slots of every level up to `i`.
+    ///
+    /// A plain identifier needs nothing — it names its own slot, so it is
+    /// already a parameter. Only a tuple pattern has a gensym slot to unpack,
+    /// and it is unpacked at *every* level that carries it rather than once at
+    /// the owning one, so an inner level reads the same slot it was handed
+    /// instead of a copy passed down under the part names.
+    ///
+    /// This wraps the whole member body, ahead of the termination test, because
+    /// a `:with`'s `end` is tested before anything else runs and names its own
+    /// variable. It deliberately does not reach the `:for` elements: those come
+    /// from `current`, which `bindCurrents` binds only once the test has passed.
+    let bindWiths (i: int) (inner: Expr) =
+        let tuplePatterned =
+            [ for j in 0..i do
+                  yield!
+                      List.zip levels[j].WithNames levels[j].Withs
+                      |> List.filter (fun (_, (p, _, _, _, _)) ->
+                          match p with
+                          | SAtom { Token = Symbol _ } -> false
+                          | _ -> true) ]
+
+        List.foldBack
+            (fun (slot, (pat, _, _, _, wr)) acc -> bindLoopPattern pat (EIdent(slot, wr)) acc wr)
+            tuplePatterned
+            inner
+
     // One member per level. Every level transition is a tail call by
     // construction, and they are all in one group rather than nested: a jump
     // across levels has to reach the *same* switch, and a nested group would
@@ -1488,12 +1860,14 @@ and desugarLoop (allForms: SExpr list) (r: Range) : Expr =
             let accsHere = accInfo |> List.filter (fun slot -> slot.Level = lvl.Index)
 
             let body =
-                EIf(
-                    exhausted lvl.Index,
-                    exitLevel lvl.Index r,
-                    bindCurrents lvl.Index (buildClauses lvl.Index lvl.Others accsHere),
-                    r
-                )
+                bindWiths
+                    lvl.Index
+                    (EIf(
+                        exhausted lvl.Index,
+                        exitLevel lvl.Index r,
+                        bindCurrents lvl.Index (buildClauses lvl.Index lvl.Others accsHere),
+                        r
+                    ))
 
             (lvl.Member, true, slotNames lvl.Index, None, body))
 
@@ -1503,9 +1877,12 @@ and desugarLoop (allForms: SExpr list) (r: Range) : Expr =
     // copy of the block at every other exit.
     let members = members @ [ (exitName, true, accNames, None, finishBlockBody) ]
 
+    // In `slotNames 0`'s order: level 0's cursors, then its `:with` slots, then
+    // the accumulators.
     let initialArgs =
         (levels[0].SeqNames
          |> List.map (fun sn -> call "start" [ EIdent(sn, r) ] r))
+        @ (levels[0].Withs |> List.map (fun (_, start, _, _, _) -> parseExpr start))
         @ (accInfo |> List.map (fun slot -> call "init" [ EIdent(slot.Collector, slot.Range) ] slot.Range))
 
     let group =
@@ -1582,11 +1959,15 @@ and parseBody (exprs: SExpr list) (fallbackRange: Range) : Expr =
                    | SAtom { Token = Comma } -> true
                    | _ -> false)
             ->
-            let tupleNames =
+            let rawNames =
                 names
                 |> List.choose (function
                     | SAtom { Token = Symbol n } -> Some n
                     | _ -> None)
+            let tupleNames =
+                match rawNames with
+                | "Tuple" :: restNames -> restNames
+                | _ -> rawNames
 
             ELetTuple(tupleNames, parseExpr expr, parseItems rest, r)
 
@@ -1691,13 +2072,17 @@ let rec parseDecl (s: SExpr) : Decl =
         DDef(name, parseExpr expr, r)
 
     | SList(SAtom { Token = Symbol "def" } :: SList(names, _) :: [ expr ], _) ->
-        let tupleNames =
+        let rawNames =
             names
             |> List.map (function
                 | SAtom { Token = Symbol n } -> n
                 | SAtom { Token = Comma } -> ""
                 | _ -> failwith "Invalid tuple def")
             |> List.filter ((<>) "")
+        let tupleNames =
+            match rawNames with
+            | "Tuple" :: restNames -> restNames
+            | _ -> rawNames
 
         DDefTuple(tupleNames, parseExpr expr, r)
 

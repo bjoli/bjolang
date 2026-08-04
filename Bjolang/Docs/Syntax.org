@@ -42,6 +42,55 @@ Type annotations for top-level definitions use ~:~.
 (defun (add x y) (+ x y))
 #+END_SRC
 
+*** What generalizes
+A binding is generalized only when its value is a *syntactic value* — a literal,
+a lambda, a variable, or a tuple/list/vec/record built entirely out of those. An
+application is not one, however innocent it looks, because an application is the
+shape that can allocate a mutable cell:
+#+BEGIN_SRC scheme
+(def cell (make-array 1))      ;; NOT ∀a. (Array a) — it is one array
+(array-set! cell 0 42)         ;;   'a := int
+(array-ref cell 0)             ;;   ...and it stays int
+#+END_SRC
+Were that generalized, each use would instantiate a fresh variable and the same
+array could be written at one type and read at another. This is ML's value
+restriction, and it applies equally to a top-level ~def~ and to one inside a
+function.
+
+Separately, a module-level *value* compiles to a static field, and a static field
+cannot be generic — there is no class for the type parameter to belong to. So
+~(def bleh '())~ is refused even though it is perfectly sound: pin it with a
+signature, or make it a function, whose type parameters do have somewhere to
+live. A ~defun~ is unaffected; a polymorphic top-level function becomes a generic
+method, which C# is happy with.
+
+*** Mutable bindings
+~def/mutable~ declares a binding ~set!~ may write, at module level or inside a
+function.
+#+BEGIN_SRC scheme
+(: reads int)
+(def/mutable reads 0)
+
+(: tick (-> int))
+(defun (tick)
+  (set! reads (+ reads 1))
+  reads)
+#+END_SRC
+
+A mutable binding is **not generalized**. A cell that can be assigned has to have
+a settled type: were it polymorphic, every use would instantiate a fresh variable
+and a ~set!~ at one type would typecheck against a read at another. So
+~(def/mutable pending Nil)~ has whatever element type its uses pin it to, and
+means one thing throughout — the same rule ML calls the value restriction, here
+applied on the ground that mutability rather than syntax is what makes it
+necessary.
+
+A module-level one compiles to a static field of the module's class, assigned by
+a generated static constructor. Module values are initialized **in declaration
+order**, so an initializer may read a binding declared above it and gets the
+assigned value rather than a default. It is a single field, so a module's state
+is shared with everything that imports it rather than copied per importer.
+
 ** Control Flow
 Standard ~if~ expressions:
 #+BEGIN_SRC scheme
@@ -55,7 +104,7 @@ forms:
 #+BEGIN_SRC scheme
 (when (> x 100)
   (displayln "large")
-  (record x))
+  (log x))
 
 (unless (list-empty? xs)
   (process xs))
@@ -203,9 +252,30 @@ behind a reference, which is what a small, hot, non-recursive type wants, while
 a large one is copied where a record would have passed a reference. A struct may
 not contain itself.
 
-The ~struct*~ *expression* forms — ~(struct ...)~, ~(struct-get ...)~,
-~(struct-set ...)~ — remain plain synonyms of the ~record*~ forms and work on
-either kind.
+**A record is constructed by naming its type.** The type name is the
+constructor, and each argument is one of its fields:
+
+#+BEGIN_SRC scheme
+(type (: Car (Record (: brand string) (: year int))))
+
+(def c (Car (brand "banana") (year 3000)))
+#+END_SRC
+
+Every field has to be given, no field twice, and the order is free — the fields
+are named, so declaration order is the compiler's business rather than yours.
+There is no anonymous ~(record ...)~ form: nothing is ever inferred from *which
+fields you happened to mention*, so two types may share a field name without
+one of them becoming unreachable.
+
+~(record-get target field)~ and ~(record-set target (field value) ...)~ read and
+update. These resolve against the *target's own type* wherever it is known,
+which is everywhere the value was constructed, annotated, or given by a
+signature. Only where the target is still an unresolved type variable — the body
+of an un-annotated local lambda, say — do they fall back to looking the field
+name up, and that fallback is an error if more than one type declares the name.
+
+The ~struct*~ *expression* forms — ~(struct-get ...)~, ~(struct-set ...)~ —
+remain plain synonyms of the ~record*~ forms and work on either kind.
 
 A trait written this way compiles to a C# interface, with each implementation a
 sealed class holding a singleton ~Instance~. A call whose receiver type is known
@@ -286,6 +356,7 @@ are extended by writing trait implementations rather than by adding syntax.
 | Clause                          | Meaning                                            |
 |---------------------------------+----------------------------------------------------|
 | ~(:for pat seq)~                | bind ~pat~ to successive elements of ~seq~         |
+| ~(:with pat start update end)~  | a loop variable carrying its own state; ~update~ and ~end~ optional |
 | ~(:let pat expr)~               | per-iteration binding, in clause order             |
 | ~(:do expr ...)~                | run for effect, value discarded                    |
 | ~(:when cond)~                  | skip the rest of this iteration unless ~cond~      |
@@ -294,6 +365,7 @@ are extended by writing trait implementations rather than by adding syntax.
 | ~(:final cond)~                 | end it *after* the current iteration completes     |
 | ~(:end-subloop-if cond)~        | abandon this level, resume the enclosing one       |
 | ~(:subloop)~                    | nothing; it exists only to open a new level        |
+| ~(:yield expr)~                 | ~(seql ...)~ only: produce an element               |
 
 Each carries its own condition rather than being guarded by a preceding
 ~:when~ — clauses do not compose, so there is no bare ~(:break)~ to be reached
@@ -312,24 +384,137 @@ through the finish block, like every other exit.
          => total)
 #+END_SRC
 
-~(lp)~ advances everything; ~(lp #:name expr)~ overrides one accumulator and
-advances the rest. A ~:for~ variable cannot be overridden — it is derived from
-its cursor rather than carried in a slot — and the compiler says so. The name is
-a jump, not a value: using it anywhere but tail position in that final ~:do~ is
-an error rather than a closure.
+~(lp)~ advances everything; ~(lp #:name expr)~ overrides one slot and advances
+the rest. The slots that can be overridden are the ones the loop *carries*: its
+accumulators and its ~:with~ variables. A ~:for~ variable cannot be, because it
+is derived from its cursor rather than carried — so "iterate, but sometimes jump
+ahead" is written as a ~:with~, and the compiler's error says as much. The name
+is a jump, not a value: using it anywhere but tail position in that final ~:do~
+is an error rather than a closure.
 
 Consecutive ~:for~ clauses advance in *lockstep* and are tested in clause order:
 when the first of them is done the level is over, and no later ~done?~ runs. A
 ~:for~ pattern only destructures and must always match — it is not a filter.
 
+*** ~:with~ — state carried across iterations
+A ~:with~ *is* a ~:for~ in every structural respect — levels, lockstep,
+termination — except that where a ~:for~ draws its element from a cursor, a
+~:with~ supplies its own. It is the general case of a sequence whose state is the
+value.
+#+BEGIN_SRC scheme
+;; the first n fibonacci numbers
+(loop (:with a 0 b)
+      (:with b 1 (+ a b))
+      (:for i (range 0 n))
+      (:acc out (listing a))
+      => out)
+#+END_SRC
+
+~start~ is evaluated once per **entry to the level that owns the clause**;
+~update~ gives the value for the following iteration; ~end~ ends the level when
+it holds. Both ~update~ and ~end~ are optional: ~(:with k expr)~ is a
+loop-invariant binding, and a ~:with~ written without an ~end~ never terminates
+the level on its own — the same as a ~:for~ over an infinite sequence, so the
+loop then needs a bounded lockstep partner, a ~:break~ or a ~:final~.
+
+A level's termination tests are its ~:for~ clauses' ~done?~ and its ~:with~
+clauses' ~end~, **interleaved in source order** and short-circuiting. The order
+is observable: ~done?~ may be effectful, so a ~:with~ whose ~end~ holds leaves a
+later ~:for~'s cursor un-advanced. ~end~ is tested at the top of the iteration,
+so it sees its own variable and every other ~:with~ at this level or an enclosing
+one — but *not* this level's ~:for~ elements, which are bound only once the test
+has passed.
+
+**Updates within a level are simultaneous.** Every one of them is computed before
+any slot is written, which is why the fibonacci above is correct as written. For
+the sequential reading, name the new value with a ~:let~:
+#+BEGIN_SRC scheme
+;; b's update sees the OLD a, because everything does — fibonacci
+(:with a 0 b)
+(:with b 1 (+ a b))
+
+;; b's update sees the NEW a, because the :let named it — doubling
+(:with a 0 a-next)
+(:with b 1 (+ a-next b))
+(:for i (range 0 n))
+(:let a-next b)
+#+END_SRC
+
+Note the contrast with ~:acc~, whose steps are *sequential* — each ~:acc~ clause
+rebinds its own name at its own position, so a later step sees the earlier one's
+new value. The two differ on purpose: an accumulator is a fold over the
+iteration, a ~:with~ is state carried across iterations.
+
+Which edges update it:
+
+| Edge                                  | the level's ~:with~ clauses |
+|---------------------------------------+-----------------------------|
+| iteration completes                   | updated                     |
+| ~:when~ false, the iteration skipped  | updated — a skipped iteration still advances the level, exactly as its cursors do |
+| entering a subloop                    | the *inner* level's take their ~start~ |
+| inner level exhausted, ~:end-subloop-if~ | the *parent's* are updated, with the parent's cursors |
+| ~:break~ / ~:final~                   | nothing is updated; the loop leaves through the finish block |
+
+The third row is the one to remember: **a ~:with~ inside a subloop is reset on
+every entry to that subloop**, because ~start~ is per entry to the owning level —
+the same rule as ~start~ on a cursor. This is the opposite of an accumulator
+declared beside it, which is hoisted and persists across outer iterations.
+
+A ~:with~ is a loop variable, so it is **not in scope in the finish block**: that
+block is reached from every exit, including one taken from a level where an inner
+~:with~ does not exist. To carry one out, accumulate it — ~(:acc last (folding 0
+a))~ — and name the accumulator in the ~=>~.
+
+*** ~seql~ — a loop that yields
+~(seql ...)~ takes the same clauses and produces a lazy ~Seq~ instead of a value.
+It is a rewrite and nothing more:
+#+BEGIN_SRC scheme
+(seql clauses...)        ;; → (seq (loop clauses'...))
+(seql clauses... => e)   ;; → (seq (loop clauses'...) (yield e))
+(:yield e)               ;; → (:do (yield e))
+#+END_SRC
+so every level, cursor, ~:when~, ~:break~, ~:final~ and ~:with~ behaves exactly
+as it does in a ~loop~. Because the body only runs as the sequence is pulled
+from, a ~:with~ with no ~end~ is useful rather than a hang:
+#+BEGIN_SRC scheme
+(: fibs (-> (Seq int)))
+(defun (fibs)
+  (seql (:with a 0 b)
+        (:with b 1 (+ a b))
+        (:yield a)))
+
+(seq-take (fibs) 10)   ;; 0 1 1 2 3 5 8 13 21 34
+#+END_SRC
+
+~:acc~ is refused: a ~seql~ hands its elements out one at a time and has no
+result to accumulate into. ~=>~ is accepted and becomes one last ~yield~ after
+the loop — with no accumulators there is nothing in it that the loop could have
+bound, so running it there and running it in the loop's finish block mean the
+same thing.
+
+**One level only.** A nested loop compiles to a group of mutually jumping
+members emitted as a single C# local function, and a local function may not
+~yield return~. Write the inner level as a ~seql~ of its own and splice it in:
+#+BEGIN_SRC scheme
+(: inner (-> int (Seq int)))
+(defun (inner x) (seql (:for y (range 0 2)) (:yield (+ (* x 10) y))))
+
+(seql (:for x (range 0 3))
+      (:do (yield-from (inner x))))
+#+END_SRC
+
 *** Levels
-Levels are implicit: *a ~:for~ preceded by anything other than another ~:for~
-opens a new one*, and every other clause belongs to the level that was current at
-its own position. So clause order alone decides nesting, with no marker at the
-nesting site.
+Levels are implicit: *an iterating clause — a ~:for~ or a ~:with~ — preceded by
+anything other than another iterating clause opens a new one*, and every other
+clause belongs to the level that was current at its own position. So clause order
+alone decides nesting, with no marker at the nesting site.
 #+BEGIN_SRC scheme
 ;; lockstep — pairs up, ends with the shorter
 (loop (:for k keys) (:for v vals) (:acc out (listing (Tuple k v))))
+
+;; also lockstep: a :with iterates, so it does not break adjacency. ONE level,
+;; three clauses in step, ending with the shortest
+(loop (:for x xs) (:with a 0 (+ a 1)) (:for y ys) ...)
 
 ;; nested — a cartesian product
 (loop (:for x xs) (:subloop) (:for y ys) (:acc out (listing (Tuple x y))))
@@ -339,14 +524,15 @@ nesting site.
 (loop (:for x xs) (:let n (size x)) (:for y (children x)) ...)
 #+END_SRC
 
-~(:subloop)~ emits nothing whatsoever. Its only role is to *not* be a ~:for~, so
-that the next one starts a level.
+~(:subloop)~ emits nothing whatsoever. Its only role is to *not* be an iterating
+clause, so that the next one starts a level.
 
 Two consequences worth knowing. An ~:acc~ written above an inner ~:for~ belongs
 to the outer level and so steps once per *outer* iteration. And an accumulator
 declared inside a subloop persists across outer iterations — accumulators are
-hoisted, and nothing resets one on re-entry; code wanting that uses a mutable
-variable and does it by hand.
+hoisted, and nothing resets one on re-entry. A ~:with~ declared beside it does
+the opposite and restarts on every entry, so per-entry state is what a ~:with~ is
+for and state outliving the subloop is what the accumulator is for.
 
 ~:when~ and ~:end-subloop-if~ are different jumps: ~:when~ skips one iteration of
 the level it appears in, while ~:end-subloop-if~ ends that level and resumes the

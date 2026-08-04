@@ -326,6 +326,7 @@ let rec serializePattern (p: Parser.Pattern) : string =
         "(" + String.concat " " (n :: List.map serializePattern args) + ")"
     | Parser.PList(items, tailOpt, _) -> serializeSeqPattern "List" items tailOpt
     | Parser.PVec(items, tailOpt, _) -> serializeSeqPattern "Vec" items tailOpt
+    | Parser.PTuple(items, _) -> "(" + String.concat " " ("Tuple" :: List.map serializePattern items) + ")"
 
 and private serializeSeqPattern (head: string) items tailOpt =
     let itemStrs = items |> List.map serializePattern
@@ -390,8 +391,6 @@ let rec serializeExpr (e: Parser.Expr) : string =
     | Parser.EWhen(c, b, negated, _) ->
         list [ (if negated then "unless" else "when"); serializeExpr c; serializeExpr b ]
     | Parser.EFun(args, body, _) -> list [ "fun"; list args; serializeExpr body ]
-    | Parser.ERecord(fields, _) ->
-        list ("record" :: (fields |> List.map (fun (k, v) -> list [ k; serializeExpr v ])))
     | Parser.ERecordUpdate(n, fields, _) ->
         list ("record-set" :: n :: (fields |> List.map (fun (k, v) -> list [ k; serializeExpr v ])))
     | Parser.EGetField(target, f, _) -> list [ "record-get"; serializeExpr target; f ]
@@ -448,9 +447,35 @@ let getUnionTypeString (hm: HMType) (parentName: string) : string =
 let escapeStringLiteral (s: string) =
     s.Replace("\"", "\\\"").Replace("\n", "\\n")
 
+/// A pattern that cannot fail.
+///
+/// A tuple counts when its parts do: a tuple has exactly one shape, so there is
+/// nothing for the pattern to fail against. That is not a nicety — C# proves the
+/// same thing, and rejects the fallback arm of a switch expression whose arms
+/// already cover the type (CS8510). Anything else may fail: a list pattern can
+/// meet `Nil`, a vector pattern a shorter vector, a constructor pattern another
+/// case of its union.
+let rec private isIrrefutablePattern (p: TypedPattern) =
+    match p.Node with
+    | TPWildcard
+    | TPIdent _ -> true
+    | TPTuple items -> items |> List.forall isIrrefutablePattern
+    | _ -> false
+
 /// A clause that matches unconditionally; anything after it is dead code.
 let private isIrrefutable (c: TMatchClause) =
-    c.Guard.IsNone
+    c.Guard.IsNone && isIrrefutablePattern c.Pattern
+
+/// Whether an irrefutable clause can be *moved into* a `default:` section.
+///
+/// A `default:` carries no pattern, so it can only stand in for a clause with
+/// nothing to bind or a single name to alias. An irrefutable tuple has parts to
+/// destructure, so it stays an ordinary `case` and the `default:` after it keeps
+/// its unreachable throw — which a switch *statement*, unlike a switch
+/// expression, is content to carry and which the definite-assignment analysis
+/// still wants.
+let private fitsDefaultSection (c: TMatchClause) =
+    isIrrefutable c
     && (match c.Pattern.Node with
         | TPWildcard
         | TPIdent _ -> true
@@ -606,6 +631,19 @@ let rec generatePattern (ctx: CodegenContext) (pat: TypedPattern) : unit =
             generatePattern ctx t
         | None -> ()
         append ctx "]"
+    | TPTuple items ->
+        match items with
+        | [] -> append ctx "default(ValueTuple)"
+        | [ single ] ->
+            append ctx $"ValueTuple<%s{typeToString single.Type}> {{ Item1: "
+            generatePattern ctx single
+            append ctx " }"
+        | _ ->
+            append ctx "("
+            for i, item in List.indexed items do
+                if i > 0 then append ctx ", "
+                generatePattern ctx item
+            append ctx ")"
     | TPAs _ ->
         failwithf $"'as' patterns have no C# equivalent (line %d{pat.Range.Start.Line})"
     | TPApp _ ->
@@ -1507,7 +1545,7 @@ and private generateMatch
     // clause is emitted as the default section instead of a case.
     let irrefutableTail, cases =
         match List.rev live with
-        | last :: revRest when isIrrefutable last -> Some last, List.rev revRest
+        | last :: revRest when fitsDefaultSection last -> Some last, List.rev revRest
         | _ -> None, live
 
     // `default:` carries no pattern, so an irrefutable `TPIdent` clause needs the
@@ -2168,10 +2206,22 @@ let rec generateDecl (ctx: CodegenContext) (decl: TDecl) : unit =
         let innerDecls = decls |> List.filter (not << isOuterDecl)
 
         // A static field initializer cannot contain statements, so module values
-        // become `static readonly` fields assigned by a static constructor. That
-        // is the last place an IIFE would otherwise still be required.
+        // become static fields assigned by a static constructor. That is the last
+        // place an IIFE would otherwise still be required.
+        //
+        // The three shapes are collected into *one* list in declaration order
+        // rather than swept up a kind at a time, because the static constructor
+        // assigns them in this order and one initializer may read a binding
+        // above it. Taken kind by kind, a `def` reading a `def/mutable` declared
+        // before it would have seen the field's default instead of its value —
+        // silently, since C# is perfectly happy to read a zeroed static.
         let valueDefs =
-            innerDecls |> List.choose (function TDef (n, v, t, r) -> Some(n, v, t, r) | _ -> None)
+            innerDecls
+            |> List.choose (function
+                | TDef(n, v, t, _) -> Some(Choice1Of3(n, v, t))
+                | TDefMutable(n, v, t, _) -> Some(Choice2Of3(n, v, t))
+                | TDefTuple(names, v, t, _) -> Some(Choice3Of3(names, v, t))
+                | _ -> None)
 
         let className = moduleClassName name
 
@@ -2205,21 +2255,51 @@ let rec generateDecl (ctx: CodegenContext) (decl: TDecl) : unit =
                         | _ -> ()
                 | _ -> ()
 
-            for (defName, _, defType, _) in valueDefs do
-                indent ctx
-                appendLine ctx $"public static readonly %s{typeToString defType} %s{sanitizeIdent defName};"
+            // `readonly` for everything but a `def/mutable`, which `set!` has to
+            // be able to write.
+            let tupleElemTypes (tupleType: HMType) =
+                match tupleType with
+                | TTuple ts -> ts
+                | _ -> failwithf $"Expected TTuple for TDefTuple but got %A{tupleType}"
+
+            for d in valueDefs do
+                match d with
+                | Choice1Of3(defName, _, defType) ->
+                    indent ctx
+                    appendLine ctx $"public static readonly %s{typeToString defType} %s{sanitizeIdent defName};"
+                | Choice2Of3(defName, _, defType) ->
+                    indent ctx
+                    appendLine ctx $"public static %s{typeToString defType} %s{sanitizeIdent defName};"
+                | Choice3Of3(names, _, tupleType) ->
+                    for name, elemType in List.zip names (tupleElemTypes tupleType) do
+                        indent ctx
+                        appendLine ctx $"public static readonly %s{typeToString elemType} %s{sanitizeIdent name};"
 
             for d in innerDecls do
                 match d with
-                | TDef _ -> ()
+                | TDef _
+                | TDefMutable _
+                | TDefTuple _ -> ()
                 | _ -> generateDecl ctx d
 
             if not valueDefs.IsEmpty then
                 indent ctx
                 appendLine ctx $"static %s{className}() {{"
+
                 withIndent ctx (fun c ->
-                    for (defName, defValue, _, _) in valueDefs do
-                        generateBlock c (Assign(sanitizeIdent defName)) defValue)
+                    for d in valueDefs do
+                        match d with
+                        | Choice1Of3(defName, defValue, _)
+                        | Choice2Of3(defName, defValue, _) ->
+                            generateBlock c (Assign(sanitizeIdent defName)) defValue
+                        | Choice3Of3(names, defValue, _) ->
+                            let tmp = freshName "__tuple"
+                            generateBindingValue c (DeclareAndAssign(typeToString defValue.Type, tmp)) defValue
+
+                            for i, name in List.indexed names do
+                                indent c
+                                appendLine c $"%s{sanitizeIdent name} = %s{tmp}.Item%d{i + 1};")
+
                 indent ctx
                 appendLine ctx "}"
         )
@@ -2258,10 +2338,12 @@ let generateProgram (exportMetadata: string) (inlineMetadata: string) (metadataD
         let rec collect decls =
             decls |> List.collect (function
                 | TModule (modName, innerDecls, _) ->
-                    innerDecls |> List.choose (function
-                        | TDef (n, _, _, _) -> Some (n, modName)
-                        | TDefun (n, _, _, _, _, _, _, _) -> Some (n, modName)
-                        | _ -> None
+                    innerDecls |> List.collect (function
+                        | TDef (n, _, _, _) -> [ (n, modName) ]
+                        | TDefMutable (n, _, _, _) -> [ (n, modName) ]
+                        | TDefTuple (names, _, _, _) -> names |> List.map (fun n -> (n, modName))
+                        | TDefun (n, _, _, _, _, _, _, _) -> [ (n, modName) ]
+                        | _ -> []
                     )
                 | _ -> []
             )

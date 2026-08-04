@@ -22,7 +22,7 @@
     ((MySome v) (int->string v))))
 
 (defun (main)
-  (def banana (record (Peel? #t) (Colour Green)))
+  (def banana (Fruit (Peel? #t) (Colour Green)))
   (def uid "user_123")
   (println (color->str (record-get banana Colour)))
   (println uid)

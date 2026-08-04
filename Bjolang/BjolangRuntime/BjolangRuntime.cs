@@ -594,31 +594,43 @@ public static class BjolangRuntime {
     public static Map.Map<TK, TV> mapsubmerge<TK, TV>(Map.Map<TK, TV> map, Map.Map<TK, TV> other) where TK : notnull =>
         map.Merge(other);
 
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public static Map.Map<TK, TV> mapsubmergesubwith<TK, TV>(Func<TK, TV, TV, TV> resolver, Map.Map<TK, TV> map, Map.Map<TK, TV> other) where TK : notnull =>
-        map.Merge(other, resolver);
+    // --- Map higher-order functions ---
+    //
+    // Every callback here takes the *pair*, as one argument. A Map's element is
+    // its `(Tuple %k %v)` — `Iterable`'s `%elem` and `Foldable`'s `%item` for
+    // `(Map %k %v)` both say so, as do `map->list`, `map->seq`,
+    // `map-cursor-current` and the `#map(...)` literal. A trait signature that
+    // mentions one element takes a one-argument callback, so a two-argument
+    // function over a key and a value cannot be passed where one is expected:
+    // the trait has one `%item`, not two.
+    //
+    // The pair is a `ValueTuple`, so passing it costs no allocation.
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public static void mapsubforsubeach<TK, TV>(Action<TK, TV> action, Map.Map<TK, TV> map) where TK : notnull =>
-        map.ForEach(action);
+    public static Map.Map<TK, TV> mapsubmergesubwith<TK, TV>(Func<ValueTuple<TK, TV, TV>, TV> resolver, Map.Map<TK, TV> map, Map.Map<TK, TV> other) where TK : notnull =>
+        map.Merge(other, (k, a, b) => resolver(new ValueTuple<TK, TV, TV>(k, a, b)));
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public static bool mapsubiter<TK, TV>(Func<TK, TV, bool> action, Map.Map<TK, TV> map) where TK : notnull =>
-        map.Iter(action);
+    public static void mapsubforsubeach<TK, TV>(Action<ValueTuple<TK, TV>> action, Map.Map<TK, TV> map) where TK : notnull =>
+        map.ForEach((k, v) => action(new ValueTuple<TK, TV>(k, v)));
 
-    public static TState mapsubfold<TK, TV, TState>(Func<TState, TK, TV, TState> folder, TState initial, Map.Map<TK, TV> map) where TK : notnull {
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static bool mapsubiter<TK, TV>(Func<ValueTuple<TK, TV>, bool> action, Map.Map<TK, TV> map) where TK : notnull =>
+        map.Iter((k, v) => action(new ValueTuple<TK, TV>(k, v)));
+
+    public static TState mapsubfold<TK, TV, TState>(Func<TState, ValueTuple<TK, TV>, TState> folder, TState initial, Map.Map<TK, TV> map) where TK : notnull {
         var state = initial;
         map.Iter((k, v) => {
-            state = folder(state, k, v);
+            state = folder(state, new ValueTuple<TK, TV>(k, v));
             return true;
         });
         return state;
     }
 
-    public static Map.Map<TK, TV> mapsubfilter<TK, TV>(Func<TK, TV, bool> predicate, Map.Map<TK, TV> map) where TK : notnull {
+    public static Map.Map<TK, TV> mapsubfilter<TK, TV>(Func<ValueTuple<TK, TV>, bool> predicate, Map.Map<TK, TV> map) where TK : notnull {
         var tmap = Map.Map<TK, TV>.Empty.ToTransient();
         map.Iter((k, v) => {
-            if (predicate(k, v)) {
+            if (predicate(new ValueTuple<TK, TV>(k, v))) {
                 tmap.Set(k, v);
             }
             return true;
@@ -626,10 +638,27 @@ public static class BjolangRuntime {
         return tmap.ToImmutable();
     }
 
-    public static Map.Map<TK, TV2> mapsubmap<TK, TV, TV2>(Func<TK, TV, TV2> mapper, Map.Map<TK, TV> map) where TK : notnull {
+    // Takes the pair and returns the new *value*: the key is what the result is
+    // filed under, so letting the mapper move it would make collisions this
+    // function has no answer for.
+    public static Map.Map<TK, TV2> mapsubmap<TK, TV, TV2>(Func<ValueTuple<TK, TV>, TV2> mapper, Map.Map<TK, TV> map) where TK : notnull {
         var tmap = Map.Map<TK, TV2>.Empty.ToTransient();
         map.Iter((k, v) => {
-            tmap.Set(k, mapper(k, v));
+            tmap.Set(k, mapper(new ValueTuple<TK, TV>(k, v)));
+            return true;
+        });
+        return tmap.ToImmutable();
+    }
+
+    // `Functor` is not `Foldable`, and this is the one place a pair will not do.
+    // Its `(-> %a %b)` has to replace the element type and hand back the same
+    // shape, and the only argument of `(Map %k %v)` free to move is `%v` — so a
+    // functorial map over a Map sees the value, with the key riding along. There
+    // is no `(Map %k %v)` whose element type is a pair the functor may replace.
+    public static Map.Map<TK, TV2> mapsubmapsubvalues<TK, TV, TV2>(Func<TV, TV2> mapper, Map.Map<TK, TV> map) where TK : notnull {
+        var tmap = Map.Map<TK, TV2>.Empty.ToTransient();
+        map.Iter((k, v) => {
+            tmap.Set(k, mapper(v));
             return true;
         });
         return tmap.ToImmutable();

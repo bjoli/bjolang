@@ -25,6 +25,7 @@ let rec patternBoundNames (pat: Pattern) : string list =
         let itemNames = List.collect patternBoundNames items
         let tailNames = tail |> Option.map patternBoundNames |> Option.defaultValue []
         itemNames @ tailNames
+    | PTuple(items, _) -> List.collect patternBoundNames items
     | PConstruct(_, args, _) -> List.collect patternBoundNames args
 
 /// Walk an untyped Expr, returning free variables with their use classification.
@@ -102,10 +103,6 @@ let rec exprFreeVars (isGuarded: bool) (bound: Set<string>) (expr: Expr) : Map<s
         let bfv = exprFreeVars isGuarded bound body
         mergeVarUseMaps cfv bfv
     | EFun(args, body, _) -> exprFreeVars true (Set.union bound (Set.ofList args)) body
-    | ERecord(fields, _) ->
-        fields
-        |> List.map (snd >> exprFreeVars isGuarded bound)
-        |> List.fold mergeVarUseMaps Map.empty
     | ERecordUpdate(_, fields, _) ->
         fields
         |> List.map (snd >> exprFreeVars isGuarded bound)
@@ -249,8 +246,6 @@ let rec letrecifyExpr (expr: Expr) : Expr =
     | EWhen(cond, body, negated, r) -> EWhen(letrecifyExpr cond, letrecifyExpr body, negated, r)
 
     | EFun(args, body, r) -> EFun(args, letrecifyExpr body, r)
-
-    | ERecord(fields, r) -> ERecord(fields |> List.map (fun (k, v) -> k, letrecifyExpr v), r)
 
     | ERecordUpdate(baseRec, fields, r) ->
         ERecordUpdate(baseRec, fields |> List.map (fun (k, v) -> k, letrecifyExpr v), r)

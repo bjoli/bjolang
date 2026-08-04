@@ -243,6 +243,23 @@ let rec checkPattern (env: Env) (expectedType: HMType) (pat: Pattern) : TypedPat
           Range = r
           Node = TPVec(typedItems, typedTail) },
         currentEnv
+    | PTuple(items, r) ->
+        let elemTypes = items |> List.map (fun _ -> freshMeta ())
+        let tupleType = TTuple elemTypes
+        unify env.Registry expectedType tupleType
+        let mutable currentEnv = Map.empty
+
+        let typedItems =
+            List.zip elemTypes items
+            |> List.map (fun (elemType, p) ->
+                let tp, boundEnv = checkPattern env elemType p
+                currentEnv <- Map.fold (fun acc k v -> Map.add k v acc) currentEnv boundEnv
+                tp)
+
+        { Type = tupleType
+          Range = r
+          Node = TPTuple typedItems },
+        currentEnv
 
 let private typeNameMap =
     Map.ofList [
@@ -632,17 +649,78 @@ let private instantiateRecord
     : HMType * (string * HMType) list * Map<string, HMType> =
 
     let tArgs, expectedFields = Map.find recordTypeName registry.Records
-    let tArgsInst = tArgs |> List.map (fun a -> a.TrimStart('\''))
-    let recordScheme = Scheme(tArgsInst, [], TCon(recordTypeName, tArgsInst |> List.map TVar))
+
+    // The names are used exactly as they were registered, leading quote and
+    // all. Trimming it here bound the scheme over `a` while the field types
+    // resolved to `'a`, so the substitution matched nothing and a generic
+    // record's fields came back still holding the declaration's own variables.
+    let recordScheme = Scheme(tArgs, [], TCon(recordTypeName, tArgs |> List.map TVar))
 
     let instantiatedRecordType, freshVars, _ = instantiate registry recordScheme
-    let fieldSubst = List.zip tArgsInst freshVars |> Map.ofList
+    let fieldSubst = List.zip tArgs freshVars |> Map.ofList
 
     let expectedFieldsInstantiated =
         expectedFields |> List.map (fun (n, t) -> n, applyTypeSubst fieldSubst t) |> Map.ofList
 
     instantiatedRecordType, expectedFields, expectedFieldsInstantiated
 
+/// Which record type a `record-get` or `record-set` is talking about.
+///
+/// The target's own type answers that whenever it is known — which is every
+/// place the value was constructed, annotated, or already unified with a record
+/// somewhere upstream. Only in a genuinely generic context, where the target is
+/// still an unresolved meta variable, is there nothing to go on, and the field
+/// name is consulted instead. That fallback is a guess, so it is only allowed to
+/// stand when exactly one record type declares the name: silently picking one of
+/// several is how a field name shared by two records used to make one of them
+/// unreachable.
+let private recordTypeOfField
+    (registry: TraitRegistry)
+    (targetType: HMType)
+    (field: string)
+    (r: Range)
+    : string =
+
+    match prune registry targetType with
+    | TCon(name, _) when Map.containsKey name registry.Records -> name
+    | _ ->
+        match Map.tryFind field registry.RecordFields |> Option.defaultValue [] with
+        | [ only ] -> only
+        | [] -> failwithf $"Type Error at %s{formatPos r}: no record or struct type has a field named '%s{field}'."
+        | many ->
+            let owners = String.concat ", " many
+
+            failwithf
+                $"Type Error at %s{formatPos r}: '%s{field}' is a field of %s{owners}, and the type of the value here is not known yet. Annotate it, or give the enclosing function a signature."
+
+
+/// A syntactic value, in the sense the value restriction means it.
+///
+/// Only these may be generalized. Generalizing anything else is unsound the
+/// moment the language has a mutable cell — and it has one already, in `Array`:
+///
+///     (def c (make-array 1))            ;; if this were ∀a. (Array a)
+///     (array-set! c 0 42)               ;; a := int
+///     (string-length (array-ref c 0))   ;; a := string, same array
+///
+/// Both lines check, and an int is read as a string. An application is the shape
+/// that can allocate such a cell, so an application is not a value however
+/// innocent it looks. The recursion matters as much as the cases: a tuple or a
+/// record is a value only when everything in it is, so a box nested inside one
+/// is refused along with it.
+let rec isSyntacticValue (expr: TypedExpr) =
+    match expr.Node with
+    | TInt _
+    | TString _
+    | TKeyword _
+    | TSymbol _
+    | TLambda(_, _)
+    | TIdent(_, _) -> true
+    | TTupleMake es -> List.forall isSyntacticValue es
+    | TListMake es -> List.forall isSyntacticValue es
+    | TVecMake es -> List.forall isSyntacticValue es
+    | TRecordMake fields -> fields |> List.forall (snd >> isSyntacticValue)
+    | _ -> false
 
 let rec infer (env: Env) (expr: Expr) : HMType * TypedExpr =
     match expr with
@@ -729,6 +807,63 @@ let rec infer (env: Env) (expr: Expr) : HMType * TypedExpr =
         { Type = retType
           Range = r
           Node = TTraitCall(tref, typedArgs |> List.map snd, []) }
+
+    // Record and struct construction: `(Car (brand "banana") (year 3000))`.
+    //
+    // It arrives as an ordinary application because nothing before this point
+    // knows which names are record types — and so do the arguments, `(brand
+    // "banana")` being indistinguishable from a call to `brand` until the head
+    // is known. Both are reread here, where the registry can say so. The type
+    // name is the constructor: no field set is ever searched for an owner, and
+    // two records sharing a field name are no longer in each other's way.
+    | EApp(EIdent(recordTypeName, _), args, r) when Map.containsKey recordTypeName env.Registry.Records ->
+        let writtenFields =
+            args
+            |> List.map (fun arg ->
+                match arg with
+                | EApp(EIdent(fieldName, _), [ value ], _) -> fieldName, value
+                | bad ->
+                    failwithf
+                        $"Type Error at %s{Lexer.formatPos (exprRange bad)}: '%s{recordTypeName}' is a record type, so each argument is one of its fields, written (field-name value).")
+
+        let instantiatedRecordType, expectedFields, expectedFieldsInstantiated =
+            instantiateRecord env.Registry recordTypeName
+
+        let fieldList = expectedFields |> List.map fst |> String.concat ", "
+
+        let provided =
+            (Map.empty, writtenFields)
+            ||> List.fold (fun acc (name, expr) ->
+                if Map.containsKey name acc then
+                    failwithf
+                        $"Type Error at %s{Lexer.formatPos r}: field '%s{name}' of '%s{recordTypeName}' is given twice."
+
+                let exprType, typedExpr = infer env expr
+
+                match Map.tryFind name expectedFieldsInstantiated with
+                | Some expectedType -> unify env.Registry exprType expectedType
+                | None ->
+                    failwithf
+                        $"Type Error at %s{Lexer.formatPos (exprRange expr)}: '%s{recordTypeName}' has no field '%s{name}'. Its fields are: %s{fieldList}."
+
+                Map.add name typedExpr acc)
+
+        // Declaration order, not the order the fields were written in: the
+        // constructor a record compiles to takes them positionally, so writing
+        // them out of order would otherwise silently swap two same-typed fields.
+        let orderedFields =
+            expectedFields
+            |> List.map (fun (name, _) ->
+                match Map.tryFind name provided with
+                | Some typedExpr -> name, typedExpr
+                | None ->
+                    failwithf
+                        $"Type Error at %s{Lexer.formatPos r}: '%s{recordTypeName}' is missing field '%s{name}'. Every field has to be given.")
+
+        instantiatedRecordType,
+        { Type = instantiatedRecordType
+          Range = r
+          Node = TRecordMake orderedFields }
 
     | EApp(target, args, r) ->
         let targetType, typedTarget = infer env target
@@ -865,22 +1000,8 @@ let rec infer (env: Env) (expr: Expr) : HMType * TypedExpr =
             unify env.Registry valType expectedType
         | None -> ()
 
-        let rec isValue (expr: TypedExpr) =
-            match expr.Node with
-            | TInt _ -> true
-            | TString _ -> true
-            | TKeyword _ -> true
-            | TSymbol _ -> true
-            | TLambda(_, _) -> true
-            | TIdent(_, _) -> true
-            | TTupleMake es -> List.forall isValue es
-            | TListMake es -> List.forall isValue es
-            | TVecMake es -> List.forall isValue es
-            | TRecordMake fields -> fields |> List.forall (snd >> isValue)
-            | _ -> false
-
-        let scheme = 
-            if isFun || isValue typedVal then generalize env valType
+        let scheme =
+            if isFun || isSyntacticValue typedVal then generalize env valType
             else Scheme([], [], valType)
         let localEnv = addBinding name { Scheme = scheme; IsMutable = false } env
         let bodyType, typedBody = infer localEnv body
@@ -981,10 +1102,15 @@ let rec infer (env: Env) (expr: Expr) : HMType * TypedExpr =
             unify env.Registry valType expectedType
         | None -> ()
 
+        // Deliberately not generalized. A mutable binding is a cell, and a
+        // *polymorphic* cell is the value restriction's classic hole: each use
+        // would instantiate a fresh variable, so a `set!` at one type and a read
+        // at another would both check and disagree about what is in there. If it
+        // can be assigned, its type has to be settled.
         let localEnv =
             addBinding
                 name
-                { Scheme = generalize env valType
+                { Scheme = Scheme([], [], valType)
                   IsMutable = true }
                 env
 
@@ -1205,42 +1331,9 @@ let rec infer (env: Env) (expr: Expr) : HMType * TypedExpr =
           Range = r
           Node = TMatch(typedTarget, typedClauses) }
 
-    | ERecord(fields, r) ->
-        if fields.IsEmpty then
-            failwithf $"Type Error: Empty record creation at line %d{r.Start.Line}"
-        
-        let firstFieldName = fst fields.Head
-        let recordTypeName =
-            match Map.tryFind firstFieldName env.Registry.RecordFields with
-            | Some tName -> tName
-            | None -> failwithf $"Type Error: Unknown record field '%s{firstFieldName}' at line %d{r.Start.Line}"
-
-        let instantiatedRecordType, expectedFields, expectedFieldsInstantiated =
-            instantiateRecord env.Registry recordTypeName
-
-        // Check each provided field against the instantiated expected field
-        let fieldExprs = 
-            fields |> List.map (fun (n, expr) ->
-                let exprType, typedExpr = infer env expr
-                match Map.tryFind n expectedFieldsInstantiated with
-                | Some expectedType -> unify env.Registry exprType expectedType
-                | None -> failwithf $"Type Error: Field '%s{n}' does not belong to record '%s{recordTypeName}' at line %d{r.Start.Line}"
-                n, typedExpr)
-
-        if fields.Length <> expectedFields.Length then
-            failwithf $"Type Error: Missing fields for record '%s{recordTypeName}' at line %d{r.Start.Line}"
-
-        instantiatedRecordType,
-        { Type = instantiatedRecordType
-          Range = r
-          Node = TRecordMake fieldExprs }
-
     | EGetField(targetExpr, field, r) ->
         let targetType, typedTarget = infer env targetExpr
-        let recordTypeName =
-            match Map.tryFind field env.Registry.RecordFields with
-            | Some tName -> tName
-            | None -> failwithf $"Type Error: Unknown record field '%s{field}' at line %d{r.Start.Line}"
+        let recordTypeName = recordTypeOfField env.Registry targetType field r
 
         let instantiatedRecordType, _, expectedFieldsInstantiated =
             instantiateRecord env.Registry recordTypeName
@@ -1262,12 +1355,12 @@ let rec infer (env: Env) (expr: Expr) : HMType * TypedExpr =
         let targetType, _, _ = instantiate env.Registry targetBinding.Scheme
         
         let recordTypeName =
-            if fields.IsEmpty then failwithf $"Type Error: Empty record-set at line %d{r.Start.Line}" else
-            let firstField = fst fields.Head
-            match Map.tryFind firstField env.Registry.RecordFields with
-            | Some tName -> tName
-            | None -> failwithf $"Type Error: Unknown record field '%s{firstField}' at line %d{r.Start.Line}"
-            
+            if fields.IsEmpty then
+                failwithf $"Type Error at %s{formatPos r}: a record-set has to update at least one field."
+
+            recordTypeOfField env.Registry targetType (fst fields.Head) r
+
+
         let instantiatedRecordType, _, expectedFieldsInstantiated =
             instantiateRecord env.Registry recordTypeName
 
@@ -1318,7 +1411,12 @@ let registerTypeDefs (isRec: bool) (typeDefs: TypeDef list) (env: Env) : Env =
             let resolvedFields = fields |> List.map (fun f -> f.Name, resolveTypeAnnotation finalRegistry f.Type)
             finalRegistry <- { finalRegistry with Records = Map.add td.Name (tArgs, resolvedFields) finalRegistry.Records }
             for (fName, _) in resolvedFields do
-                finalRegistry <- { finalRegistry with RecordFields = Map.add fName td.Name finalRegistry.RecordFields }
+                let owners =
+                    Map.tryFind fName finalRegistry.RecordFields |> Option.defaultValue []
+
+                finalRegistry <-
+                    { finalRegistry with
+                        RecordFields = Map.add fName (owners @ [ td.Name ]) finalRegistry.RecordFields }
         | Union cases ->
             for case in cases do
                 let caseName, resolvedArgs =
@@ -1351,10 +1449,19 @@ let rec checkDecl (env: Env) (sigs: Map<string, HMType * FType option * (string 
         // pinned down.
         solvePending env
 
+        // The same value restriction `let` applies. It was missing here, so a
+        // module-level `(def c (make-array 1))` was generalized over the element
+        // type of a cell that only ever exists once — and could then be written
+        // at one type and read at another, with nothing but the code generator's
+        // inability to declare a generic static field standing in the way.
         let newEnv =
             addBinding
                 name
-                { Scheme = generalize env exprType
+                { Scheme =
+                    if isSyntacticValue typedExpr then
+                        generalize env exprType
+                    else
+                        Scheme([], [], exprType)
                   IsMutable = false }
                 env
 
@@ -1553,10 +1660,14 @@ let rec checkDecl (env: Env) (sigs: Map<string, HMType * FType option * (string 
 
         solvePending env
 
+        // Not generalized, for the same reason `ELetMutable` is not: a cell that
+        // can be assigned has to have a settled type. At module level it is also
+        // what makes the binding emittable at all — a generalized one would want
+        // a static field at an open type, which C# has nowhere to declare.
         let newEnv =
             addBinding
                 name
-                { Scheme = generalize env exprType
+                { Scheme = Scheme([], [], exprType)
                   IsMutable = true }
                 env
 
@@ -2041,9 +2152,48 @@ and private checkDeclGroup
 /// practice `program` is a list of `DModule`s and the real work happens one
 /// level down. The declarations are still handed to `checkDeclGroup` directly
 /// rather than assumed to be wrapped, so a bare list type-checks the same way.
+/// A module-level value has to have a type C# can write down.
+///
+/// It compiles to a static field of the module's class, and a static field
+/// cannot be generic: there is no class for the type parameter to belong to. So
+/// a value whose type is still open once the whole program has been checked has
+/// nowhere to live. `(def bleh '())` is the honest example — perfectly sound,
+/// `Nil` is a value and generalizing it is fine, it simply cannot be emitted.
+///
+/// A `defun` is exempt. A generic *method* is ordinary C#, and that is what a
+/// polymorphic top-level function becomes.
+///
+/// Run at the very end rather than at each declaration, because a type left open
+/// by its own initializer may still be pinned down by a later one — a
+/// `(def/mutable pending Nil)` written to further down the module is settled by
+/// the time this looks.
+let private checkModuleValuesAreConcrete (registry: TraitRegistry) (decls: TDecl list) : unit =
+    let check (form: string) (name: string) (t: HMType) (r: Range) =
+        // Both halves of "open": a variable generalization quantified, and a
+        // metavariable nothing ever resolved. Either one leaves the code
+        // generator with a type it cannot name.
+        let isOpen =
+            not (List.isEmpty (freeTVars registry t)) || not (List.isEmpty (freeVars registry t))
+
+        if isOpen then
+            failwithf
+                $"Type Error at %s{Lexer.formatPos r}: the type of '%s{name}' is still open, and a module-level %s{form} compiles to a static field — which cannot be generic, because there is no class for the type parameter to belong to. Give it a signature that pins it down, like (: %s{name} (List int)), or make it a function, whose type parameters do have somewhere to live."
+
+    let rec go (ds: TDecl list) =
+        for d in ds do
+            match d with
+            | TModule(_, inner, _) -> go inner
+            | TDef(name, _, t, r) -> check "def" name t r
+            | TDefMutable(name, _, t, r) -> check "def/mutable" name t r
+            | TDefTuple(names, _, t, r) -> check "def" (String.concat ", " names) t r
+            | _ -> ()
+
+    go decls
+
 let checkProgram (initialEnv: Env) (program: Decl list) : Env * TDecl list =
     let finalEnv, _, typedDecls = checkDeclGroup initialEnv Map.empty program
     // Anything raised outside a declaration that generalizes still has to be
     // answered for.
     solvePending finalEnv
+    checkModuleValuesAreConcrete finalEnv.Registry typedDecls
     finalEnv, typedDecls

@@ -110,6 +110,7 @@ and TPatternNode =
     | TPIdent of string
     | TPList of TypedPattern list * TypedPattern option
     | TPVec of TypedPattern list * TypedPattern option
+    | TPTuple of TypedPattern list
     | TPConstruct of string * TypedPattern list
     | TPApp of TypedExpr * TypedPattern
     | TPAs of TypedPattern * string
@@ -337,7 +338,14 @@ type TraitRegistry =
       InlineMethods: Map<string * string * string, InlineTemplate>
       Aliases: Map<string, string list * HMType>
       Records: Map<string, string list * (string * HMType) list>
-      RecordFields: Map<string, string> }
+      /// Every record type declaring a given field name.
+      ///
+      /// A list rather than a single owner: construction names its type, but
+      /// `record-get` and `record-set` still have to fall back to the field
+      /// name when the target's type has not been resolved yet. Keeping only
+      /// the last owner made a shared field name silently resolve to whichever
+      /// type happened to be declared last.
+      RecordFields: Map<string, string list> }
 
     member this.IsTraitDefinedLocally(name) = Set.contains name this.LocalTraits
     member this.IsTypeDefinedLocally(name) = Set.contains name this.LocalTypes

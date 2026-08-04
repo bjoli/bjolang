@@ -3,6 +3,8 @@
 (export
   ;; Foldable
   fold
+  ;; Functor
+  map
   ;; Monad
   bind pure
   ;; Iterable
@@ -46,10 +48,21 @@
 (def/impl (->str Symbol)
   (defun (->str s) (symbol->string s)))
 
+;; (def/impl (->str (List %a))
+;;   (defun (->str l)
+;;     (if (empty? l)
+;;         "()"
+;;         (with-output-to-str 
+;;           (print "(")
+;;           (print (car l))
+;;           (loop (:for elem (cdr l))
+;;                 (:do (print " ") (print (->str elem))))
+;;           (print ")")))))
+
+
 
 
 ;; Generic display functions utilizing the ->str trait
-;; Currently commented out as implicit dictionary passing for generic functions is not yet supported.
 (: print (-> %a void))
 (defun (print x)
   (display (->str x)))
@@ -132,11 +145,11 @@
 
 (: range (-> int int Range))
 (defun (range lo hi)
-  (record (lo lo) (hi hi) (by 1)))
+  (Range (lo lo) (hi hi) (by 1)))
 
 (: range-by (-> int int int Range))
 (defun (range-by lo hi by)
-  (record (lo lo) (hi hi) (by by)))
+  (Range (lo lo) (hi hi) (by by)))
 
 (def/impl (Iterable Range)
   (type %elem int)
@@ -252,3 +265,25 @@
   (defun (init c) (match c ((folding s) s)))
   (defun (step c acc x) x)
   (defun (finish c acc) acc))
+
+
+(def/trait (Functor (%f %a))
+  (: map (-> (-> %a %b) (%f %a)  (%f %b))))
+
+(def/impl (Functor (List %a))
+  (defun (map g xs) (list-map g xs))) 
+
+(def/impl (Functor (Vec %a))
+  (defun (map g v) (vec-map g v)))
+
+;; `(Map %k %v)`'s abstracted argument is `%v`, so the functor moves the values
+;; and leaves the keys where they are. `map-map` will not serve here: it hands
+;; the callback the whole pair, and a functor's `(-> %a %b)` has room for one
+;; element type, which is the value.
+(def/impl (Functor (Map %k %v))
+  (defun (map g m)
+    (map-map-values g m)))
+
+(def/impl (Functor (Option %a))
+  (defun (map g o)
+    (match o ((Some v) (Some (g v))) (None None))))

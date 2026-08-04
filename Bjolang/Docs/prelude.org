@@ -122,12 +122,27 @@ High-performance immutable CHAMP (Compressed Hash-Array Mapped Prefix-tree) maps
 - ~(map-keys map)~ : Returns a lazy sequence (~Seq~) of the map's keys.
 - ~(map-values map)~ : Returns a lazy sequence (~Seq~) of the map's values.
 - ~(map-merge map other)~ : Merges two maps, with entries in ~other~ taking precedence.
-- ~(map-merge-with f map other)~ : Merges two maps using resolver function ~(f key val1 val2)~ for duplicate keys.
-- ~(map-for-each f map)~ : Applies ~(f key value)~ to each entry for side effects.
-- ~(map-iter f map)~ : Iterates with early exit; ~f~ receives ~(key value)~ and returns a boolean.
-- ~(map-fold f init map)~ : Folds over the map; ~f~ receives ~(acc key value)~.
-- ~(map-filter f map)~ : Returns a new map containing only entries where ~(f key value)~ is true.
-- ~(map-map f map)~ : Returns a new map with values transformed by ~(f key value)~.
+
+A map's *element* is its ~(key . value)~ pair, which is what ~map->list~,
+~map->seq~, ~map-cursor-current~ and the ~#map(...)~ literal all deal in, and
+what ~Iterable~'s ~%elem~ and ~Foldable~'s ~%item~ are for ~(Map %k %v)~. So
+every callback below takes **one** argument, the pair, and destructures it:
+
+#+BEGIN_SRC scheme
+(map-fold (fun (acc kv) (def (_ . v) kv) (+ acc v)) 0 m)
+#+END_SRC
+
+A two-argument callback over a key and a value could not be passed where a trait
+expects a function of one ~%item~, which is why there is only the one form. The
+pair is a value tuple, so handing it over costs no allocation.
+
+- ~(map-merge-with f map other)~ : Merges two maps using resolver ~f~ for duplicate keys; ~f~ receives the triple ~(key val1 val2)~.
+- ~(map-for-each f map)~ : Applies ~(f pair)~ to each entry for side effects.
+- ~(map-iter f map)~ : Iterates with early exit; ~f~ receives the pair and returns a boolean.
+- ~(map-fold f init map)~ : Folds over the map; ~f~ receives ~(acc pair)~.
+- ~(map-filter f map)~ : Returns a new map containing only entries where ~(f pair)~ is true.
+- ~(map-map f map)~ : Returns a new map whose values are ~(f pair)~. The key is what the result is filed under, so the mapper cannot move it.
+- ~(map-map-values f map)~ : Returns a new map with each value replaced by ~(f value)~, keys untouched. This is the one ~Functor~ uses: its ~(-> %a %b)~ has room for a single element type, and for ~(Map %k %v)~ that is ~%v~.
 - ~(list->map lst)~ : Constructs a map from a list of ~(key . val)~ pairs/tuples.
 - ~(map->list map)~ : Converts the map to a list of pairs/tuples.
 - ~(vec->map vec)~ : Constructs a map from a vector of pairs/tuples.
@@ -176,3 +191,10 @@ Standard iterator protocol for collections.
 - ~->str~ : Trait for string representation with method ~(->str x)~. Implemented for ~string~, ~int~, ~double~, ~byte~, ~long~.
 - ~Iterator~ : Trait for iterators.
 - ~Iterable~ : Trait for iterable collections.
+- ~Foldable~ : ~(fold f init col)~, where ~f~ receives ~(acc item)~. Implemented
+  for ~(List %a)~, ~(Vec %a)~ and ~(Map %k %v)~. A map's ~%item~ is its
+  ~(Tuple %k %v)~ pair.
+- ~Functor~ : ~(map f x)~, where ~f~ receives one element and returns its
+  replacement. Implemented for ~(List %a)~, ~(Vec %a)~, ~(Option %a)~ and
+  ~(Map %k %v)~. The abstracted argument is the last one, so mapping a
+  ~(Map %k %v)~ moves the *values* and leaves the keys alone.

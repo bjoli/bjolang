@@ -29,18 +29,48 @@
   (println (map-ref merged "y"))
   (println (map-ref merged "z"))
 
-  (def merged-with (map-merge-with (fun (k v1 v2) (+ v1 v2)) ma mb))
+  ;; Every Map callback takes the pair as one argument. The resolver of a
+  ;; merge sees the key and the two values that collided under it, so its
+  ;; argument is a triple.
+  (def merged-with (map-merge-with (fun (kvv)
+                                     (def (_ v1 v2) kvv)
+                                     (+ v1 v2))
+                                   ma mb))
   (println (map-ref merged-with "y"))
 
-  (def doubled (map-map (fun (k v) (* v 2)) ma))
+  (def doubled (map-map (fun (kv)
+                          (def (_ . v) kv)
+                          (* v 2))
+                        ma))
   (println (map-ref doubled "x"))
   (println (map-ref doubled "y"))
 
-  (def filtered (map-filter (fun (k v) (> v 1)) ma))
+  ;; The pair reaches a callback the same way anywhere else does, so it
+  ;; destructures in the parameter list too.
+  (def filtered (map-filter (fun (kv)
+                              (def (_ . v) kv)
+                              (> v 1))
+                            ma))
   (println (map-count filtered))
   (println (map-ref filtered "y"))
 
-  (def sum (map-fold (fun (acc k v) (+ acc v)) 0 ma))
+  ;; Keys only move through map-map-values' sibling: the value mapper leaves
+  ;; them alone and changes the value type.
+  (def shown (map-map-values int->string ma))
+  (println (map-ref shown "x"))
+
+  (def direct (map-fold (fun (acc kv)
+                          (def (_ . v) kv)
+                          (+ acc v))
+                        0 ma))
+  (println direct)
+
+  ;; The same fold reached through the Foldable trait, which is what the pair
+  ;; shape is for: `%item` is one thing, so the folder takes one argument.
+  (def sum (fold (fun (acc kv)
+                   (def (_ . v) kv)
+                   (+ acc v))
+              0 ma))
   (println sum)
 
   ;; 3. Conversions

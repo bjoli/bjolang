@@ -11,8 +11,6 @@ It also fakes Brand/higher kinded types by inlining traits when the trait in kno
 
 For concurrency I will integrate a concurrentML because I made this language and async is no fun.
 
-No magic f#-esque record inference. Records will have named constructors.
-
 Dynamic environment, meaning we can do things like
 
 #+begin_src scheme
@@ -193,7 +191,9 @@ Unlike f#, bjolang has keyword arguments (but no optargs!):
 This is currently less efficient than non-kw functions, because every function call checks what was provided and re-evaluates the default argument expressions.
 
 *** Structs and records
-Have the same syntax. This is a record example:
+Have the same syntax, and both are constructed by naming the type — there is no
+f#-esque guessing at which type a bag of field names belongs to. This is a
+record example:
 
 #+begin_src scheme
 (type
@@ -250,3 +250,25 @@ It also supports subloops. Anything that isn't a for clause followed by a :for c
 #+end_src
 
  And the best part? It is fast.
+
+ Oh, and it also has a seq version
+
+ #+begin_src scheme
+(defun (main args)
+  (seql (:with a 0L b)
+        (:with b 1L (+ a b))
+        (:yield a)))
+ #+end_src
+
+* TODO
+
+These are things I found while spelunking:
+
+- Check that the Map wrappers are not slowing things down too much
+- Make it possible to shadow trait methods and not have the typechecker vomit.
+- output LINE-directives so that we can see which code generated the bad c# output if roslyn fails.
+- Dynamic environment. 
+- ConcurrentML. Preferably fast and not built on the full Task machinery. 
+- A standard library that doesn't suck.
+- seq being a trait: seq-map(etc) should work on every collection lazily.
+- This would need default bodies
