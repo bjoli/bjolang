@@ -1169,6 +1169,38 @@ and generateBlock (ctx: CodegenContext) (target: BlockTarget) (expr: TypedExpr) 
                         None
                 | _ -> None
 
+            // The same recognition for a group of *several* members, which is
+            // what a multi-level loop is. `desugarLoop` emits
+            // `ELetRec(members, EApp(EIdent(levels[0].Member), initialArgs))`,
+            // and `LetRecify` has already split the finish member into an SCC of
+            // its own, so the group reaching here is exactly the level members
+            // entered by a call to one of them.
+            //
+            // Inlining it rather than emitting a local function is what lets a
+            // `yield` inside a nested loop land in the enclosing iterator
+            // method — a local function may not `yield return` — and it saves a
+            // function and its closure over the captured locals besides.
+            let mergedInlineInfo =
+                match body.Node with
+                | TApply({ Node = TIdent(calleeName, _) }, initArgs, _) when members.Length > 1 ->
+                    match members |> List.tryFindIndex (fun m -> m.LoopName = calleeName) with
+                    | Some entryIdx when initArgs.Length = members[entryIdx].Slots.Length ->
+                        let names = members |> List.map (fun m -> m.LoopName) |> Set.ofList
+
+                        // A member that names another as a *value* rather than
+                        // jumping to it needs a real function to be a value of.
+                        let escapes =
+                            members
+                            |> List.exists (fun m ->
+                                LoopLowering.referencedNames m.Body
+                                |> Set.intersect names
+                                |> Set.isEmpty
+                                |> not)
+
+                        if escapes then None else Some(entryIdx, initArgs)
+                    | _ -> None
+                | _ -> None
+
             match flatLoopInfo with
             | Some (member_, initArgs) ->
                 // Flat loop path: emit slot variables, evaluate initial args, and run while(true) inline!
@@ -1230,6 +1262,117 @@ and generateBlock (ctx: CodegenContext) (target: BlockTarget) (expr: TypedExpr) 
                 if exitLabelUsed.Value then
                     // A label needs a statement; an empty one will do.
                     indent ctx; appendLine ctx $"%s{exitLabel}: ;"
+
+            | None ->
+
+            match mergedInlineInfo with
+            | Some(entryIdx, initArgs) ->
+                // The merged group, emitted here instead of inside a local
+                // function of its own. Same `while (true) switch (state)` shape
+                // `generateMergedLoop` uses; the difference is only that the
+                // slots are locals, the state is a local, and the members'
+                // bodies feed the enclosing target rather than a `return`.
+                let entry = members[entryIdx]
+                let retStr = typeToString entry.RetType
+
+                // Every member feeds the same target, so they still have to
+                // agree on a type — the same constraint the function form had,
+                // for a different reason.
+                for m in members do
+                    if typeToString m.RetType <> retStr then
+                        codegenError
+                            m.Body.Range.Start.Line
+                            $"'%s{entry.LoopName}' and '%s{m.LoopName}' tail-call each other but return %s{retStr} and %s{typeToString m.RetType}; a merged loop has one return type, so split the group so that they do not tail-call each other"
+
+                // `default!` is not cosmetic. Only the entry member's slots are
+                // assigned before the loop; the rest are written by whatever
+                // jump enters their member, and C# will not prove that through a
+                // `switch` dispatch — `case 1:` is reachable from the initial
+                // dispatch with its slots unwritten. As parameters this was free.
+                for m in members do
+                    for (slotName, slotType) in m.Slots do
+                        indent ctx
+                        appendLine ctx $"%s{typeToString slotType} %s{sanitizeIdent slotName} = default!;"
+
+                // Through temps, so that an argument may read a slot an earlier
+                // assignment would already have overwritten.
+                let temps = initArgs |> List.map (fun _ -> freshName "__init")
+
+                for arg, tmp in List.zip initArgs temps do
+                    emitStatement ctx (fun c ->
+                        indent c
+                        append c $"var %s{tmp} = "
+                        generateExpr c arg
+                        appendLine c ";")
+
+                for (slotName, _), tmp in List.zip entry.Slots temps do
+                    indent ctx
+                    appendLine ctx $"%s{sanitizeIdent slotName} = %s{tmp};"
+
+                let stateVar = freshName "__state"
+                indent ctx
+                appendLine ctx $"int %s{stateVar} = %d{entryIdx};"
+
+                let loopTarget =
+                    match target with
+                    | DeclareAndAssign(varType, varName) ->
+                        indent ctx
+                        appendLine ctx $"%s{varType} %s{varName};"
+                        Assign varName
+                    | Effect -> Discard
+                    | _ -> target
+
+                let exitLabel = freshName "__exit"
+                let exitLabelUsed = ref false
+
+                let inner =
+                    { ctx with
+                        Loop =
+                            Some
+                                { Members = members
+                                  Merged = true
+                                  StateVar = stateVar
+                                  // Zero really is the count: the bodies sit
+                                  // directly inside the group's dispatch switch,
+                                  // so `goto case` is legal from them. Exits go
+                                  // through the label instead, which
+                                  // `exitInlineLoop` decides from `Merged`.
+                                  NestedSwitches = 0
+                                  IsInlineLoop = true
+                                  ExitLabel = exitLabel
+                                  ExitLabelUsed = exitLabelUsed } }
+
+                // Buffered, because whether the label is needed is only known
+                // once the bodies have been generated.
+                let scratch = StringBuilder()
+                let buffered = { inner with Builder = scratch }
+
+                indent buffered
+                appendLine buffered $"while (true) switch (%s{stateVar}) {{"
+
+                withIndent buffered (fun c ->
+                    for i, member_ in List.indexed members do
+                        indent c
+                        appendLine c $"case %d{i}: {{"
+
+                        withIndent c (fun cb ->
+                            emitIterationCopies cb member_
+                            generateBlock cb loopTarget member_.Body)
+
+                        indent c
+                        appendLine c "}"
+
+                    indent c
+                    appendLine c "default: throw new Exception(\"Unreachable loop state\");")
+
+                indent buffered
+                appendLine buffered "}"
+
+                ctx.Builder.Append(scratch) |> ignore
+
+                if exitLabelUsed.Value then
+                    indent ctx
+                    appendLine ctx $"%s{exitLabel}: ;"
 
             | None ->
                 // General letrec / mutually-recursive / escaping loop: emit as local functions
@@ -1462,7 +1605,13 @@ and private exitInlineLoop (ctx: CodegenContext) : unit =
     | Some ({ IsInlineLoop = true } as loop) ->
         indent ctx
 
-        if loop.NestedSwitches = 0 then
+        // A merged group's body sits directly inside the group's own dispatch
+        // `switch`, which is itself a breakable statement — so `break` there
+        // leaves the switch and drops back into the `while` it was meant to end.
+        // `NestedSwitches` cannot express this: `generateRecur` reads the same
+        // field to decide whether `goto case` is legal, and for a merged loop it
+        // *is*, so the count really is zero.
+        if loop.NestedSwitches = 0 && not loop.Merged then
             appendLine ctx "break;"
         else
             loop.ExitLabelUsed.Value <- true

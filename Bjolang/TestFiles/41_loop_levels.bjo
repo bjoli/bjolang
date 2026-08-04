@@ -124,6 +124,23 @@
         (:for y (Cons 1 (Cons 2 Nil)))
         (:acc c (counting y))))
 
+;; A nested loop in *value* position rather than tail position.
+;;
+;; The group is emitted inline, as one `while (true) switch (state)` in the
+;; enclosing method rather than as a local function, so its exits are neither a
+;; `return` nor a `break` — a `break` would leave the dispatch `switch` and drop
+;; straight back into the `while` it was meant to end. They go through the
+;; group's exit label instead, and this is the shape that exercises it.
+(: offset-product (-> (List int) (List int) int))
+(defun (offset-product xs ys)
+  (def total
+    (loop (:for x xs)
+          (:subloop)
+          (:for y ys)
+          (:acc n (summing (* x y)))
+          => n))
+  (+ total 1000))
+
 ;; ---------------------------------------------------------------------------
 
 (: expect (-> string int int void))
@@ -143,6 +160,10 @@
   (expect "product-count" (list-length (product xs ys)) 6)
   (expect "product-first" (list-head (product xs ys)) 11)
   (println (show (product xs ys)))
+
+  ;; (1+2) * (1+2+3) = 18, then the +1000 proves the loop handed a value back
+  ;; rather than leaving the enclosing function.
+  (expect "nested-in-value-position" (offset-product xs ys) 1018)
 
   (expect "lockstep-count" (list-length (lockstep xs ys)) 2)
   (println (show (lockstep xs ys)))

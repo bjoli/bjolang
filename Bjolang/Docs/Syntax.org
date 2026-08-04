@@ -492,16 +492,20 @@ the loop — with no accumulators there is nothing in it that the loop could hav
 bound, so running it there and running it in the loop's finish block mean the
 same thing.
 
-**One level only.** A nested loop compiles to a group of mutually jumping
-members emitted as a single C# local function, and a local function may not
-~yield return~. Write the inner level as a ~seql~ of its own and splice it in:
+Levels work too. A nested loop is emitted as one merged ~while~/~switch~ *inline*
+in the sequence's own iterator method rather than as a local function, so a
+~yield~ from an inner level is ordinary C# like any other:
 #+BEGIN_SRC scheme
-(: inner (-> int (Seq int)))
-(defun (inner x) (seql (:for y (range 0 2)) (:yield (+ (* x 10) y))))
-
 (seql (:for x (range 0 3))
-      (:do (yield-from (inner x))))
+      (:subloop)
+      (:for y (range 0 2))
+      (:yield (+ (* x 10) y)))   ;; 0 1 10 11 20 21
 #+END_SRC
+which means a ~:break~ from an inner level really does leave the whole sequence,
+and ~:end-subloop-if~ really does resume the outer level. Splicing an inner
+sequence with ~(yield-from ...)~ remains available and is what you want when the
+inner one is a function of its own — but it is no longer the only way to nest,
+and it costs an iterator per outer iteration where a ~:subloop~ costs nothing.
 
 *** Levels
 Levels are implicit: *an iterating clause — a ~:for~ or a ~:with~ — preceded by

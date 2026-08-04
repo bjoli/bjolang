@@ -1094,9 +1094,11 @@ and private splitCollector (s: SExpr) : Expr * SExpr =
 ///     (:yield e)               →  (:do (yield e))
 ///
 /// Every level, cursor, `:break` and `:with` is the loop facility's, unchanged.
-/// The loop group is promoted to a `while`/`switch` like any other, and a
-/// `yield return` sitting inside that switch is ordinary C# — which is the only
-/// reason this can be a rewrite rather than a second implementation.
+/// The loop group is emitted inline as a `while`/`switch` in the sequence's own
+/// iterator method, and a `yield return` inside that switch is ordinary C# —
+/// which is the only reason this can be a rewrite rather than a second
+/// implementation. Levels included: a nested loop is one merged switch, not a
+/// function, so `:subloop` needs nothing special here.
 ///
 /// `:acc` is refused. A `seql` hands its elements out one at a time and has no
 /// result to accumulate into, and the ban is also what keeps the rewrite honest:
@@ -1144,38 +1146,6 @@ and private desugarSeqLoop (allForms: SExpr list) (r: Range) : Expr =
 
     if clauseForms.IsEmpty then
         failwithf $"Invalid seql at line %d{r.Start.Line}: it has no clauses"
-
-    // One level only, and refused here rather than left to the code generator.
-    //
-    // A single-level loop is emitted inline, so its `yield return` sits in the
-    // sequence's own iterator method and is ordinary C#. Two or more levels are
-    // emitted as one *merged* local function — the members jump between each
-    // other, and a switch section is the only jump target C# offers — and a
-    // local function may not `yield return`. The codegen diagnostic for that
-    // talks about lambdas and loops-used-as-values, which is true but useless
-    // advice to someone who wrote a `:subloop`.
-    //
-    // The rule below restates `desugarLoop`'s, which is a duplication and the
-    // one place this rewrite is not self-maintaining. It is written over the
-    // raw forms so that a `:let` between two `:for` clauses — which opens a
-    // level just as a `(:subloop)` does — is caught the same way.
-    let levelCount =
-        let mutable levels = 0
-        let mutable prevWasIter = false
-
-        for c in clauseForms do
-            match c with
-            | SList(SAtom { Token = Keyword("for" | "with") } :: _, _) ->
-                if not prevWasIter then levels <- levels + 1
-                prevWasIter <- true
-            | SList(SAtom { Token = Keyword _ } :: _, _) -> prevWasIter <- false
-            | _ -> ()
-
-        levels
-
-    if levelCount > 1 then
-        failwithf
-            $"The (seql ...) at line %d{r.Start.Line} has %d{levelCount} levels, and a seql can only have one. A nested loop compiles to a group of mutually jumping members emitted as a single C# local function, and a local function cannot yield. Write the inner level as a seql of its own and splice it in with (yield-from ...), or use a (loop ...) if you did not need laziness."
 
     let loopExpr = desugarLoop (clauseForms |> List.map rewriteClause) r
 
