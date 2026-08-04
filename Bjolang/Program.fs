@@ -6,8 +6,8 @@ type CompilerOptions =
 let defaultOptions = { InputFile = None; IsLibrary = false; Debug = false }
 
 let printUsage () =
-    printfn "Fisp Compiler"
-    printfn "Usage: fisp [options] <source.bjo>"
+    printfn "Bjolang Compiler"
+    printfn "Usage: bjoc [options] <source.bjo>"
     printfn ""
     printfn "Options:"
     printfn "  --lib       Compile the source as a library (.dll) instead of an executable"

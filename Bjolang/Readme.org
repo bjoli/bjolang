@@ -5,7 +5,7 @@ I think we have all had the thought: all programming languages suck in at least 
 * Elevator pitch
 Bjolang is a scheme-inspired language with local HM type inference that compiles to constipated c#. It has traits instead of classes, meaning you don't ever have to think about two-way interop. The default data structures are immutable. A fast RRB tree (Vec), a very fast CHAMP (hash table), a linked list (List). There are more datastructures coming (ordered map, deque, queue).
 
-It also fakes Brand/higher kinded types by inlining traits when the trait in known at compile time, giving us among other things, a Monad trait. 
+It also fakes Brand/higher kinded types by inlining traits when the trait is known at compile time, giving us among other things, a Monad trait. It is eager and non-curried, but has a lambda shorthand.
 
 * Planned features
 
@@ -35,7 +35,6 @@ Tail recursion does not work except for self recursion (including named lets) an
 ;; this works
 
 (defun (main args)
-
   ;; A lazy sequence of fibonaccis
   (def fibseq (seq   
                (let loop ((a 0) (b 1))
@@ -53,8 +52,7 @@ Tail recursion does not work except for self recursion (including named lets) an
   ;; This does SCC analysis and transforms the output to
   ;; c# while and switch+goto
   (odd? 4000000)
-     
-  0)
+  0) ;; main needs to return a number
 
 
   ;; this stack overflows after a while if you call any of
@@ -139,8 +137,7 @@ Bjolang has traits. Traits can be regular traits, which means they are usable on
   ;; Which means this fails because any function written against
   ;; an "inline" trait is going to be monomorphic. 
   (def e (bump an-option))
-  
-  )
+  0)
 
 #+end_src
 
@@ -157,10 +154,29 @@ Look Ma, a Monad!
       (:return (+ doubled third))))
 #+END_SRC
 
+*** The usual syntactic things in a modern lisp
+apart from (-> this is not actually implemented. )
+
+#+begin_src scheme
+(-> [1 2 3 4 5]
+    (map add1 &)
+    (fold + 0 &)
+    println)
+
+;; in fact, any flat expr with & turns into a lambda. at least when I have gotten to implementing it. 
+
+(+ & 5) ;; => (fun (&1) (+ &1 5))
+#+end_src
+
+if-let, some-let* and things are going to be implemented.
+
+some-> will short-circuit in any of the calls returns none.
+
+
 *** Immutable base data structures
  Bjolang's base data structures are all immutable and fast (yes, actually fast). These data structures are _not_ vibe coded like this project. Not only are they fast in their immutable versions, but they also have transient versions.
 
- The Vec type is an RRB vector. It compares favourably to the immutable vectors of clojure an  scala. If you don't count the "slices" of clojure's vectors, it is a lot faster than clojure's vectors. The slices of scala's vectors has magic finger tree pixie dust, but other than that it competes (and often wins) wrt speed.
+ The Vec type is an RRB vector. It compares favourably to the immutable vectors of clojure an  scala. If you don't count the "slices" of clojure's vectors (which are just views), it is a lot faster than clojure's vectors. The slices of scala's vectors has magic finger tree pixie dust, but other than that it competes (and often wins) with regards to speed.
 
  The Map is a CHAMP that has transient operations and a builder. It compares favourably to the immutable map in c# or the hash map in language-ext.
 
@@ -188,7 +204,7 @@ Unlike f#, bjolang has keyword arguments (but no optargs!):
 (key-fun 10 #:what "orange") ;; prints "orange\n" 10 times
 #+end_src
 
-This is currently less efficient than non-kw functions, because every function call checks what was provided and re-evaluates the default argument expressions.
+This is currently less efficient than non-kw functions, because every function call checks what was provided and re-evaluates the default argument expressions. It is just a series of ifs and evaluating the expressions, so it is not that bad, but perhaps something that could be added.
 
 *** Structs and records
 Have the same syntax, and both are constructed by naming the type — there is no
@@ -225,7 +241,7 @@ record example:
 
 I got tired of shitty looping facilities a long time ago. I took Alex Shinn's (chibi loop) and made (goof loop) for guile scheme. Not only was it extensible and much more flexible than most looping facilities, it also had the fantastic feature that the code it produced was as fast as a hand-rolled loop (looking at you, python's for loop).
 
-Bjolangs loop is based on what I learned writing goof-loop, but instead of using macros, it uses traits.
+Bjolangs loop is based on what I learned writing goof-loop, but instead of using macros, it uses traits meaning it sucks a bit more. 
 
 #+begin_src scheme
 (defun (main args)
@@ -255,20 +271,77 @@ It also supports subloops. Anything that isn't a for clause followed by a :for c
 
  #+begin_src scheme
 (defun (main args)
-  (seql (:with a 0L b)
-        (:with b 1L (+ a b))
-        (:yield a)))
+  (def all-fibs
+    (seql (:with a 0L b)
+          (:with b 1L (+ a b))
+          (:yield a))))
+  (println "I wonder if we can print all the fibonacci numbers up to 2^64-1")
+  (seq-for-each #(println &) all-fibs))
  #+end_src
 
 * TODO
 
 These are things I found while spelunking:
 
-- Check that the Map wrappers are not slowing things down too much
+- Check that the Map higher order wrappers are not slowing things down too much
 - Make it possible to shadow trait methods and not have the typechecker vomit.
 - output LINE-directives so that we can see which code generated the bad c# output if roslyn fails.
 - Dynamic environment. 
 - ConcurrentML. Preferably fast and not built on the full Task machinery. 
 - A standard library that doesn't suck.
 - seq being a trait: seq-map(etc) should work on every collection lazily.
-- This would need default bodies
+- Annotations using @[c# annotation verbatim here] so that I can piggyback on c# json libraries.
+- an (import/extern ...) form that could look like this:
+
+  #+begin_src scheme
+(import/extern (print-int    (: System.Console.WriteLine (-> int void)))
+               (print-double (: System.Console.WriteLine (-> double void))))
+
+  #+end_src
+
+** Things I need in the standard library
+Integrate the BjoChar character in the compiler, making string-ref and all other string operations work on this type. This is probably a larger problem than it seems, since it is _NOT_ the same as a c# char. It is not 16 bit (WHY IN THE NAME OF ALL THINGS HOLY, C#!).
+
+typed string interpolation
+
+Stringbuilders.
+
+IO for working with files
+
+io for working with network thingies
+
+Deque and Heap, preferrably with transient interfaces
+
+Process notation, maybe taken from scsh.
+
+String functions in general. Add (stringing c) to loop.
+
+Maybe I should just steal all the functions from r6rs and bolt them onto what I can find in dotnet. Or maybe steal something from racket.
+
+STRING FORMATTING. Alex Shinn is the answer yet again. (show #t etc ...) and divide them into shorter forms showt and showf and make them the "default" print functions. I really like the showt name...
+
+** Syntax ideas
+@-expr from racket?
+
+comprehensions based on loop. This is simple. I should do it now (early august 2026):
+
+#+begin_src scheme
+{listing (+ a 5) :for a b}
+;; would become
+(loop (:for a b)
+      (:acc gensym-here (listing (+ a 5))))
+
+;; but also allow for more
+{vecing (abs (- b f) :when (sun-and-moon-in-zenith) :for b (get-infinite-seq) :break (> b 2) :for f (stuffy-stuff b)))}
+;; which becomes
+(loop (:for b (get-infinite-seq))
+      (:break (> b 2))
+      (:for f (stuffy-stuff b))
+      (:acc gensym-here (abs (- b f)) :when (sun-and-moon-in-zenith)))
+
+;; The seql version would just {seqing expr :for ...}
+#+end_src
+
+Extend do notation to be more usable. :match :traverse :and<- (seems _very hard_ atm).
+
+(with-return ...) that allows for (return ...). Disallowed in loops and seq. 
