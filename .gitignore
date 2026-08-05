@@ -17,7 +17,18 @@ Bjolang/obj/
 *.dll
 *.pdb
 *.runtimeconfig.json
+*.deps.json
 *.il
+
+# The apphost the SDK emits alongside an .exe has no extension at all, so it
+# cannot be matched by suffix. Anything under TestFiles is already ignored
+# wholesale below; this covers the same output under Playground.
+Bjolang/Playground/**/*
+!Bjolang/Playground/**/*.bjo
+!Bjolang/Playground/**/*.py
+
+# Written by the frontend on every --debug compile.
+Bjolang/out.cs
 
 # Log files and compiler trace files
 *.log
