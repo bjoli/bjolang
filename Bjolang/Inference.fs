@@ -514,6 +514,21 @@ let private heldByInlineWanteds () : Set<int> =
 
 do Unification.heldMetaIds <- heldByInlineWanteds
 
+/// The holes an unresolved *interface*-trait obligation is watching.
+///
+/// Held back for local bindings only. At the top level such an obligation is
+/// exactly the generic-receiver case the dictionary path handles, and holding
+/// it there would turn every constrained generic function monomorphic — but a
+/// top-level binding drains the queue before it generalizes anyway, so the two
+/// never meet.
+let private heldByInterfaceWanteds () : Set<int> =
+    wantedQueue
+    |> Seq.filter (fun w -> w.Kind = InterfaceTrait && w.Ref.Resolved.IsNone)
+    |> Seq.collect (fun w -> w.HoleArgs |> Seq.collect (fun (m, _) -> metaIdsOf m))
+    |> Set.ofSeq
+
+do Unification.heldLocalMetaIds <- heldByInterfaceWanteds
+
 let private pushWanted (w: Wanted) = wantedQueue.Add w
 
 /// Detaches everything raised so far. Callers solve what they take.
@@ -1301,8 +1316,20 @@ let rec infer (env: Env) (expr: Expr) : HMType * TypedExpr =
             unify env.Registry valType expectedType
         | None -> ()
 
+        // Only a *function*-shaped local binding is generalized.
+        //
+        // The value restriction would admit more — a bare lambda is a syntactic
+        // value — but C# is the limit here rather than soundness. A local
+        // binding that is not a function is emitted as an ordinary local
+        // variable, and neither a delegate nor a `SchemeList<T>` local can be
+        // generic: there is nowhere for the type parameter to be declared.
+        // Quantifying one emitted `Func<T_t__1, T_t__1> id = ...` naming a
+        // parameter the enclosing method never declared.
+        //
+        // A local `defun` is not affected: it becomes a C# local function,
+        // which may have type parameters of its own.
         let scheme =
-            if isFun || isSyntacticValue typedVal then generalize env valType
+            if isFun then generalizeLocal env valType
             else Scheme([], [], valType)
         let localEnv = addBinding name { Scheme = scheme; IsMutable = false } env
         let bodyType, typedBody = infer localEnv body
@@ -1377,12 +1404,15 @@ let rec infer (env: Env) (expr: Expr) : HMType * TypedExpr =
                 name, isFun, args, typedVal)
 
         let finalEnv =
-            bindingMetas
+            List.zip bindings bindingMetas
             |> List.fold
-                (fun acc (n, t) ->
+                // Function-shaped members only, for the reason `ELet` gives:
+                // anything else becomes a plain local and cannot carry a type
+                // parameter.
+                (fun acc ((_, isFun, _, _, _), (n, t)) ->
                     addBinding
                         n
-                        { Scheme = generalize recEnv t
+                        { Scheme = (if isFun then generalizeLocal recEnv t else Scheme([], [], t))
                           IsMutable = false }
                         acc)
                 env

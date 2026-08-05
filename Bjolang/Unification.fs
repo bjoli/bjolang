@@ -190,10 +190,26 @@ let rec freeTVars (registry: TraitRegistry) (t: HMType) : string list =
 /// places that have no business knowing a constraint queue exists.
 let mutable heldMetaIds: unit -> Set<int> = fun () -> Set.empty
 
-let generalize (env: Env) (t: HMType) : Scheme =
+/// Metavariables held back for a binding that is *local* to a function body.
+///
+/// An unresolved interface-trait obligation may be generalized at the top
+/// level: the variable becomes a type parameter, the obligation becomes a
+/// dictionary parameter, and `Lowering` injects both. None of that machinery
+/// exists for a local binding. A C# local function gets no dictionary
+/// parameter from any pass, so quantifying the variable emitted a type
+/// parameter the *enclosing* method was then expected to declare — and it
+/// never did, because the constraint had been attributed to the wrong
+/// function entirely.
+///
+/// Held back, such a binding stays monomorphic, its use site pins the type,
+/// and the obligation resolves to a direct static call. That is the same
+/// treatment an inline trait already gets above, and for the same reason: it
+/// is the only thing the binding can honestly be.
+let mutable heldLocalMetaIds: unit -> Set<int> = fun () -> Set.empty
+
+let private generalizeWith (held: Set<int>) (env: Env) (t: HMType) : Scheme =
     let envFv = envFreeVars env
     let tFv = freeVars env.Registry t |> List.distinct
-    let held = heldMetaIds ()
 
     let generalizable =
         tFv
@@ -215,3 +231,15 @@ let generalize (env: Env) (t: HMType) : Scheme =
 
     // Default to empty constraints for now; gathering happens during inference
     Scheme(allVars, [], t)
+
+/// Generalizes a top-level binding: anything an unresolved *inline*-trait
+/// obligation is watching stays monomorphic, and everything else is quantified.
+let generalize (env: Env) (t: HMType) : Scheme = generalizeWith (heldMetaIds ()) env t
+
+/// Generalizes a binding local to a function body.
+///
+/// Everything `generalize` holds back, plus the interface-trait obligations —
+/// see `heldLocalMetaIds`. A local function may still be polymorphic; it may
+/// just not be polymorphic in a variable that a trait call has to dispatch on.
+let generalizeLocal (env: Env) (t: HMType) : Scheme =
+    generalizeWith (Set.union (heldMetaIds ()) (heldLocalMetaIds ())) env t

@@ -64,6 +64,37 @@ signature, or make it a function, whose type parameters do have somewhere to
 live. A ~defun~ is unaffected; a polymorphic top-level function becomes a generic
 method, which C# is happy with.
 
+*** What generalizes *locally*
+A local ~defun~ becomes a C# local function, which may declare type parameters
+of its own, so it is generalized like a top-level one:
+#+BEGIN_SRC scheme
+(defun (main)
+  (defun (fst t) (match t ((Tuple x y) x)))
+  (println (fst (Tuple "a" 1)))          ;; used at two different types
+  (println (int->string (fst (Tuple 2 "b")))))
+#+END_SRC
+
+Two kinds of local binding stay monomorphic, and the reason is C# rather than
+soundness:
+
+- Anything that is not function-shaped — a ~let~-bound lambda, a ~let~-bound
+  ~Nil~ — is emitted as an ordinary local variable. Neither a delegate nor a
+  ~SchemeList<T>~ local can be generic; there is nowhere to declare the type
+  parameter.
+- A local function whose body dispatches on a trait, at a type variable of its
+  own. A top-level function discharges such a constraint with a dictionary
+  parameter that ~Lowering~ injects; a C# local function is given no dictionary
+  by any pass.
+
+In both cases the use site pins the type, and a trait call then resolves to a
+direct static call — often better code than a dictionary would have been. Using
+such a binding at two *different* types is a type error; lift it to the top
+level, where both mechanisms exist in full.
+
+A local helper that uses the *enclosing* function's constrained type variable is
+unaffected: that constraint belongs to the enclosing function and becomes its
+dictionary parameter, exactly as before.
+
 *** Mutable bindings
 ~def/mutable~ declares a binding ~set!~ may write, at module level or inside a
 function.
