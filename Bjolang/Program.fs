@@ -159,6 +159,99 @@ let main argv =
                     autoExports.Length
                     (String.concat ", " autoExports)
 
+            // The `import/extern` aliases this module has to publish.
+            //
+            // An alias is not a binding and has no signature, so neither
+            // `serializeExport` nor `autoExports` can carry one: what an
+            // importer needs is the *import*, so that it resolves the overload
+            // set against the same .NET metadata this module did.
+            //
+            // Two ways in. An alias may be exported outright, which is the only
+            // way to publish an overloaded foreign method under one name. Or an
+            // exported inline template may name one — `(defun (abs x) (clr-abs
+            // x))` as a trait default, say — in which case the alias travels
+            // whether or not anybody meant to export it, for the same reason
+            // `autoExports` exists: an unreachable free name makes re-inference
+            // at the splice fail, and the call silently falls back to the
+            // landing pad.
+            // An alias a *body* names is published under a name that source code
+            // will not collide with, and the body is rewritten to use it.
+            //
+            // Publishing it under its own name would be a capture bug rather
+            // than a convenience. A spliced template is re-inferred in the
+            // importing module's scope, so a module that happened to define
+            // `clr-abs` would have its definition silently become the meaning of
+            // the library's `abs` — a wrong answer, with nothing said about it.
+            // The mangled name means the body still refers to what it referred
+            // to where it was written, whatever the importer calls things.
+            let publishedAliasPrefix = "clr_import__"
+
+            let publishedAliasOf (alias: string) =
+                if alias.StartsWith publishedAliasPrefix then
+                    alias
+                else
+                    let modTag =
+                        System.IO.Path.GetFileNameWithoutExtension(inputFilePath).Replace(".", "_").Replace("-", "_")
+
+                    $"%s{publishedAliasPrefix}%s{modTag}__%s{alias}"
+
+            /// The aliases a body names, and what each is published as.
+            let bodyExternSubst (bound: Set<string>) (body: Parser.Expr) =
+                AlphaRename.freeNames bound body
+                |> Set.toList
+                |> List.filter (fun n -> Map.containsKey n env.Registry.ClrExterns)
+                |> List.map (fun n -> n, publishedAliasOf n)
+                |> Map.ofList
+
+            // A trait's defaults are published with it, and are spliced into an
+            // importing module's own implementations, so they are bodies in
+            // exactly the same sense as a template.
+            let exportedTraitDefaults =
+                exportedTraits
+                |> Map.toList
+                |> List.collect (fun (_, (info: TypedAST.TraitInfo)) -> info.Defaults |> Map.toList)
+
+            let externsNamedByBodies =
+                (inlineTemplatesToExport
+                 |> List.collect (fun (_, (tpl: TypedAST.InlineTemplate)) ->
+                     bodyExternSubst (Set.ofList tpl.Params) tpl.Body |> Map.toList))
+                @ (exportedTraitDefaults
+                   |> List.collect (fun (_, decl) ->
+                       match decl with
+                       | Parser.DDefun(_, args, body, _) ->
+                           let params' =
+                               args
+                               |> List.choose (function
+                                   | Parser.MandatoryArg n -> Some n
+                                   | _ -> None)
+
+                           bodyExternSubst (Set.ofList params') body |> Map.toList
+                       | _ -> []))
+                |> List.distinct
+
+            let externsToExport =
+                // Exported by name — published as itself, because that name is
+                // the one the importing module is meant to write.
+                (exports
+                 |> List.choose (fun n -> Map.tryFind n env.Registry.ClrExterns))
+                @ (externsNamedByBodies
+                   |> List.choose (fun (alias, published) ->
+                       env.Registry.ClrExterns
+                       |> Map.tryFind alias
+                       |> Option.map (fun i -> { i with Alias = published })))
+                |> List.distinctBy (fun i -> i.Alias)
+
+            let exportedExternAliases =
+                exports
+                |> List.filter (fun n -> Map.containsKey n env.Registry.ClrExterns)
+                |> Set.ofList
+
+            if isLibrary && not externsNamedByBodies.IsEmpty then
+                printfn
+                    "Publishing %d foreign import(s) named by an exported body: %s"
+                    externsNamedByBodies.Length
+                    (externsNamedByBodies |> List.map fst |> String.concat ", ")
+
             let exportMetadata =
                 if isLibrary && (not exports.IsEmpty || not typesToExport.IsEmpty) then
                     let quoted (name: string) = if name.StartsWith("'") then name else "'" + name
@@ -191,7 +284,46 @@ let main argv =
                                 |> Map.toList
                                 |> List.map (fun (mName, mType) -> $"(: %s{mName} %s{Codegen.serializeHMType mType})")
 
-                        let parts = assocStrs @ methodStrs |> String.concat " "
+                        // Default bodies travel with the trait, so that an
+                        // importing module can write an implementation of it and
+                        // inherit them — which is the only way it ever gets
+                        // them. The impls compiled *here* already have theirs
+                        // spliced in and published as ordinary methods.
+                        //
+                        // A body that will not serialize is left out rather than
+                        // mangled. The consequence is only that an importer has
+                        // to write that method itself, and it is told so at its
+                        // own `def/impl`.
+                        let defaultStrs =
+                            info.Defaults
+                            |> Map.toList
+                            |> List.choose (fun (mName, decl) ->
+                                match decl with
+                                | Parser.DDefun(_, args, body, _) when Codegen.isSerializableTemplate body ->
+                                    let paramNames =
+                                        args
+                                        |> List.choose (function
+                                            | Parser.MandatoryArg n -> Some n
+                                            | _ -> None)
+
+                                    // Keyword and rest parameters are a calling
+                                    // convention, and the reader on the far side
+                                    // rebuilds a plain `defun` from this.
+                                    if paramNames.Length <> args.Length then
+                                        None
+                                    else
+                                        let paramsStr = String.concat " " paramNames
+
+                                        let body =
+                                            AlphaRename.renameFree
+                                                (bodyExternSubst (Set.ofList paramNames) body)
+                                                body
+
+                                        Some
+                                            $"(defun (%s{mName} %s{paramsStr}) %s{Codegen.serializeExpr body})"
+                                | _ -> None)
+
+                        let parts = assocStrs @ methodStrs @ defaultStrs |> String.concat " "
                         $"(def/trait (%s{traitName} %s{implementorStr}) %s{parts})"
 
                     let serializeImpl (traitName: string) (targetType: TypedAST.HMType) (assocMap: Map<string, TypedAST.HMType>) =
@@ -228,6 +360,27 @@ let main argv =
                             + String.concat " " (mandatory @ keywords @ rest @ [ Codegen.serializeHMType ret ])
                             + ")"
                         | _ -> Codegen.serializeHMType t
+
+                    // `(import/extern (alias (: System.Math.Abs)))`, the same
+                    // form the source was written in — the reader on the far
+                    // side is the ordinary one, and an alias read back is
+                    // registered exactly as a hand-written import would be.
+                    //
+                    // The declared type is emitted only if there was one. Adding
+                    // one here would be actively wrong: it is what *narrows* an
+                    // import to a single overload, so inventing it would publish
+                    // whichever member of the set this module happened to use.
+                    let serializeExtern (info: TypedAST.ClrExternInfo) =
+                        let typeStr =
+                            match info.DeclaredType with
+                            | Some t -> " " + Codegen.serializeHMType t
+                            | None -> ""
+
+                        let exceptionStr =
+                            if info.Exceptions.IsEmpty then ""
+                            else " #:exceptions (" + String.concat " " info.Exceptions + ")"
+
+                        $"(import/extern (%s{info.Alias} (: %s{info.ClrType}.%s{info.MethodName}%s{typeStr}%s{exceptionStr})))"
 
                     let serializeExport name =
                         match Map.tryFind name env.Bindings with
@@ -296,10 +449,17 @@ let main argv =
                     // that binding with a weaker one on the importing side.
                     let sigsStr =
                         (exports @ autoExports)
-                        |> List.filter (fun name -> not (Set.contains name exportedTraitMethods))
+                        |> List.filter (fun name ->
+                            not (Set.contains name exportedTraitMethods)
+                            // An alias is published as its import, just below. It
+                            // has no binding to read a type off, so leaving it in
+                            // here would emit a blank line and export nothing.
+                            && not (Set.contains name exportedExternAliases))
                         |> List.distinct
                         |> List.map serializeExport
                         |> String.concat "\n"
+
+                    let externsStr = externsToExport |> List.map serializeExtern |> String.concat "\n"
                     let typesStr = typesToExport |> List.map serializeTypeDef |> String.concat "\n"
 
                     let traitsStr =
@@ -318,7 +478,10 @@ let main argv =
                             serializeImpl traitName targetType assocMap)
                         |> String.concat "\n"
 
-                    [ typesStr; traitsStr; implsStr; sigsStr ]
+                    // Foreign imports precede the traits: a trait's own signature
+                    // may name a type an `import/class` alias introduced, and an
+                    // impl's inline template may call an `import/extern` one.
+                    [ typesStr; externsStr; traitsStr; implsStr; sigsStr ]
                     |> List.filter (fun s -> not (System.String.IsNullOrWhiteSpace s))
                     |> String.concat "\n"
                 else ""
@@ -340,8 +503,17 @@ let main argv =
                             |> List.map (fun (name, emitted) -> $"(\"{name}\" \"{emitted}\")")
                             |> String.concat " "
 
+                        // Foreign aliases the body names are rewritten to the
+                        // names they were published under, so that the splice
+                        // resolves them where they were written rather than
+                        // wherever it lands.
+                        let body =
+                            AlphaRename.renameFree
+                                (bodyExternSubst (Set.ofList tpl.Params) tpl.Body)
+                                tpl.Body
+
                         $"(inline-impl \"{traitName}\" \"{methodName}\" \"{ctor}\" \"{tpl.OriginModule}\" "
-                        + $"({paramsStr}) {Codegen.serializeExpr tpl.Body} ({qualStr}))")
+                        + $"({paramsStr}) {Codegen.serializeExpr body} ({qualStr}))")
                     |> String.concat "\n"
                 else ""
 

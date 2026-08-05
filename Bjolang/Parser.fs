@@ -187,12 +187,18 @@ type Decl =
     | DDefun of string * DefunArg list * Expr * Range
     | DType of TypeDef list * Range
     | DTypeRec of TypeDef list * Range
-    // DTrait (Name, ImplementorVar, HoleArity, AssociatedTypes, Signatures, Range)
+    // DTrait (Name, ImplementorVar, HoleArity, AssociatedTypes, Signatures, Defaults, Range)
     //
     // `HoleArity` is how many arguments the implementor was written applied to.
     // `(def/trait (Show %c) ...)` gives 0 and means an interface trait;
     // `(def/trait (Monad (%m %a)) ...)` gives 1 and means an inline-only one.
-    | DTrait of string * string * int * string list * (string * FType) list * Range
+    //
+    // `Defaults` are `DDefun`s written in the trait itself, standing in for the
+    // method of that name in any impl that does not write one. They are kept
+    // untyped and *unchecked* here: a default is checked once per impl, against
+    // that impl's instantiation of the signature, which is what lets one body
+    // mean something different at each implementor.
+    | DTrait of string * string * int * string list * (string * FType) list * Decl list * Range
     | DExtern of string * FType * (string * string) list * Range
     /// `(import/extern (alias (: Clr.Target type #:exceptions (E ...))) ...)`
     | DImportExtern of ExternImportSpec list * Range
@@ -2462,6 +2468,7 @@ let rec parseDecl (s: SExpr) : Decl =
 
         let mutable assocTypes = []
         let mutable signatures = []
+        let mutable defaults = []
 
         for item in body do
             match item with
@@ -2472,10 +2479,17 @@ let rec parseDecl (s: SExpr) : Decl =
             // Match: (: methodName signatureExpr)
             | SList (SAtom { Token = Colon } :: SAtom { Token = Symbol methodName } :: typeExpr :: [], _) ->
                 signatures <- (methodName, parseType typeExpr) :: signatures
-            
-            | _ -> failwithf $"Syntax error in def/trait '%s{traitName}': Expected (type ...) or (: ...)."
 
-        DTrait (traitName, implementorVar, holeArity, List.rev assocTypes, List.rev signatures, r)
+            // Match: (defun (methodName args...) body) — a default body, used by
+            // any impl that does not write this method itself. The signature is
+            // still declared separately: a default supplies the *body*, and the
+            // type it is checked at comes from the impl, not from here.
+            | SList (SAtom { Token = Symbol "defun" } :: _, _) as defunExpr ->
+                defaults <- parseDecl defunExpr :: defaults
+
+            | _ -> failwithf $"Syntax error in def/trait '%s{traitName}': Expected (type ...), (: ...) or (defun ...)."
+
+        DTrait (traitName, implementorVar, holeArity, List.rev assocTypes, List.rev signatures, List.rev defaults, r)
 
     // Parse: (def/impl (TraitName (Vec 'a)) (type 'item 'a) (defun (get v i) ...))
     | SList (SAtom { Token = Symbol "def/impl" } :: 

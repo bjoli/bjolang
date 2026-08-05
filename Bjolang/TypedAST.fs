@@ -413,7 +413,16 @@ type TraitInfo =
       /// `InterfaceTrait`.
       HoleArity: int
       /// Signature templates. Populated for `InlineTrait` only.
-      Templates: Map<string, TplType> }
+      Templates: Map<string, TplType>
+      /// Default method bodies, by method name, as written in the `def/trait`.
+      ///
+      /// Untyped `DDefun`s, and deliberately never checked here. `def/impl`
+      /// splices one in for a method the impl leaves out, and the ordinary
+      /// definition-site check then runs it against *that* impl's instantiation
+      /// of the signature. So a single default body may mean a different thing
+      /// at each implementor — which is the whole point when the body resolves
+      /// an overloaded foreign method from its argument types.
+      Defaults: Map<string, Decl> }
 
 type TraitRegistry =
     { LocalTraits: Set<string>

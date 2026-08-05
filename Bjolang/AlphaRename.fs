@@ -73,25 +73,23 @@ let rec private renamePattern (subst: Map<string, string>) (pat: Pattern) : Patt
     | PTypeTest(t, binder, r) -> PTypeTest(t, binder |> Option.map (fun n -> Map.tryFind n subst |> Option.defaultValue n), r)
     | leaf -> leaf
 
-/// Freshens every binder in `expr`, and every free occurrence of a name in
-/// `roots`.
+/// Renames names in `expr`, given how to rename a binder and what the free
+/// names start out substituted by.
 ///
-/// `roots` are the caller's chosen entry names — an inline template's formal
-/// parameters — which are free in `expr` but still have to be renamed apart so
-/// that the arguments can be substituted for names nothing else can mention.
-/// The returned map covers exactly those.
-let freshen (roots: string list) (expr: Expr) : Expr * Map<string, string> =
-    let rootSubst =
-        roots
-        |> List.filter isRenamable
-        |> List.map (fun r -> r, Gensym.fresh r)
-        |> Map.ofList
+/// `renameBinder` returning a name unchanged is what makes this usable for a
+/// substitution that must *not* freshen: `bind` then drops the name from the
+/// substitution instead of adding to it, so a binder shadows an outer name
+/// exactly as it does at runtime.
+let private renameWith
+    (renameBinder: string -> string)
+    (rootSubst: Map<string, string>)
+    (expr: Expr)
+    : Expr =
 
-    /// Extends `subst` with a fresh name for each binder, returning the new
-    /// names in the order given.
+    /// Extends `subst` with a new name for each binder, returning the new names
+    /// in the order given.
     let bind (names: string list) (subst: Map<string, string>) =
-        let renamed =
-            names |> List.map (fun n -> if isRenamable n then Gensym.fresh n else n)
+        let renamed = names |> List.map renameBinder
 
         let subst' =
             List.zip names renamed
@@ -179,7 +177,32 @@ let freshen (roots: string list) (expr: Expr) : Expr * Map<string, string> =
         | EYield(v, r) -> EYield(sub v, r)
         | EYieldFrom(s, r) -> EYieldFrom(sub s, r)
 
-    go rootSubst expr, rootSubst
+    go rootSubst expr
+
+/// Freshens every binder in `expr`, and every free occurrence of a name in
+/// `roots`.
+///
+/// `roots` are the caller's chosen entry names — an inline template's formal
+/// parameters — which are free in `expr` but still have to be renamed apart so
+/// that the arguments can be substituted for names nothing else can mention.
+/// The returned map covers exactly those.
+let freshen (roots: string list) (expr: Expr) : Expr * Map<string, string> =
+    let rootSubst =
+        roots
+        |> List.filter isRenamable
+        |> List.map (fun r -> r, Gensym.fresh r)
+        |> Map.ofList
+
+    renameWith (fun n -> if isRenamable n then Gensym.fresh n else n) rootSubst expr, rootSubst
+
+/// Rewrites the *free* occurrences of the names in `subst`, leaving binders as
+/// they are.
+///
+/// A name the expression binds itself keeps its meaning: the substitution is
+/// dropped for the extent of that binder, so this cannot reach inside a scope
+/// where the name means something else.
+let renameFree (subst: Map<string, string>) (expr: Expr) : Expr =
+    if Map.isEmpty subst then expr else renameWith id subst expr
 
 /// Every name `expr` references without binding, given `bound` already in scope.
 ///

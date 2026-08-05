@@ -14,7 +14,13 @@
   ;; Range
   range range-by
 
-  print println ->str )
+  ;; maths
+  abs
+  sqrt
+  ;; min
+  ;; max
+
+  print println ->str)
 
 
 
@@ -168,6 +174,18 @@
   (defun (current s c) (map-cursor-current c))
   (defun (next s c) c))
 
+;; The same shape as the List impl: the cursor is the remaining sequence, and
+;; every method reads `c` rather than `s`. Reading `s` would restart from the
+;; head on every iteration, and a lazy sequence would keep forcing the same
+;; element forever.
+(def/impl (Iterable (Seq %a))
+  (type %elem %a)
+  (type %cursor (Seq %a))
+  (defun (start s) s)
+  (defun (done? s c) (seq-empty? c))
+  (defun (current s c) (seq-head c))
+  (defun (next s c) (seq-tail c)))
+
 ;; ---------------------------------------------------------------------------
 ;; Collector
 ;; ---------------------------------------------------------------------------
@@ -287,3 +305,61 @@
 (def/impl (Functor (Option %a))
   (defun (map g o)
     (match o ((Some v) (Some (g v))) (None None))))
+
+
+;; ---------------------------------------------------------------------------
+;; Maths
+;; ---------------------------------------------------------------------------
+
+;; `System.Math.Abs` is an overload set — one method per numeric type — and an
+;; `import/extern` binds the whole set, resolving it from the argument types at
+;; each call. That is why it cannot be exported directly: a name leaves this
+;; module as a signature, and there is no signature for "whichever overload the
+;; call site turns out to want".
+;;
+;; A trait is the shape that does fit. The default body is written once and
+;; checked once per impl, so `(clr-abs x)` resolves to `Abs(int)` under
+;; `(Num int)` and `Abs(double)` under `(Num double)` — the same body, at an
+;; argument type that does not exist until the implementor is known. Each impl
+;; is a direct call to the .NET method with nothing in between; a call at a
+;; known type is devirtualized and inlined back to exactly that.
+;;
+;; `clr-abs` is deliberately not exported: it is the unexported overload set,
+;; and `abs` is the exported name.
+(import/extern
+  (clr-abs    (: System.Math.Abs))
+  (clr-sqrt   (: System.Math.Sqrt)))
+
+;; Only the types `Math.Abs` actually has an overload for. There is no
+;; `Abs(byte)` — an unsigned type has nothing to negate — so `byte` is not a
+;; `Num`, and asking for `(abs some-byte)` says so rather than widening behind
+;; your back.
+(def/trait (Num %a)
+  (: abs (-> %a %a))
+  (defun (abs x) (clr-abs x)))
+
+(def/impl (Num int))
+(def/impl (Num long))
+(def/impl (Num double))
+
+;; Todo: add a min/max that takes rest args. Binary ones would join `Num`
+;; exactly as `abs` did — `(: min (-> %a %a %a))` with `(defun (min a b)
+;; (clr-min a b))` as the default — but a rest-argument version is a plain
+;; function over a `Num`-constrained element type instead, so the choice is
+;; worth making before either is written.
+
+;; `Math.Sqrt` is one method rather than an overload set: there is no integer
+;; square root to pick. So it needs no trait — an ordinary signature says all
+;; there is to say, and an int argument widens to double at the call as it
+;; would in C#.
+(: sqrt (-> double double))
+(defun (sqrt x) (clr-sqrt x))
+
+;; ;; String operations
+;; (import/extern 
+;; (string-append      (: System.String.Concat))
+;; (string-join        (: System.String.Join))
+;; (string-empty?      (: System.String.IsNullOrEmpty))
+;; (string-whitespace? (: System.String.IsNullOrWhiteSpace)))
+
+;; Ports

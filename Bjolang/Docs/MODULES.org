@@ -90,6 +90,39 @@ Both halves are needed by an importer. Without the trait, ~%item~ cannot be
 resolved to the caller's element type; without the implementations, a call has
 nothing to dispatch to.
 
+** Exporting a foreign import
+
+An ~import/extern~ alias may be exported. It is the one kind of name that
+crosses as an *import* rather than as a signature:
+
+#+BEGIN_SRC scheme
+(export num-max)
+(import/extern (num-max (: System.Math.Max)))
+#+END_SRC
+
+#+BEGIN_SRC scheme
+;; in the metadata
+(import/extern (num-max (: System.Math.Max)))
+#+END_SRC
+
+The reason is that ~System.Math.Max~ is an *overload set*, not a method. Which
+member of it a call means is decided from that call's argument types, so there
+is no single type to publish — and publishing one would pick whichever overload
+the exporting module happened to use. Sent as the import, the importing module
+resolves the overloads against the same .NET metadata, and ~(num-max 3 9)~ and
+~(num-max 1.5 2.5)~ are two different methods on its side just as they were on
+this one.
+
+An alias is *also* published when an exported body names one — an inline
+template, or a trait default. Those are published under a mangled name
+(~clr_import__prelude__clr-abs~) and the body is rewritten to match, because a
+body is re-inferred where it is spliced: under its own name, a definition of it
+in the importing module would silently take over the meaning of the library's
+method. An alias exported deliberately keeps its own name, since that name is
+the one the importer is meant to write.
+
+A name defined in the importing module always wins over an imported alias.
+
 ** Linking is not importing
 
 A compiled library records its dependencies in ~BjolangDeps~. Those assemblies

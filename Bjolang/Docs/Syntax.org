@@ -453,6 +453,59 @@ An associated type is what lets ~fold~ speak about the element type of a
 collection it has not been told the element type of: ~%item~ is whatever the
 implementation for ~(List %a)~ says it is.
 
+*** Default method bodies
+A ~def/trait~ may carry a ~defun~ for a method it declares. That body stands in
+for the method in any implementation that does not write one, and an
+implementation that does write one overrides it.
+#+BEGIN_SRC scheme
+(def/trait (Tagged %a)
+  (: tag (-> %a string))
+  (: label (-> %a string))
+  (defun (label x) (string-append "<" (string-append (tag x) ">"))))
+
+(def/impl (Tagged int)
+  (defun (tag x) "int"))          ;; label is inherited
+#+END_SRC
+
+A default is spliced into each implementation and checked *there*, against that
+implementation's instantiation of the signature — never once, generically,
+against the trait. So one default body may compile to something different at
+each implementor, and it may name any other method of its own trait, resolved at
+the implementor like everything else in the body.
+
+That is what makes a default the way to bind an overloaded .NET method. An
+~import/extern~ names a whole overload set and picks a member of it from the
+argument types at each call, so it has no single type and cannot be exported;
+written as a trait default it is resolved once per implementation instead:
+#+BEGIN_SRC scheme
+(import/extern (clr-abs (: System.Math.Abs)))
+
+(def/trait (Num %a)
+  (: abs (-> %a %a))
+  (defun (abs x) (clr-abs x)))
+
+(def/impl (Num int))              ;; Math.Abs(int)
+(def/impl (Num double))           ;; Math.Abs(double)
+#+END_SRC
+
+A defaulted method is not a second kind of method: by the time anything else
+looks at the implementation, it is a method that implementation wrote. It gets
+the same landing pad, the same inline template and the same dispatch, and costs
+exactly what writing it out would have.
+
+Defaults travel with the trait, so a module that imports one may implement it
+and inherit them. A default naming an ~import/extern~ alias travels too: the
+import itself is published alongside the trait, under a mangled name, and the
+body is rewritten to use it. That is deliberate rather than incidental — a
+default is re-checked wherever it is spliced, so publishing the alias under its
+own name would let a definition of that name in the *importing* module silently
+become what the library's method meant.
+
+A default that will not serialize — one using a form the metadata writer cannot
+reproduce — is simply not published. The consequence is that an importing
+module has to write that method itself, and it is told so at its own
+~def/impl~.
+
 *** Records and structs
 ~(: Name (Record (: field type) ...))~ defines an immutable record, and
 ~(: Name (Struct ...))~ the same thing as a *value* type — a C# ~record struct~

@@ -898,7 +898,12 @@ let rec infer (env: Env) (expr: Expr) : HMType * TypedExpr =
     // lambda that calls it — which needs the parameter types before there are
     // any arguments to infer them from. That is what the declared signature is
     // for, and why it is required here and optional everywhere else.
-    | EIdent(name, r) when Map.containsKey name env.Registry.ClrExterns ->
+    //
+    // An ordinary binding of the same name wins. The extern registry is one flat
+    // namespace shared by every module in the compilation, so without this an
+    // alias published by some imported library would silently capture calls to a
+    // function defined right here.
+    | EIdent(name, r) when Map.containsKey name env.Registry.ClrExterns && not (Map.containsKey name env.Bindings) ->
         let info = env.Registry.ClrExterns[name]
         let where = Lexer.formatPos r
 
@@ -1152,8 +1157,11 @@ let rec infer (env: Env) (expr: Expr) : HMType * TypedExpr =
           Range = r
           Node = TNewObject(resolved.DeclaringType, typedArgs |> List.map snd, Some meta) }
 
-    // A static method named by `import/extern`, applied.
-    | EApp(EIdent(name, _), args, r) when Map.containsKey name env.Registry.ClrExterns ->
+    // A static method named by `import/extern`, applied. As above, a binding of
+    // the same name shadows the alias rather than the other way round.
+    | EApp(EIdent(name, _), args, r) when
+        Map.containsKey name env.Registry.ClrExterns && not (Map.containsKey name env.Bindings)
+        ->
         let info = env.Registry.ClrExterns[name]
         let where = Lexer.formatPos r
         let clrType = DotNetInterop.resolveType $" at %s{where}" info.ClrType
@@ -2179,7 +2187,7 @@ let rec checkDecl (env: Env) (sigs: Map<string, HMType * FType option * (string 
 
         newEnv, sigs, [ TExtern(name, ftype, r) ]
 
-    | DTrait(traitName, implementorVar, holeArity, assocTypes, signatures, r) ->
+    | DTrait(traitName, implementorVar, holeArity, assocTypes, signatures, defaults, r) ->
         // The kind is derived, not declared: an implementor written applied to
         // arguments cannot be an interface, because there is no C# interface
         // that abstracts over a type constructor.
@@ -2205,13 +2213,43 @@ let rec checkDecl (env: Env) (sigs: Map<string, HMType * FType option * (string 
             failwithf
                 $"Type Error at %s{Lexer.formatPos r}: trait '%s{traitName}' applies its implementor, so it is inline-only and cannot declare associated types. An inline trait's methods may be generic in their own right instead."
 
+        // A default body is not checked here — there is nothing to check it
+        // against. Its type comes from the impl it is spliced into, and until
+        // there is one the implementor is an abstract variable that no `.NET`
+        // overload, record field or numeric literal could be resolved at.
+        //
+        // What *is* checked is that it stands for a method this trait declares.
+        // A defaulted name with no signature would otherwise sit in the trait
+        // being silently ignored by every impl, since only declared methods are
+        // ever looked up.
+        let declaredMethods = signatures |> List.map fst |> Set.ofList
+
+        let defaultBodies =
+            defaults
+            |> List.map (fun d ->
+                match d with
+                | DDefun(name, _, _, dr) ->
+                    if not (Set.contains name declaredMethods) then
+                        failwithf
+                            $"Type Error at %s{Lexer.formatPos dr}: trait '%s{traitName}' gives a default body for '%s{name}', which it does not declare. Add (: %s{name} ...) to the trait, or remove the body."
+
+                    name, d
+                | _ ->
+                    failwithf
+                        $"Syntax error at %s{Lexer.formatPos r}: only 'defun' declarations may appear in trait '%s{traitName}'.")
+
+        for (name, _) in defaultBodies |> List.countBy fst |> List.filter (fun (_, n) -> n > 1) do
+            failwithf
+                $"Type Error at %s{Lexer.formatPos r}: trait '%s{traitName}' gives more than one default body for '%s{name}'."
+
         let traitInfo =
             { ImplementorVar = implementorVar
               AssociatedTypes = assocTypes
               Signatures = hmSignatures
               Kind = kind
               HoleArity = holeArity
-              Templates = templates }
+              Templates = templates
+              Defaults = Map.ofList defaultBodies }
 
         let newEnv = addTrait traitName traitInfo env
 
@@ -2290,6 +2328,33 @@ let rec checkDecl (env: Env) (sigs: Map<string, HMType * FType option * (string 
             match Map.tryFind traitName env.Registry.Traits with
             | Some info -> info
             | None -> failwithf $"Unknown trait '%s{traitName}' at %s{Lexer.formatPos r}"
+
+        // Defaults are spliced in *here*, before anything looks at the method
+        // list, so that everything below — the definition-site check, the
+        // completeness check, the landing pads, the inline templates — sees an
+        // impl that wrote every method out by hand. A defaulted method is
+        // therefore not a second kind of method with a dispatch path of its own;
+        // it is the same method, and it costs exactly what writing it would.
+        //
+        // Re-checking one body per impl rather than checking it once against the
+        // trait is what makes a default able to say something the trait's own
+        // signature cannot: `(clr-abs x)` picks `Math.Abs(int)` in the `int`
+        // impl and `Math.Abs(double)` in the `double` one, from argument types
+        // that only exist once the implementor is known.
+        let definedMethodNames =
+            methods
+            |> List.choose (function
+                | DDefun(name, _, _, _) -> Some name
+                | _ -> None)
+            |> Set.ofList
+
+        let inheritedMethods =
+            traitInfo.Defaults
+            |> Map.toList
+            |> List.filter (fun (name, _) -> not (Set.contains name definedMethodNames))
+            |> List.map snd
+
+        let methods = methods @ inheritedMethods
 
         let implTarget = implTargetOf traitName traitInfo targetType r
         let regEnv = addImplementation traitName typeKey targetType implTarget hmAssocBindingsMap env
@@ -2501,7 +2566,7 @@ and private checkDeclGroup
             // An inline trait's signatures are not `HMType`s and never can be:
             // they mention the constructor variable applied. They are read as
             // templates by `DTrait` instead, and there is nothing to inject here.
-            | DTrait(_, _, holeArity, _, signatures, _) when holeArity = 0 ->
+            | DTrait(_, _, holeArity, _, signatures, _, _) when holeArity = 0 ->
                 signatures
                 |> List.map (fun (name, ftype) ->
                     name, (resolveTypeAnnotation env.Registry ftype, Some ftype, []))
@@ -2513,7 +2578,21 @@ and private checkDeclGroup
     let traitMethodNames =
         decls
         |> List.collect (function
-            | DTrait(_, _, _, _, signatures, _) -> signatures |> List.map fst
+            | DTrait(_, _, _, _, signatures, _, _) -> signatures |> List.map fst
+            | _ -> [])
+        |> Set.ofList
+
+    /// Aliases bound by `import/extern` in this group.
+    ///
+    /// One of these has no signature and cannot be given one: it names a .NET
+    /// *overload set*, and which member of it a call means is decided from that
+    /// call's argument types. So it is exported as the import itself rather than
+    /// as a type — the importing module re-resolves the overloads against the
+    /// same metadata, exactly as this one did.
+    let externAliases =
+        decls
+        |> List.collect (function
+            | DImportExtern(specs, _) -> specs |> List.map (fun s -> s.Alias)
             | _ -> [])
         |> Set.ofList
 
@@ -2522,7 +2601,13 @@ and private checkDeclGroup
     |> List.iter (function
         | DExport(names, exprRange) ->
             for name in names do
-                if not (Map.containsKey name explicitSigs || Set.contains name traitMethodNames) then
+                if
+                    not (
+                        Map.containsKey name explicitSigs
+                        || Set.contains name traitMethodNames
+                        || Set.contains name externAliases
+                    )
+                then
                     failwithf "Export Error: Exported item '%s' is missing a mandatory type signature at %s" name (Lexer.formatPos exprRange)
         | _ -> ())
 
