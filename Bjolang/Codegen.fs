@@ -1234,6 +1234,24 @@ and private generateApply
             emit ctx
         append ctx ")"
 
+    // Unary arithmetic. `(- x)` and `(/ x)` desugar to these in the parser, so
+    // by the time codegen runs an arithmetic operator is always binary.
+    //
+    // The result is cast back to the operand's own type because C# promotes the
+    // operand of a unary minus to `int`: `-(byte)5` is an `int` in C#, but
+    // Bjolang has typed the expression `byte`, and without the cast the
+    // generated code would not compile. `unchecked` because narrowing a
+    // negation back into an unsigned type has to wrap rather than throw.
+    | TIdent ("negate", _) when args.Length = 1 && kwArgs.IsEmpty ->
+        append ctx $"unchecked((%s{typeToString expr.Type})(-("
+        (prepareOperands ctx args).Head ctx
+        append ctx ")))"
+
+    | TIdent ("recip", _) when args.Length = 1 && kwArgs.IsEmpty ->
+        append ctx $"unchecked((%s{typeToString expr.Type})(1 / ("
+        (prepareOperands ctx args).Head ctx
+        append ctx ")))"
+
     | TIdent (name, _) when List.contains name ["+"; "-"; "*"; "/"; "%"; "<"; ">"; "<="; ">="] && args.Length = 2 && kwArgs.IsEmpty ->
         let emitters = prepareOperands ctx args
         append ctx "("

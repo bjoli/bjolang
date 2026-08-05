@@ -589,6 +589,95 @@ let private loopClauseRange (c: LoopClause) : Range =
     | LEndSubloop(_, r)
     | LFinal(_, r) -> r
 
+// ---------------------------------------------------------------------------
+// n-ary arithmetic and comparison
+// ---------------------------------------------------------------------------
+
+/// The arithmetic operators, which left-fold, and the comparisons, which chain.
+let private foldingOps = [ "+"; "-"; "*"; "/"; "%" ]
+let private chainingOps = [ "<"; ">"; "<="; ">="; "=" ]
+
+/// Is re-evaluating this expression free and side-effect free?
+///
+/// Only used to decide whether a chained comparison's middle operand needs a
+/// temporary. Anything not obviously atomic gets one, so being conservative
+/// here costs a binding and never costs correctness.
+let private isAtomicOperand (e: Expr) : bool =
+    match e with
+    | EInt _
+    | EString _
+    | EQuotedSymbol _
+    | EKeyword _
+    | EIdent _ -> true
+    | _ -> false
+
+/// `(op a b c ...)` as nested binary applications.
+///
+/// Arithmetic left-folds, so `(+ a b c)` is `(+ (+ a b) c)` — which is what
+/// keeps every arithmetic operator binary by the time codegen sees it, and so
+/// keeps the infix emission in `Codegen` and its freedom from allocation.
+///
+/// Comparisons chain instead of folding: `(< a b c)` means `a < b && b < c`,
+/// not `(a < b) < c`. Each middle operand appears in two comparisons, so one
+/// that is not atomic is bound to a temporary first — `(< 0 (next!) 10)` must
+/// call `next!` once, not twice.
+let private desugarNaryOp (op: string) (args: Expr list) (r: Range) : Expr =
+    let binary a b = EApp(EIdent(op, r), [ a; b ], r)
+
+    let arityError (wanted: string) =
+        failwithf
+            $"Syntax error at line %d{r.Start.Line}: '%s{op}' takes %s{wanted}, but was given %d{args.Length}."
+
+    if List.contains op foldingOps then
+        match args with
+        // `(+)` is 0 and `(*)` is 1 — each operator's identity, as in Scheme.
+        // They are `int`; a zero of another type is written as a literal.
+        | [] ->
+            match op with
+            | "+" -> EInt("0", r)
+            | "*" -> EInt("1", r)
+            | _ -> arityError "at least one argument"
+        | [ single ] ->
+            match op with
+            | "+"
+            | "*" -> single
+            | "-" -> EApp(EIdent("negate", r), [ single ], r)
+            | "/" -> EApp(EIdent("recip", r), [ single ], r)
+            | _ -> arityError "at least two arguments"
+        | first :: rest -> rest |> List.fold binary first
+    else
+        match args with
+        | []
+        | [ _ ] -> arityError "at least two arguments"
+        | _ ->
+            let lastIndex = List.length args - 1
+
+            // Only the middle operands are read twice; the ends are not.
+            let bindings = ResizeArray<string * Expr>()
+
+            let operands =
+                args
+                |> List.mapi (fun i a ->
+                    if i > 0 && i < lastIndex && not (isAtomicOperand a) then
+                        let name = Gensym.fresh "cmp"
+                        bindings.Add(name, a)
+                        EIdent(name, r)
+                    else
+                        a)
+
+            let comparisons = operands |> List.pairwise |> List.map (fun (l, rr) -> binary l rr)
+
+            let rec buildAnd items =
+                match items with
+                | [] -> EIdent("true", r)
+                | [ last ] -> last
+                | current :: rest -> EIf(current, buildAnd rest, EIdent("false", r), r)
+
+            List.foldBack
+                (fun (name, value) acc -> ELet(name, false, [], None, value, acc, r))
+                (List.ofSeq bindings)
+                (buildAnd comparisons)
+
 let rec parseExpr (s: SExpr) : Expr =
     let r = getRange s
 
@@ -1015,6 +1104,22 @@ let rec parseExpr (s: SExpr) : Expr =
 
             // Vec literal: [1 2 3] → EVec
             | "vec-literal" -> EVec(processArgs args, listRange)
+
+            // Arithmetic and comparison, at any arity. Handled here rather than
+            // in `Inference` so that everything downstream — the type checker,
+            // the inliner and the operator emission in `Codegen` — continues to
+            // see only the binary form it already understands.
+            //
+            // Keyword arguments are meaningless on an operator, so a call
+            // carrying one falls through to ordinary application and fails
+            // there, where the message is about the real mistake.
+            | _ when
+                (List.contains sym foldingOps || List.contains sym chainingOps)
+                && not (args |> List.exists (function
+                                             | SAtom { Token = Keyword _ } -> true
+                                             | _ -> false))
+                ->
+                desugarNaryOp sym (processArgs args) listRange
 
             // Standard function application
             | _ -> EApp(EIdent(sym, getRange head), processArgs args, listRange)

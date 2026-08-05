@@ -47,6 +47,15 @@ let prelude : Env =
         "/", {Scheme = Scheme(["a"], [], makeFunType [TVar "a"; TVar "a"] (TVar "a")); IsMutable = false }
         "%", {Scheme = Scheme(["a"], [], makeFunType [TVar "a"; TVar "a"] (TVar "a")); IsMutable = false }
 
+        // Unary arithmetic, which `(- x)` and `(/ x)` desugar to.
+        //
+        // These exist because the obvious expansions do not typecheck: `(- x)`
+        // as `(- 0 x)` unifies the literal's `int` with `x`, so negating a
+        // double is a type error. A primitive keeps the operand's own type,
+        // and codegen emits C#'s unary minus rather than a subtraction.
+        "negate", {Scheme = Scheme(["a"], [], makeFunType [TVar "a"] (TVar "a")); IsMutable = false }
+        "recip",  {Scheme = Scheme(["a"], [], makeFunType [TVar "a"] (TVar "a")); IsMutable = false }
+
         // Comparison Operators
         "=", {Scheme = Scheme(["a"], [], makeFunType [TVar "a"; TVar "a"] boolType); IsMutable = false }
         "<", {Scheme = Scheme(["a"], [], makeFunType [TVar "a"; TVar "a"] boolType); IsMutable = false }
