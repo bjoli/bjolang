@@ -224,6 +224,185 @@ what state follows it — or ~None~ to stop:
 ~some?~ and ~none?~ test it, ~option-get~ extracts the value and errors on
 ~None~, and ~(option-get-or opt fallback)~ supplies a default instead.
 
+** Results
+~(Result %e %a)~ is either a value or an error. It is built with ~Ok~ and
+~Err~, and taken apart by ordinary pattern matching:
+#+BEGIN_SRC scheme
+(match (parse-config path)
+  ((Ok cfg) (use cfg))
+  ((Err e)  (report e)))
+#+END_SRC
+
+The error comes first because that is the argument implementations abstract
+over the *last*: ~(def/impl (Monad (Result %e %a)) ...)~ fixes ~%e~ and lets
+~%a~ move.
+
+A module that declares a ~Result~ of its own gets that one instead, everywhere
+— the built-in is shadowed by any type of the same name, and so are ~Option~,
+~List~ and the rest.
+
+** Foreign .NET interop
+.NET methods, classes and constructors are imported directly. Everything is
+resolved at compile time by reflecting on the real assemblies: the overload a
+call means is chosen from the Bjolang types of its arguments, and a wrong
+argument is a Bjolang type error at a Bjolang source position rather than a C#
+error in generated code. There is no late binding, and no ~dynamic~.
+
+*** ~import/extern~ — static methods
+#+BEGIN_SRC scheme
+(import/extern
+  (write-line (: System.Console.WriteLine (-> string void)))
+  (abs-int    (: System.Math.Abs (-> int int)))
+  (read-text  (: System.IO.File.ReadAllText (-> string string)
+                 #:exceptions (System.IO.FileNotFoundException))))
+
+(write-line "hello")
+#+END_SRC
+
+The name before the colon is what Bjolang calls it; the fully qualified target
+follows. The signature is optional — it is *checked* against the overload
+reflection selects rather than used in place of it — but it is required to use
+the import as a value, since a .NET method group is not one and a first-class
+use has to be eta-expanded into a lambda.
+
+*** ~import/class~ — classes and constructors
+#+BEGIN_SRC scheme
+(import/class
+  (StreamWriter  (: System.IO.StreamWriter (-> string StreamWriter)))
+  (StringBuilder (: System.Text.StringBuilder (-> StringBuilder)))
+  (FileMode      (: System.IO.FileMode)))
+#+END_SRC
+
+The alias is registered both as a *type*, so an ordinary signature may say
+~(-> StreamWriter void)~, and as a *constructor*, written with a trailing
+period. A type with no constructor is worth importing anyway: it is what makes
+~FileMode.Open~ a name.
+
+*** Constructor and member syntax
+#+BEGIN_SRC scheme
+(def w (StreamWriter. "output.txt"))   ;; new System.IO.StreamWriter("output.txt")
+(.Write w "hello")                     ;; w.Write("hello")
+(.-Length sb)                          ;; sb.Length
+FileMode.Open                          ;; System.IO.FileMode.Open
+#+END_SRC
+
+A symbol ending in a period constructs; one starting with a period calls an
+instance method on its first argument; one starting with ~.-~ reads a property
+or field. A dotted pair still writes its dot with space around it, so ~(a . b)~
+is unaffected.
+
+*** ~#:exceptions~ — failures as values
+A call with an ~#:exceptions~ clause returns ~(Result System.Exception %a)~,
+and the listed exception types — *only* those — become ~Err~:
+#+BEGIN_SRC scheme
+(import/class
+  (FileStream (: System.IO.FileStream (-> string FileMode FileStream)
+                 #:exceptions (System.IO.FileNotFoundException))))
+
+(match (FileStream. path FileMode.Open)
+  ((Ok fs) (read-from fs))
+  ((Err e) (default-config)))
+#+END_SRC
+
+Anything not named keeps propagating. That asymmetry is the point: an exception
+nobody listed is a bug, not a result, and swallowing it would hide the bug. The
+emitted ~catch~ carries an exception filter naming exactly the declared types,
+and the arguments are evaluated before the guarded region, so a failure while
+working out an argument is never mistaken for a failure of the call.
+
+A wrapped call that returns ~void~ yields ~(Result System.Exception ())~ —
+C# has no ~Result<E, void>~, and ~()~ is what Bjolang means by a call performed
+for its effect.
+
+~#:exceptions~ decorates a single call, and it is sugar: ~try~ below is the
+general form, and the one to reach for whenever more than one call is involved.
+It describes the *constructor* on ~import/class~, which is the one signature
+that form declares. Instance methods are never decorated this way — nothing has
+said what they may raise, so guard them with ~try~.
+
+*** Limits
+Generic .NET types and generic methods are not imported — their type arguments
+would have to be inferred, which is a different problem — and destructuring a
+.NET class with a constructor pattern is not supported. Both are reported as
+errors rather than mis-compiled.
+
+** ~try~ — failures as values
+~try~ guards an arbitrary expression. ~#:catch~ turns the listed exception
+types, and only those, into an ~Err~; ~#:finally~ runs cleanup however the body
+leaves. Both clauses are optional and at least one is required.
+#+BEGIN_SRC scheme
+(try (.ReadToEnd r)
+  #:catch (System.IO.IOException System.UnauthorizedAccessException))
+;; => (Result System.Exception string)
+
+(try (render page)
+  #:finally (.Dispose page))
+;; => whatever (render page) gives; nothing is caught
+#+END_SRC
+
+A guarded body has type ~(Result System.Exception %a)~, or ~(Result
+System.Exception ())~ when the body is void. It is matched with the ordinary
+~Ok~ and ~Err~ patterns — there are no special rules for it.
+
+The body is not restricted to interop. ~(try (/ x y) #:catch
+(System.DivideByZeroException))~ is a perfectly good use, and so is guarding a
+whole call tree of ordinary Bjolang.
+
+*** Guard the region, not the call
+This is the reason ~try~ exists alongside ~#:exceptions~. Decorating each call
+gives a ~Result~ per call, which then have to be unwrapped and threaded before
+anything has happened; one ~try~ around the whole region gives one:
+#+BEGIN_SRC scheme
+(: slurp (-> string (Result System.Exception string)))
+(defun (slurp path)
+  (try (with-open ((r (StreamReader. path)))
+         (.ReadToEnd r))
+    #:catch (System.IO.FileNotFoundException)))
+#+END_SRC
+
+The constructor, the read and the dispose are all inside the guard, so a
+failure anywhere in the region is one ~Err~.
+
+*** ~with-open~
+~(with-open ((name expression) ...) body...)~ binds each resource and calls
+~.Dispose~ on it as the body leaves, however it leaves.
+#+BEGIN_SRC scheme
+(with-open ((w (StreamWriter. path)))
+  (.Write w "hello"))
+#+END_SRC
+
+Each binding gets its own ~try~/~finally~ rather than one around all of them,
+so a later constructor that throws still leaves the earlier resources disposed.
+
+Use it with constructors that are *not* declared with ~#:exceptions~: such a
+constructor yields a ~Result~ rather than the object, and there is nothing to
+dispose. Put the ~try~ around the ~with-open~ instead, as ~slurp~ does above —
+which is the better shape anyway.
+
+*** ~:is~ — telling failures apart
+A guarded body says *that* something failed, not *which* thing. ~(:is Type)~ is
+a pattern that matches on the .NET type, and ~(:is Type binder)~ binds the
+value at that narrowed type:
+#+BEGIN_SRC scheme
+(match (try (file-read-text path)
+         #:catch (System.IO.FileNotFoundException System.IO.DirectoryNotFoundException))
+  ((Ok text) text)
+  ((Err (:is System.IO.FileNotFoundException e)) (missing (.-FileName e)))
+  ((Err (:is System.IO.DirectoryNotFoundException)) (no-directory))
+  ((Err e) (unknown e)))
+#+END_SRC
+
+Arms are tried in order, so a specific exception type has to precede a more
+general one. The binder is narrowed, which is the point: ~.-FileName~ belongs
+to ~FileNotFoundException~ and not to ~System.Exception~, and reading it is
+only well-typed because the pattern established the type.
+
+It is not limited to exceptions — it is a type test on any .NET value, so a
+~System.Object~ can be taken apart the same way. A tested type unrelated to the
+value's type is rejected at the pattern (*"...is not a..., so this test can
+never succeed"*) rather than left to C#, and it does not apply to Bjolang's own
+unions, which have their own constructors to match on.
+
 ** Traits and Implementations
 Bjolang supports generic traits and implementations. A trait is parameterised by
 exactly *one* implementor variable; every other type it needs is an associated

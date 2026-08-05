@@ -91,6 +91,67 @@ module TypeConstants =
     let ulongType = TCon(UInt64Name, [])
     let doubleType = TCon(DoubleName, [])
 
+// ---------------------------------------------------------------------------
+// Foreign .NET interop
+// ---------------------------------------------------------------------------
+
+/// A .NET class named by `import/class`.
+///
+/// `Alias` is what Bjolang code writes; `ClrName` is the fully qualified name
+/// the code generator emits and the reflection engine resolves. The two are
+/// kept apart deliberately: the alias is also registered as a type alias, so a
+/// signature may say `StreamWriter` while the emitted C# says
+/// `System.IO.StreamWriter`.
+type ClrClassInfo =
+    { Alias: string
+      ClrName: string
+      /// The declared constructor signature, if one was written. It is checked
+      /// against the overload reflection picks rather than used instead of it.
+      CtorType: HMType option
+      /// Exception types the *constructor* is declared to raise. Empty means
+      /// the constructor is not wrapped and anything it throws propagates.
+      ///
+      /// Constructor-only is deliberate: `import/class` declares one signature,
+      /// the constructor's, so one exception list is all it can honestly
+      /// describe. An instance method is never wrapped — nothing has said what
+      /// it may raise, and inventing an answer would swallow exceptions the
+      /// author never listed.
+      CtorExceptions: string list }
+
+/// A static .NET method bound as a first-class Bjolang function by
+/// `import/extern`.
+type ClrExternInfo =
+    { Alias: string
+      /// The fully qualified name of the declaring type, e.g. `System.Console`.
+      ClrType: string
+      MethodName: string
+      /// The declared signature, if one was written. Required in order to use
+      /// the import as a *value*: a .NET method group is not a value, so a
+      /// first-class use has to be eta-expanded into a lambda, and that needs
+      /// the parameter types before there are any arguments to infer them from.
+      DeclaredType: HMType option
+      Exceptions: string list }
+
+/// The overload the type checker selected, carried to the code generator.
+///
+/// Resolution happens once, during inference, against real .NET metadata —
+/// nothing downstream re-derives it and nothing is left for the C# compiler to
+/// guess. `Exceptions` being non-empty is what makes the emitted call
+/// `try`/`catch`-wrapped into a `Result`.
+type DotNetMethodMetadata =
+    { DeclaringType: string
+      MethodName: string
+      ParameterTypes: HMType list
+      /// The method's own return type, *before* any `Result` wrapping.
+      ReturnType: HMType
+      IsStatic: bool
+      Exceptions: string list }
+
+type DotNetConstructorMetadata =
+    { ClrType: string
+      ParameterTypes: HMType list
+      Exceptions: string list }
+
 type TypedExpr =
     { Type: HMType
       Range: Range
@@ -112,6 +173,10 @@ and TPatternNode =
     | TPVec of TypedPattern list * TypedPattern option
     | TPTuple of TypedPattern list
     | TPConstruct of string * TypedPattern list
+    /// `(:is Clr.Type binder)`. The string is the fully qualified .NET type
+    /// name, already resolved and checked against the scrutinee's type; it is
+    /// emitted as a C# type pattern.
+    | TPTypeTest of string * string option
     | TPApp of TypedExpr * TypedPattern
     | TPAs of TypedPattern * string
 
@@ -139,6 +204,14 @@ and TExprNode =
     /// effect and its value is discarded.
     | TWhen of TypedExpr * TypedExpr * bool
     | TTryFinally of TypedExpr * TypedExpr
+    /// `(try body #:catch (E1 E2 ...))`. Of type `(Result System.Exception %a)`
+    /// where the body is of type `%a` — or of `()` where the body is void,
+    /// since C# has no `Result<E, void>`.
+    ///
+    /// The strings are fully qualified .NET exception type names, checked
+    /// during inference and emitted as a C# exception filter. Anything not
+    /// listed keeps propagating.
+    | TTryCatch of TypedExpr * string list
     /// A lazy sequence, of type `Seq 'a`. Its body is a *function scope*: it
     /// runs when the sequence is enumerated, not where the form appears, so no
     /// tail call inside it belongs to the enclosing function's loop.
@@ -181,6 +254,26 @@ and TExprNode =
     /// `TLoop`, carrying a *complete* argument vector aligned with that
     /// member's `Slots`.
     | TRecur of int * TypedExpr list
+
+    // --- Foreign .NET interop ---
+    //
+    // All five are resolved against .NET metadata during inference, so each one
+    // already knows exactly which member it names. There is no late binding
+    // anywhere below this point: the code generator spells out what the type
+    // checker chose.
+
+    /// `(.Method target args...)` — an instance method call.
+    | TDotMethodCall of TypedExpr * string * TypedExpr list * DotNetMethodMetadata option
+    /// `(.-Property target)` — an instance property or field read.
+    | TDotPropertyGet of TypedExpr * string * HMType
+    /// `(ClassName. args...)` — construction. The string is the *fully
+    /// qualified* CLR name, not the alias, so the emitter needs no environment.
+    | TNewObject of string * TypedExpr list * DotNetConstructorMetadata option
+    /// A static method imported by `import/extern`, as declaring type and name.
+    | TForeignStaticCall of string * string * TypedExpr list * DotNetMethodMetadata option
+    /// A static field or property read, as `Class.Member` — how an enum value
+    /// such as `FileMode.Open` is written.
+    | TForeignStaticGet of string * string * HMType
 
 and TLoopMember =
     { LoopName: string
@@ -273,6 +366,12 @@ type TDecl =
     //        traitName  kind        holeArity  targetType  assocBindings           methods
     | TImpl of string * TraitKind * int * HMType * (string * HMType) list * TDecl list * Range
     | TExtern of string * FType * Range
+    /// `(import/extern ...)` and `(import/class ...)`. Both are pure
+    /// environment entries: every use site has already been resolved into a
+    /// `TForeignStaticCall`, `TNewObject` or `TDotMethodCall`, so neither emits
+    /// any C# of its own.
+    | TImportExtern of ClrExternInfo list * Range
+    | TImportClass of ClrClassInfo list * Range
 
 type FunMeta = {
     MandatoryCount: int
@@ -345,7 +444,16 @@ type TraitRegistry =
       /// name when the target's type has not been resolved yet. Keeping only
       /// the last owner made a shared field name silently resolve to whichever
       /// type happened to be declared last.
-      RecordFields: Map<string, string list> }
+      RecordFields: Map<string, string list>
+      /// Classes brought in by `import/class`, keyed by alias.
+      ///
+      /// Each one is *also* registered in `Aliases`, so that a signature may
+      /// name it. This map is what the expression side needs: which CLR type an
+      /// alias stands for, and what its constructor is declared to throw.
+      ClrClasses: Map<string, ClrClassInfo>
+      /// Static methods brought in by `import/extern`, keyed by the Bjolang
+      /// name they were bound to.
+      ClrExterns: Map<string, ClrExternInfo> }
 
     member this.IsTraitDefinedLocally(name) = Set.contains name this.LocalTraits
     member this.IsTypeDefinedLocally(name) = Set.contains name this.LocalTypes

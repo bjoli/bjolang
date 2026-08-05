@@ -135,6 +135,22 @@ module Lexer =
 
                 // Spread Operator
                 | '.' when pos + 2 < length && input[pos + 1] = '.' && input[pos + 2] = '.' -> emit Spread 3
+
+                // A dot *joined* to what follows it is part of a symbol, not a
+                // separator: `.Write` and `.-Length` are the names of an
+                // instance method and a property, and they have to survive as
+                // single symbols. `Pipeline.read` turns any form containing a
+                // bare `Dot` into a tuple, so lexing `(.Write w "x")` as
+                // `Dot Symbol Symbol String` did not fail — it silently read
+                // the call as `(Tuple Write w "x")`.
+                //
+                // A dotted pair still writes its dot with space around it, so
+                // `(a . b)` is unaffected.
+                | '.' when pos + 1 < length && isSymbolChar input[pos + 1] ->
+                    let nextPos = readSymbol (pos + 1)
+                    let len = nextPos - pos
+                    emit (Symbol(input.Substring(pos, len))) len
+
                 | '.' -> emit Dot 1
 
                 // Strings

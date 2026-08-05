@@ -62,6 +62,14 @@ type Pattern =
     | PVec of Pattern list * Pattern option * Range // (items, optional tail, range)
     | PTuple of Pattern list * Range
     | PConstruct of string * Pattern list * Range
+    /// `(:is System.IO.IOException e)` — matches when the value is of that .NET
+    /// type, binding it there at the narrowed type. The binder is optional.
+    ///
+    /// This is how an `Err` arm tells one exception from another. The type is
+    /// held as a fully qualified .NET name rather than an `FType`: it names a
+    /// class for a C# type pattern, and is checked against .NET metadata rather
+    /// than resolved through the type environment.
+    | PTypeTest of string * string option * Range
 
 and Expr =
     | EInt of string * Range
@@ -113,6 +121,14 @@ and Expr =
     | EVec of Expr list * Range
     | EMatch of Expr * (Pattern * Expr option * Expr) list * Range
     | ETryFinally of Expr * Expr * Range
+    /// `(try body... #:catch (E1 E2 ...))`: run the body, and turn *those*
+    /// exception types — and only those — into an `Err`.
+    ///
+    /// The types are held as their fully qualified .NET names rather than as
+    /// `FType`s. They are not Bjolang types being used as types: they name
+    /// classes for an exception filter, and inference checks them against .NET
+    /// metadata rather than resolving them through the type environment.
+    | ETryCatch of Expr * string list * Range
     /// `(seq body...)`: a lazy sequence. The body is not a value — it is run,
     /// one `yield` at a time, by whoever enumerates the sequence.
     | ESeq of Expr * Range
@@ -129,6 +145,32 @@ and DefunArg =
 type ImportSpec =
     | RelativePath of string
     | ModulePath of string list
+
+/// One clause of `(import/extern ...)`: a static .NET method bound as an
+/// ordinary Bjolang function.
+///
+/// `ExplicitType` is optional. Given, it is enforced — the resolved overload
+/// has to unify with it, which is how a call site says *which* `WriteLine` it
+/// means. Omitted, the overload is chosen from the argument types at each call.
+type ExternImportSpec =
+    { Alias: string
+      /// The fully qualified target, e.g. `System.Console.WriteLine`.
+      ClrTarget: string
+      ExplicitType: FType option
+      /// Exception types named by `#:exceptions`. Non-empty makes the call
+      /// return a `(Result System.Exception ...)`; anything not listed here
+      /// keeps propagating.
+      Exceptions: string list
+      Range: Range }
+
+/// One clause of `(import/class ...)`: a .NET class, its name, and its
+/// constructor.
+type ClassImportSpec =
+    { Alias: string
+      ClrClass: string
+      ConstructorType: FType option
+      Exceptions: string list
+      Range: Range }
 
 type Decl =
     | DSignature of string * FType * (string * string) list * Range
@@ -152,6 +194,10 @@ type Decl =
     // `(def/trait (Monad (%m %a)) ...)` gives 1 and means an inline-only one.
     | DTrait of string * string * int * string list * (string * FType) list * Range
     | DExtern of string * FType * (string * string) list * Range
+    /// `(import/extern (alias (: Clr.Target type #:exceptions (E ...))) ...)`
+    | DImportExtern of ExternImportSpec list * Range
+    /// `(import/class (Alias (: Clr.Class type #:exceptions (E ...))) ...)`
+    | DImportClass of ClassImportSpec list * Range
 
     // One inline-trait method body, read back out of a compiled module's
     // metadata. It is the *untyped* expression: re-inferring it at the splice is
@@ -183,6 +229,18 @@ let rec parsePattern (s: SExpr) : Pattern =
     | SAtom { Token = StringLit str } -> PString(str, r)
     | SAtom { Token = Keyword kw } -> PKeyword(kw, r)
     | SAtom { Token = QuotedSymbol sym } -> PQuotedSymbol(sym, r)
+
+    // `(:is Some.Clr.Type)` and `(:is Some.Clr.Type binder)`.
+    | SList([ SAtom { Token = Keyword "is" }; SAtom { Token = Symbol typeName } ], _) ->
+        PTypeTest(typeName, None, r)
+    | SList([ SAtom { Token = Keyword "is" }
+              SAtom { Token = Symbol typeName }
+              SAtom { Token = Symbol binder } ],
+            _) ->
+        PTypeTest(typeName, Some binder, r)
+    | SList(SAtom { Token = Keyword "is" } :: _, _) ->
+        failwithf
+            $"Invalid :is pattern at line %d{r.Start.Line}. Expected (:is Fully.Qualified.Type) or (:is Fully.Qualified.Type binding-name)."
 
     // Special handling for List/Vec patterns and the spread operator
     | SList(SAtom { Token = Symbol "List" } :: args, _) ->
@@ -410,6 +468,7 @@ let exprRange (e: Expr) : Range =
     | EVec(_, r)
     | EMatch(_, _, r)
     | ETryFinally(_, _, r)
+    | ETryCatch(_, _, r)
     | ESeq(_, r)
     | EYield(_, r)
     | EYieldFrom(_, r) -> r
@@ -446,6 +505,7 @@ let exprChildren (e: Expr) : Expr list =
     | EFun(_, b, _) -> [ b ]
     | ERecordUpdate(_, fields, _) -> fields |> List.map snd
     | ETryFinally(b, c, _) -> [ b; c ]
+    | ETryCatch(b, _, _) -> [ b ]
     | EMatch(target, clauses, _) ->
         target
         :: (clauses |> List.collect (fun (_, guard, body) -> (Option.toList guard) @ [ body ]))
@@ -831,6 +891,122 @@ let rec parseExpr (s: SExpr) : Expr =
                 | [ target; Ident field ] ->
                     EGetField(parseExpr target, field, r)
                 | _ -> failwithf $"Invalid %s{sym} syntax at line %d{r.Start.Line}: expected (%s{sym} target field-name)"
+
+            // `(try body... #:catch (E1 E2 ...) #:finally cleanup...)`
+            //
+            // Both clauses are optional and at least one is required, which is
+            // what makes this one form rather than two. `#:catch` turns the
+            // listed exception types — and only those — into an `Err`, giving
+            // the whole form the type `(Result System.Exception %a)`.
+            | "try" ->
+                let rec split bodyAcc remaining =
+                    match remaining with
+                    | SAtom { Token = Keyword("catch" | "finally") } :: _ -> List.rev bodyAcc, remaining
+                    | x :: rest -> split (x :: bodyAcc) rest
+                    | [] -> List.rev bodyAcc, []
+
+                let bodyForms, clauseForms = split [] args
+
+                if bodyForms.IsEmpty then
+                    failwithf $"Invalid try at line %d{r.Start.Line}: it has no body."
+
+                // The clauses, read in whichever order they were written.
+                let rec readClauses catchNames finallyForms remaining =
+                    match remaining with
+                    | [] -> catchNames, finallyForms
+                    | SAtom { Token = Keyword "catch" } :: SList(names, _) :: rest ->
+                        if Option.isSome catchNames then
+                            failwithf $"Invalid try at line %d{r.Start.Line}: #:catch is given twice."
+
+                        if names.IsEmpty then
+                            failwithf
+                                $"Invalid try at line %d{r.Start.Line}: #:catch names no exception types. Leave it off to let everything propagate."
+
+                        let parsed =
+                            names
+                            |> List.map (function
+                                | SAtom { Token = Symbol n } -> n
+                                | bad ->
+                                    failwithf
+                                        $"Invalid try at line %d{(getRange bad).Start.Line}: #:catch takes fully qualified .NET exception type names, as in System.IO.IOException.")
+
+                        readClauses (Some parsed) finallyForms rest
+                    | SAtom { Token = Keyword "catch" } :: _ ->
+                        failwithf
+                            $"Invalid try at line %d{r.Start.Line}: #:catch takes a parenthesized list of exception types."
+                    | SAtom { Token = Keyword "finally" } :: rest ->
+                        if not (List.isEmpty finallyForms) then
+                            failwithf $"Invalid try at line %d{r.Start.Line}: #:finally is given twice."
+
+                        // Everything up to the next clause keyword.
+                        let cleanup, after = split [] rest
+
+                        if cleanup.IsEmpty then
+                            failwithf $"Invalid try at line %d{r.Start.Line}: #:finally has no body."
+
+                        readClauses catchNames cleanup after
+                    | bad :: _ ->
+                        failwithf
+                            $"Invalid try at line %d{(getRange bad).Start.Line}: expected #:catch or #:finally."
+
+                let catchNames, finallyForms = readClauses None [] clauseForms
+
+                if Option.isNone catchNames && List.isEmpty finallyForms then
+                    failwithf
+                        $"Invalid try at line %d{r.Start.Line}: a try does nothing without #:catch or #:finally."
+
+                let body = parseBody bodyForms listRange
+
+                // `#:catch` is applied first, so that the cleanup runs whether
+                // the body completed, was caught, or is still on its way out.
+                let caught =
+                    match catchNames with
+                    | Some names -> ETryCatch(body, names, r)
+                    | None -> body
+
+                if List.isEmpty finallyForms then
+                    caught
+                else
+                    ETryFinally(caught, parseBody finallyForms listRange, r)
+
+            // `(with-open ((name ctor) ...) body...)` — bind each resource,
+            // and dispose it on the way out however the body ends.
+            //
+            // Each binding gets its *own* try/finally rather than one around
+            // all of them, so a later constructor that throws still leaves the
+            // earlier resources disposed.
+            | "with-open" ->
+                match args with
+                | SList(bindings, _) :: bodyForms ->
+                    if bodyForms.IsEmpty then
+                        failwithf $"Invalid with-open at line %d{r.Start.Line}: it has no body."
+
+                    let body = parseBody bodyForms listRange
+
+                    List.foldBack
+                        (fun binding acc ->
+                            match binding with
+                            | SList([ Ident name; value ], bindRange) ->
+                                let dispose =
+                                    EApp(EIdent(".Dispose", bindRange), [ EIdent(name, bindRange) ], bindRange)
+
+                                ELet(
+                                    name,
+                                    false,
+                                    [],
+                                    None,
+                                    parseExpr value,
+                                    ETryFinally(acc, dispose, bindRange),
+                                    bindRange
+                                )
+                            | bad ->
+                                failwithf
+                                    $"Invalid with-open binding at line %d{(getRange bad).Start.Line}: expected (name expression).")
+                        bindings
+                        body
+                | _ ->
+                    failwithf
+                        $"Invalid with-open at line %d{r.Start.Line}: expected (with-open ((name expression) ...) body...)"
 
             | "Tuple" -> ETuple(processArgs args, listRange)
 
@@ -1981,6 +2157,50 @@ let rec parseNewDefunArgs (args: SExpr list) : DefunArg list =
         KeywordArg(name, parseExpr defaultExpr) :: parseNewDefunArgs rest
     | bad :: _ -> failwithf $"Invalid defun argument at line %d{(getRange bad).Start.Line}"
 
+/// One clause of `import/extern` or `import/class`.
+///
+/// Both forms are spelled the same way — a Bjolang name, then a colon form
+/// naming the fully qualified .NET target, its type, and optionally the
+/// exceptions the call is allowed to turn into an `Err` — so one reader does
+/// for both.
+let parseForeignImportClause (formName: string) (s: SExpr) : string * string * FType option * string list * Range =
+    let r = getRange s
+
+    let malformed () : 'a =
+        failwithf
+            $"Syntax error in %s{formName} at line %d{r.Start.Line}: expected (alias (: Fully.Qualified.Target type)), the type optionally followed by #:exceptions (ExceptionType ...)."
+
+    match s with
+    | SList([ SAtom { Token = Symbol alias }
+              SList(SAtom { Token = Colon } :: SAtom { Token = Symbol clrTarget } :: rest, _) ],
+            _) ->
+        // The signature is optional. Given, it is enforced against what
+        // reflection finds; omitted, the arguments at each call site decide.
+        let explicitType, exceptionForms =
+            match rest with
+            | SAtom { Token = Keyword "exceptions" } :: _ -> None, rest
+            | [] -> None, []
+            | t :: tail -> Some(parseType t), tail
+
+        let exceptions =
+            match exceptionForms with
+            | [] -> []
+            | [ SAtom { Token = Keyword "exceptions" }; SList(names, _) ] ->
+                if names.IsEmpty then
+                    failwithf
+                        $"Syntax error in %s{formName} at line %d{r.Start.Line}: #:exceptions names no exception types. Leave it off entirely to let everything propagate."
+
+                names
+                |> List.map (function
+                    | SAtom { Token = Symbol n } -> n
+                    | bad ->
+                        failwithf
+                            $"Syntax error in %s{formName} at line %d{(getRange bad).Start.Line}: #:exceptions takes fully qualified .NET exception type names, as in System.IO.IOException.")
+            | _ -> malformed ()
+
+        alias, clrTarget, explicitType, exceptions, r
+    | _ -> malformed ()
+
 let rec parseDecl (s: SExpr) : Decl =
     let r = getRange s
 
@@ -2012,6 +2232,42 @@ let rec parseDecl (s: SExpr) : Decl =
             | _ -> failwithf $"Invalid import syntax at line %d{r.Start.Line}"
 
         DImport(List.map parseImportPath imports, r)
+
+    // (import/extern (write-line (: System.Console.WriteLine (-> string void))) ...)
+    | SList(SAtom { Token = Symbol "import/extern" } :: clauses, _) ->
+        if clauses.IsEmpty then
+            failwithf $"Syntax error in import/extern at line %d{r.Start.Line}: it imports nothing."
+
+        let specs =
+            clauses
+            |> List.map (fun c ->
+                let alias, target, explicitType, exceptions, cr = parseForeignImportClause "import/extern" c
+
+                { Alias = alias
+                  ClrTarget = target
+                  ExplicitType = explicitType
+                  Exceptions = exceptions
+                  Range = cr })
+
+        DImportExtern(specs, r)
+
+    // (import/class (StreamWriter (: System.IO.StreamWriter (-> string StreamWriter))) ...)
+    | SList(SAtom { Token = Symbol "import/class" } :: clauses, _) ->
+        if clauses.IsEmpty then
+            failwithf $"Syntax error in import/class at line %d{r.Start.Line}: it imports nothing."
+
+        let specs =
+            clauses
+            |> List.map (fun c ->
+                let alias, target, ctorType, exceptions, cr = parseForeignImportClause "import/class" c
+
+                { Alias = alias
+                  ClrClass = target
+                  ConstructorType = ctorType
+                  Exceptions = exceptions
+                  Range = cr })
+
+        DImportClass(specs, r)
 
     | SList(SAtom { Token = Symbol "export" } :: exports, _) ->
         // Parse items like poop-on-you

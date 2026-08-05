@@ -14,6 +14,7 @@
         <Compile Include="Parser.fs"/>
         <Compile Include="LetRecify.fs"/>
         <Compile Include="TypedAST.fs" />
+        <Compile Include="DotNetInterop.fs" />
         <Compile Include="TypeVisitor.fs" />
         <Compile Include="AlphaRename.fs" />
         <Compile Include="Unification.fs" />

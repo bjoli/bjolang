@@ -52,6 +52,7 @@ let rec patternBinders (pat: Pattern) : string list =
     | PKeyword _
     | PQuotedSymbol _ -> []
     | PIdent(n, _) -> [ n ]
+    | PTypeTest(_, binder, _) -> Option.toList binder
     | PList(items, tailOpt, _)
     | PVec(items, tailOpt, _) ->
         (items |> List.collect patternBinders)
@@ -69,6 +70,7 @@ let rec private renamePattern (subst: Map<string, string>) (pat: Pattern) : Patt
     | PTuple(items, r) ->
         PTuple(List.map (renamePattern subst) items, r)
     | PConstruct(n, args, r) -> PConstruct(n, List.map (renamePattern subst) args, r)
+    | PTypeTest(t, binder, r) -> PTypeTest(t, binder |> Option.map (fun n -> Map.tryFind n subst |> Option.defaultValue n), r)
     | leaf -> leaf
 
 /// Freshens every binder in `expr`, and every free occurrence of a name in
@@ -172,6 +174,7 @@ let freshen (roots: string list) (expr: Expr) : Expr * Map<string, string> =
             )
 
         | ETryFinally(body, cleanup, r) -> ETryFinally(sub body, sub cleanup, r)
+        | ETryCatch(body, exceptions, r) -> ETryCatch(sub body, exceptions, r)
         | ESeq(body, r) -> ESeq(sub body, r)
         | EYield(v, r) -> EYield(sub v, r)
         | EYieldFrom(s, r) -> EYieldFrom(sub s, r)
@@ -256,6 +259,7 @@ let freeNames (bound: Set<string>) (expr: Expr) : Set<string> =
         | ETryFinally(body, cleanup, _) ->
             sub body
             sub cleanup
+        | ETryCatch(body, _, _) -> sub body
         | ESeq(body, _) -> sub body
         | EYield(v, _) -> sub v
         | EYieldFrom(s, _) -> sub s
@@ -275,6 +279,7 @@ let rec private typedPatternBinders (pat: TypedPattern) : string list =
     | TPKeyword _
     | TPSymbol _ -> []
     | TPIdent n -> [ n ]
+    | TPTypeTest(_, binder) -> Option.toList binder
     | TPList(items, tailOpt)
     | TPVec(items, tailOpt) ->
         (items |> List.collect typedPatternBinders)

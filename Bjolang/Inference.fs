@@ -164,6 +164,45 @@ let rec checkPattern (env: Env) (expectedType: HMType) (pat: Pattern) : TypedPat
           Range = r
           Node = TPSymbol value },
         Map.empty
+    // `(:is Clr.Type binder)` — a .NET type test, which is how one exception is
+    // told from another inside an `Err` arm.
+    //
+    // Both types are resolved against .NET metadata and the test has to be one
+    // that could succeed. A tested type unrelated to the scrutinee is rejected
+    // here rather than left to C#, where it would be an error in generated code
+    // nobody wrote.
+    | PTypeTest(typeName, binder, r) ->
+        let where = Lexer.formatPos r
+        let testedClr = DotNetInterop.resolveType $" at %s{where}" typeName
+        let scrutinee = prune env.Registry expectedType
+
+        if DotNetInterop.isUnresolved scrutinee then
+            failwithf
+                $"Pattern Error at %s{where}: the type of the value being matched is not known here, so ':is' has nothing to narrow. Annotate it first."
+
+        match DotNetInterop.tryClrTypeOf scrutinee with
+        | None ->
+            let shown = DotNetInterop.showType scrutinee
+
+            failwithf
+                $"Pattern Error at %s{where}: ':is' tests a .NET type, but the value being matched has the Bjolang type %s{shown}. Match it with its own constructors instead."
+        | Some scrutineeClr ->
+            if not (scrutineeClr.IsAssignableFrom testedClr) then
+                failwithf
+                    $"Pattern Error at %s{where}: '%s{testedClr.FullName}' is not a '%s{scrutineeClr.FullName}', so this test can never succeed."
+
+            // The binder sees the *narrowed* type: that is the whole point of
+            // testing, and it is what lets the arm use members the scrutinee's
+            // static type does not have.
+            let testedType = DotNetInterop.mapClrType testedClr
+
+            { Type = testedType
+              Range = r
+              Node = TPTypeTest(testedClr.FullName, binder) },
+            (match binder with
+             | Some n -> Map.add n testedType Map.empty
+             | None -> Map.empty)
+
     | PConstruct(name, args, r) ->
         let binding = 
             match Map.tryFind name env.Bindings with
@@ -722,6 +761,73 @@ let rec isSyntacticValue (expr: TypedExpr) =
     | TRecordMake fields -> fields |> List.forall (snd >> isSyntacticValue)
     | _ -> false
 
+// ---------------------------------------------------------------------------
+// Foreign .NET interop
+// ---------------------------------------------------------------------------
+
+/// The type of a foreign call once its declared exceptions are accounted for.
+///
+/// Without `#:exceptions` the call has the type the .NET member has, and
+/// anything it throws propagates. With it, the call cannot fail *in the ways
+/// that were listed* — those become `Err` — and everything else still
+/// propagates. That asymmetry is the whole design: an exception nobody named is
+/// a bug, not a value.
+///
+/// `void` is replaced by the unit tuple on the way in. C# has no `Result<E,
+/// void>` and never will, and `()` is exactly what Bjolang means by a call
+/// performed for its effect.
+let wrapForeignExceptions (exceptions: string list) (retType: HMType) : HMType =
+    if List.isEmpty exceptions then
+        retType
+    else
+        let okType =
+            if retType = TypeConstants.voidType then TTuple [] else retType
+
+        TCon("Result", [ TCon("System.Exception", []); okType ])
+
+/// Checks that everything named by `#:exceptions` is in fact an exception type.
+///
+/// The list drives a C# `catch ... when (ex is E1 || ...)` filter, and a name
+/// that is not an exception type produces C# that does not compile — reported
+/// against generated code rather than against the import that caused it.
+let private checkExceptionTypes (where: string) (exceptions: string list) : unit =
+    for name in exceptions do
+        let t = DotNetInterop.resolveType $" at %s{where}" name
+
+        if not (typeof<System.Exception>.IsAssignableFrom t) then
+            failwithf
+                $"Type Error at %s{where}: '%s{name}' is named in #:exceptions but does not derive from System.Exception."
+
+/// The .NET type a receiver expression has, or a diagnostic saying why not.
+let private receiverClrType (where: string) (form: string) (targetType: HMType) : System.Type =
+    if DotNetInterop.isUnresolved targetType then
+        failwithf
+            $"Type Error at %s{where}: the type of the receiver of '%s{form}' is not known here. A .NET member is resolved at compile time, so the receiver's type has to be pinned down first — annotate it, or bind it with a signature."
+
+    match DotNetInterop.tryClrTypeOf targetType with
+    | Some t -> t
+    | None ->
+        let shown = DotNetInterop.showType targetType
+
+        failwithf
+            $"Type Error at %s{where}: '%s{form}' needs a .NET receiver, but its target has the Bjolang type %s{shown}, which is not a .NET class."
+
+/// Unifies a foreign member's parameter types into the argument types.
+///
+/// This is what makes reflection *drive* inference rather than merely check it:
+/// an argument whose type was still open is pinned to the parameter type of the
+/// overload that was selected.
+let private unifyForeignArgs (registry: TraitRegistry) (argTypes: HMType list) (paramTypes: HMType list) =
+    List.iter2 (unify registry) argTypes paramTypes
+
+let private metadataOf (resolved: DotNetInterop.ResolvedCall) (exceptions: string list) : DotNetMethodMetadata =
+    { DeclaringType = resolved.DeclaringType
+      MethodName = resolved.Name
+      ParameterTypes = resolved.ParameterTypes
+      ReturnType = resolved.ReturnType
+      IsStatic = resolved.IsStatic
+      Exceptions = exceptions }
+
 let rec infer (env: Env) (expr: Expr) : HMType * TypedExpr =
     match expr with
     | EInt(value, r) ->
@@ -748,6 +854,78 @@ let rec infer (env: Env) (expr: Expr) : HMType * TypedExpr =
 
         failwithf
             $"Type Error at %s{Lexer.formatPos r}: '%s{name}' is a method of the inline-only trait '%s{traitName}' and has no value form. Apply it directly, or wrap it in a lambda at a known type."
+
+    // `Class.Member` — a static field or property. This is how an enum value
+    // such as `FileMode.Open` is written, and it is why `import/class` is
+    // useful for a type that has no constructor at all.
+    | EIdent(name, r) when
+        not (Map.containsKey name env.Bindings)
+        && not (name.EndsWith ".")
+        && name.Contains "."
+        && Map.containsKey (name.Substring(0, name.LastIndexOf ".")) env.Registry.ClrClasses
+        ->
+        let split = name.LastIndexOf "."
+        let alias = name.Substring(0, split)
+        let memberName = name.Substring(split + 1)
+        let info = env.Registry.ClrClasses[alias]
+        let where = Lexer.formatPos r
+        let clrType = DotNetInterop.resolveType $" at %s{where}" info.ClrName
+        let memberType = DotNetInterop.resolveStaticMember where clrType memberName
+
+        memberType,
+        { Type = memberType
+          Range = r
+          Node = TForeignStaticGet(info.ClrName, memberName, memberType) }
+
+    // An `import/extern` name used as a *value* rather than applied.
+    //
+    // A .NET method group is not a value, so the only thing this can mean is a
+    // lambda that calls it — which needs the parameter types before there are
+    // any arguments to infer them from. That is what the declared signature is
+    // for, and why it is required here and optional everywhere else.
+    | EIdent(name, r) when Map.containsKey name env.Registry.ClrExterns ->
+        let info = env.Registry.ClrExterns[name]
+        let where = Lexer.formatPos r
+
+        match info.DeclaredType with
+        | Some(TFun(paramTypes, _)) ->
+            let clrType = DotNetInterop.resolveType $" at %s{where}" info.ClrType
+            let resolved = DotNetInterop.resolveStaticMethod where clrType info.MethodName paramTypes
+            unifyForeignArgs env.Registry paramTypes resolved.ParameterTypes
+
+            let retType = wrapForeignExceptions info.Exceptions resolved.ReturnType
+            let paramNames = resolved.ParameterTypes |> List.map (fun _ -> Gensym.fresh "__foreign")
+
+            // Annotated because `TypedExpr` and `TypedPattern` have the same
+            // three field names, and neither of these is in a position that
+            // says which one is meant.
+            let argExprs: TypedExpr list =
+                List.zip paramNames resolved.ParameterTypes
+                |> List.map (fun (n, t) ->
+                    { Type = t
+                      Range = r
+                      Node = TIdent(n, []) })
+
+            let body: TypedExpr =
+                { Type = retType
+                  Range = r
+                  Node =
+                    TForeignStaticCall(
+                        resolved.DeclaringType,
+                        info.MethodName,
+                        argExprs,
+                        Some(metadataOf resolved info.Exceptions)
+                    ) }
+
+            let funType = TFun(resolved.ParameterTypes, retType)
+
+            funType,
+            { Type = funType
+              Range = r
+              Node = TLambda(paramNames, body) }
+        | _ ->
+            failwithf
+                $"Type Error at %s{where}: '%s{name}' names the .NET method '%s{info.ClrType}.%s{info.MethodName}', and a method group is not a value. To use it as one, give it a signature in its import/extern clause; otherwise call it directly."
 
     | EIdent(name, r) ->
         let binding = lookup env name
@@ -864,6 +1042,129 @@ let rec infer (env: Env) (expr: Expr) : HMType * TypedExpr =
         { Type = instantiatedRecordType
           Range = r
           Node = TRecordMake orderedFields }
+
+    // --- Foreign .NET interop ---
+    //
+    // All four forms resolve the member they name against real .NET metadata
+    // right here, from the types of the arguments as inference has them. The
+    // selected overload's parameter types are then unified *back into* the
+    // arguments, so reflection does not merely check the call — it informs it.
+
+    // `(.-Property target)` — an instance property or field read.
+    | EApp(EIdent(name, _), args, r) when name.StartsWith ".-" && name.Length > 2 ->
+        let propName = name.Substring 2
+        let where = Lexer.formatPos r
+
+        match args with
+        | [ target ] ->
+            let targetType, typedTarget = infer env target
+            let clrTarget = receiverClrType where name targetType
+            let propType = DotNetInterop.resolveInstanceMember where clrTarget propName
+
+            propType,
+            { Type = propType
+              Range = r
+              Node = TDotPropertyGet(typedTarget, propName, propType) }
+        | _ ->
+            failwithf
+                $"Type Error at %s{where}: '%s{name}' reads a property, so it takes exactly one argument — the object to read it from — but was given %d{args.Length}."
+
+    // `(.Method target args...)` — an instance method call.
+    | EApp(EIdent(name, _), args, r) when name.StartsWith "." && name.Length > 1 ->
+        let methodName = name.Substring 1
+        let where = Lexer.formatPos r
+
+        match args with
+        | [] ->
+            failwithf
+                $"Type Error at %s{where}: '%s{name}' calls an instance method, so its first argument is the object to call it on, but it was given none."
+        | target :: rest ->
+            let targetType, typedTarget = infer env target
+            let clrTarget = receiverClrType where name targetType
+
+            let typedArgs = rest |> List.map (infer env)
+            let argTypes = typedArgs |> List.map fst
+
+            let resolved = DotNetInterop.resolveInstanceMethod where clrTarget methodName argTypes
+            unifyForeignArgs env.Registry argTypes resolved.ParameterTypes
+
+            // Never exception-wrapped: `import/class` declares one signature —
+            // the constructor's — so there is nowhere to say what a method may
+            // raise, and wrapping it anyway would swallow exceptions nobody
+            // listed.
+            let retType = resolved.ReturnType
+
+            retType,
+            { Type = retType
+              Range = r
+              Node = TDotMethodCall(typedTarget, methodName, typedArgs |> List.map snd, Some(metadataOf resolved [])) }
+
+    // `(ClassName. args...)` — construction.
+    | EApp(EIdent(name, _), args, r) when
+        name.EndsWith "."
+        && name.Length > 1
+        && Map.containsKey (name.Substring(0, name.Length - 1)) env.Registry.ClrClasses
+        ->
+        let alias = name.Substring(0, name.Length - 1)
+        let info = env.Registry.ClrClasses[alias]
+        let where = Lexer.formatPos r
+        let clrType = DotNetInterop.resolveType $" at %s{where}" info.ClrName
+
+        let typedArgs = args |> List.map (infer env)
+        let argTypes = typedArgs |> List.map fst
+
+        let resolved = DotNetInterop.resolveConstructor where clrType argTypes
+        unifyForeignArgs env.Registry argTypes resolved.ParameterTypes
+
+        // The declared signature is enforced against the overload reflection
+        // chose, rather than used in place of it. Writing one down is how a
+        // reader of the source learns what the constructor takes without
+        // consulting the BCL; getting it wrong is an error rather than a
+        // silently ignored comment.
+        match info.CtorType with
+        | Some declared -> unify env.Registry declared (TFun(resolved.ParameterTypes, resolved.ReturnType))
+        | None -> ()
+
+        let retType = wrapForeignExceptions info.CtorExceptions resolved.ReturnType
+
+        let meta =
+            { ClrType = resolved.DeclaringType
+              ParameterTypes = resolved.ParameterTypes
+              Exceptions = info.CtorExceptions }
+
+        retType,
+        { Type = retType
+          Range = r
+          Node = TNewObject(resolved.DeclaringType, typedArgs |> List.map snd, Some meta) }
+
+    // A static method named by `import/extern`, applied.
+    | EApp(EIdent(name, _), args, r) when Map.containsKey name env.Registry.ClrExterns ->
+        let info = env.Registry.ClrExterns[name]
+        let where = Lexer.formatPos r
+        let clrType = DotNetInterop.resolveType $" at %s{where}" info.ClrType
+
+        let typedArgs = args |> List.map (infer env)
+        let argTypes = typedArgs |> List.map fst
+
+        let resolved = DotNetInterop.resolveStaticMethod where clrType info.MethodName argTypes
+        unifyForeignArgs env.Registry argTypes resolved.ParameterTypes
+
+        match info.DeclaredType with
+        | Some declared -> unify env.Registry declared (TFun(resolved.ParameterTypes, resolved.ReturnType))
+        | None -> ()
+
+        let retType = wrapForeignExceptions info.Exceptions resolved.ReturnType
+
+        retType,
+        { Type = retType
+          Range = r
+          Node =
+            TForeignStaticCall(
+                resolved.DeclaringType,
+                info.MethodName,
+                typedArgs |> List.map snd,
+                Some(metadataOf resolved info.Exceptions)
+            ) }
 
     | EApp(target, args, r) ->
         let targetType, typedTarget = infer env target
@@ -1252,6 +1553,22 @@ let rec infer (env: Env) (expr: Expr) : HMType * TypedExpr =
         { Type = bodyType
           Range = r
           Node = TTryFinally(tBody, tCleanup) }
+
+    // `(try body #:catch (E1 E2 ...))`. The listed failures become values; the
+    // rest keep propagating, exactly as `#:exceptions` does at an import — this
+    // is the same facility with the list written at the use rather than at the
+    // declaration.
+    | ETryCatch(body, exceptions, r) ->
+        let where = Lexer.formatPos r
+        checkExceptionTypes where exceptions
+
+        let bodyType, tBody = infer env body
+        let resultType = wrapForeignExceptions exceptions bodyType
+
+        resultType,
+        { Type = resultType
+          Range = r
+          Node = TTryCatch(tBody, exceptions) }
 
     | ESeq(body, r) ->
         let elemType = freshMeta ()
@@ -1681,6 +1998,93 @@ let rec checkDecl (env: Env) (sigs: Map<string, HMType * FType option * (string 
 
     | DImport(paths, r) -> env, sigs, [ TImport(paths, r) ]
     | DExport(names, r) -> env, sigs, [ TExport(names, r) ]
+
+    // `(import/class (Alias (: Clr.Class type #:exceptions (E ...))) ...)`
+    //
+    // Two passes, because a constructor signature is written in terms of the
+    // alias it is declaring — `(-> string StreamWriter)` — so the alias has to
+    // be a type before that signature can be resolved.
+    | DImportClass(specs, r) ->
+        let baseInfos =
+            specs
+            |> List.map (fun spec ->
+                let where = Lexer.formatPos spec.Range
+                let clrType = DotNetInterop.resolveType $" at %s{where}" spec.ClrClass
+
+                if clrType.IsGenericTypeDefinition then
+                    failwithf
+                        $"Type Error at %s{where}: '%s{spec.ClrClass}' is a generic type. Interop is resolved entirely at compile time and does not infer .NET type arguments, so a generic type cannot be imported."
+
+                checkExceptionTypes where spec.Exceptions
+
+                { Alias = spec.Alias
+                  ClrName = clrType.FullName
+                  CtorType = None
+                  CtorExceptions = spec.Exceptions })
+
+        // The alias becomes a type alias as well as a class: that is what lets
+        // an ordinary signature say `StreamWriter` and mean
+        // `System.IO.StreamWriter`, with no second spelling to keep in sync.
+        let registryWithAliases =
+            baseInfos
+            |> List.fold
+                (fun (reg: TraitRegistry) info ->
+                    { reg with
+                        ClrClasses = Map.add info.Alias info reg.ClrClasses
+                        Aliases = Map.add info.Alias ([], TCon(info.ClrName, [])) reg.Aliases
+                        LocalTypes = Set.add info.Alias reg.LocalTypes })
+                env.Registry
+
+        let infos =
+            List.map2
+                (fun (info: ClrClassInfo) (spec: ClassImportSpec) ->
+                    { info with
+                        CtorType = spec.ConstructorType |> Option.map (resolveTypeAnnotation registryWithAliases) })
+                baseInfos
+                specs
+
+        let finalRegistry =
+            infos
+            |> List.fold (fun (reg: TraitRegistry) info -> { reg with ClrClasses = Map.add info.Alias info reg.ClrClasses }) registryWithAliases
+
+        { env with Registry = finalRegistry }, sigs, [ TImportClass(infos, r) ]
+
+    // `(import/extern (alias (: Clr.Type.Method type #:exceptions (E ...))) ...)`
+    | DImportExtern(specs, r) ->
+        let infos =
+            specs
+            |> List.map (fun spec ->
+                let where = Lexer.formatPos spec.Range
+                let split = spec.ClrTarget.LastIndexOf "."
+
+                if split <= 0 || split = spec.ClrTarget.Length - 1 then
+                    failwithf
+                        $"Syntax error at %s{where}: '%s{spec.ClrTarget}' does not name a static method. Write the declaring type and the method together, as in System.Console.WriteLine."
+
+                let typeName = spec.ClrTarget.Substring(0, split)
+                let methodName = spec.ClrTarget.Substring(split + 1)
+                let clrType = DotNetInterop.resolveType $" at %s{where}" typeName
+
+                // Checked at the import rather than at the first call: an
+                // import that names nothing is wrong whether or not anybody
+                // got around to using it.
+                if not (DotNetInterop.hasStaticMethod clrType methodName) then
+                    failwithf
+                        $"Type Error at %s{where}: '%s{clrType.FullName}' has no public static method named '%s{methodName}'."
+
+                checkExceptionTypes where spec.Exceptions
+
+                { Alias = spec.Alias
+                  ClrType = clrType.FullName
+                  MethodName = methodName
+                  DeclaredType = spec.ExplicitType |> Option.map (resolveTypeAnnotation env.Registry)
+                  Exceptions = spec.Exceptions })
+
+        let newRegistry =
+            infos
+            |> List.fold (fun (reg: TraitRegistry) info -> { reg with ClrExterns = Map.add info.Alias info reg.ClrExterns }) env.Registry
+
+        { env with Registry = newRegistry }, sigs, [ TImportExtern(infos, r) ]
 
     | DReExport(names, r) ->
         // A re-exported name was defined elsewhere and already carries a

@@ -28,6 +28,7 @@ let mapPatternChildrenWith (f: TypedExpr -> TypedExpr) (fp: TypedPattern -> Type
         | TPVec(items, tailOpt) -> TPVec(List.map fp items, Option.map fp tailOpt)
         | TPTuple items -> TPTuple(List.map fp items)
         | TPConstruct(name, args) -> TPConstruct(name, List.map fp args)
+        | TPTypeTest _ as leaf -> leaf
         | TPApp(expr, inner) -> TPApp(f expr, fp inner)
         | TPAs(inner, name) -> TPAs(fp inner, name)
 
@@ -72,6 +73,7 @@ let mapChildren (f: TypedExpr -> TypedExpr) (expr: TypedExpr) : TypedExpr =
         | TIf(c, t, e) -> TIf(f c, f t, f e)
         | TWhen(c, body, negated) -> TWhen(f c, f body, negated)
         | TTryFinally(body, cleanup) -> TTryFinally(f body, f cleanup)
+        | TTryCatch(body, exceptions) -> TTryCatch(f body, exceptions)
         | TSeq body -> TSeq(f body)
         | TYield value -> TYield(f value)
         | TYieldFrom source -> TYieldFrom(f source)
@@ -90,6 +92,15 @@ let mapChildren (f: TypedExpr -> TypedExpr) (expr: TypedExpr) : TypedExpr =
         | TLoop(members, bodyOpt) ->
             TLoop(members |> List.map (fun m -> { m with Body = f m.Body }), Option.map f bodyOpt)
         | TRecur(index, args) -> TRecur(index, List.map f args)
+
+        // Foreign .NET interop. The metadata is not an expression and is
+        // carried through untouched: it records what the type checker resolved
+        // against .NET metadata, and no later pass may second-guess it.
+        | TDotMethodCall(target, name, args, meta) -> TDotMethodCall(f target, name, List.map f args, meta)
+        | TDotPropertyGet(target, name, t) -> TDotPropertyGet(f target, name, t)
+        | TNewObject(clrName, args, meta) -> TNewObject(clrName, List.map f args, meta)
+        | TForeignStaticCall(clrType, name, args, meta) -> TForeignStaticCall(clrType, name, List.map f args, meta)
+        | TForeignStaticGet _ as leaf -> leaf
 
     { expr with Node = node }
 
@@ -153,7 +164,9 @@ let rec mapDecl (f: TypedExpr -> TypedExpr) (decl: TDecl) : TDecl =
     | TType _
     | TTypeRec _
     | TTrait _
-    | TExtern _ -> decl
+    | TExtern _
+    | TImportExtern _
+    | TImportClass _ -> decl
 
 /// Deep pre-order fold over every expression contained in `decl`.
 let foldDecl (f: 'S -> TypedExpr -> 'S) (state: 'S) (decl: TDecl) : 'S =

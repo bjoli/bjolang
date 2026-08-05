@@ -100,6 +100,7 @@ let mapPrimitiveType (name: string) =
     // A `seq` is a C# iterator, so its type is the one C# iterators produce.
     | "Seq" -> "System.Collections.Generic.IEnumerable"
     | "Option" -> "BjolangRuntime.Option"
+    | "Result" -> "BjolangRuntime.Result"
     | "Map" -> "Map.Map"
     | "Keyword" | "Bjolang.Keyword" -> "BjolangRuntime.Keyword"
     | "Symbol" | "Bjolang.Symbol" -> "BjolangRuntime.Symbol"
@@ -142,13 +143,39 @@ let typeParamKey = Naming.typeParamKey
 
 
 
+/// Built-in type names that the program being compiled declares for itself.
+///
+/// `Result`, `Option` and the collection types are built in, but nothing stops
+/// a module from declaring a union of its own under one of those names — and
+/// two of the suite's tests declare their own `Result`, from before there was
+/// one to inherit. A declared type wins: it is emitted as an ordinary union and
+/// has to be *named* as one, rather than as the runtime type it shadows.
+///
+/// Module state rather than a `CodegenContext` field because `typeToString` is
+/// called from a dozen places that have no context to thread — including the
+/// type-definition emitter itself. It is set once, from `generateProgram`,
+/// before anything is emitted.
+let mutable private shadowedBuiltins: Set<string> = Set.empty
+
+/// The C# spelling of a type constructor's name.
+///
+/// The single answer to "what is this type called in the generated code", so
+/// that a declared type cannot be a union in one place and the runtime type it
+/// shadows in another — which is exactly what happened while the union-case
+/// emitter had a copy of this logic that did not know about shadowing.
+let private conBaseName (name: string) =
+    if Set.contains name shadowedBuiltins then
+        sanitizeIdent name
+    else
+        let mapped = mapPrimitiveType name
+        if mapped = name then sanitizeIdent name else mapped
+
 let rec typeToString (hm: HMType) : string =
     match hm with
     | TCon ("Array", [elemType]) ->
         $"{typeToString elemType}[]"
     | TCon (name, args) ->
-        let mapped = mapPrimitiveType name
-        let baseName = if mapped = name then sanitizeIdent name else mapped
+        let baseName = conBaseName name
         if args.IsEmpty then baseName
         else
             let argsStr = args |> List.map typeToString |> String.concat ", "
@@ -327,6 +354,8 @@ let rec serializePattern (p: Parser.Pattern) : string =
     | Parser.PList(items, tailOpt, _) -> serializeSeqPattern "List" items tailOpt
     | Parser.PVec(items, tailOpt, _) -> serializeSeqPattern "Vec" items tailOpt
     | Parser.PTuple(items, _) -> "(" + String.concat " " ("Tuple" :: List.map serializePattern items) + ")"
+    | Parser.PTypeTest(t, binder, _) ->
+        "(:is " + String.concat " " (t :: Option.toList binder) + ")"
 
 and private serializeSeqPattern (head: string) items tailOpt =
     let itemStrs = items |> List.map serializePattern
@@ -414,6 +443,7 @@ let rec serializeExpr (e: Parser.Expr) : string =
     | Parser.ELetTuple _ -> failwith "an inline template body may not destructure a tuple binding"
     | Parser.EList _ -> failwith "an inline template body may not contain a bare list literal"
     | Parser.ETryFinally _ -> failwith "an inline template body may not contain try/finally"
+    | Parser.ETryCatch _ -> failwith "an inline template body may not contain try/catch"
 
 /// Can this body be written out and read back at all? A template that cannot be
 /// serialized is simply not exported; its landing pad still is.
@@ -436,7 +466,7 @@ let getUnionTypeString (hm: HMType) (parentName: string) : string =
         | _ -> None
     match findCon hm with
     | Some (n, args) ->
-        let baseName = mapPrimitiveType n
+        let baseName = conBaseName n
         if args.IsEmpty then baseName
         else
             let argsStr = args |> List.map typeToString |> String.concat ", "
@@ -553,6 +583,11 @@ and containsHoist (expr: TypedExpr) : bool =
        // position out here.
        | TLambda _
        | TSeq _ -> false
+       // So does a guarded call: it is emitted as an immediately invoked
+       // lambda, and everything it needs a statement for goes inside that.
+       | TTryCatch _ -> false
+       | TNewObject (_, _, Some meta) when not meta.Exceptions.IsEmpty -> false
+       | TForeignStaticCall (_, _, _, Some meta) when not meta.Exceptions.IsEmpty -> false
        | _ -> TypeVisitor.children expr |> List.exists containsHoist
 
 /// Translates a typed pattern into C# pattern syntax.
@@ -573,6 +608,29 @@ let rec generatePattern (ctx: CodegenContext) (pat: TypedPattern) : unit =
         append ctx "{ Tag: 1, Value: "
         generatePattern ctx inner
         append ctx " }"
+
+    // The built-in `Result` is a struct carrying a tag and both payloads, so its
+    // constructors match as property patterns exactly as `Option`'s do. Guarded
+    // on the case *not* being a declared one: a module with a `Result` union of
+    // its own matches it as the ordinary union it is.
+    | TPConstruct (("Ok" | "Err") as name, args) when not (Map.containsKey name ctx.UnionCases) ->
+        let tag, field = if name = "Ok" then 1, "OkValue" else 0, "ErrValue"
+
+        match args with
+        | [ inner ] ->
+            append ctx $"{{ Tag: {tag}, {field}: "
+            generatePattern ctx inner
+            append ctx " }"
+        | _ -> append ctx $"{{ Tag: {tag} }}"
+
+    // A .NET type test compiles to the C# type pattern it is: the name, and a
+    // designation when the source asked for one.
+    | TPTypeTest (clrName, binder) ->
+        append ctx clrName
+
+        match binder with
+        | Some n -> append ctx $" %s{sanitizeIdent n}"
+        | None -> ()
 
     | TPConstruct (name, args) ->
         // Cons/Nil are now builtins backed by SchemeList.Cons<T>/SchemeList.Nil<T>,
@@ -700,6 +758,14 @@ let rec generateExpr (ctx: CodegenContext) (expr: TypedExpr) : unit =
             | _ ->
                 // Should not happen (Cons always has function type), but safe fallback
                 append ctx "Cons"
+        // A built-in `Result` constructor used as a value. The struct's
+        // factories are static methods on a *closed* generic type, so there is
+        // no method group to convert and the lambda has to name the type.
+        | "Ok"
+        | "Err" when not (Map.containsKey name ctx.UnionCases) ->
+            match expr.Type with
+            | TFun (_, retType) -> append ctx $"(arg0) => {typeToString retType}.{name}(arg0)"
+            | _ -> append ctx $"{typeToString expr.Type}.{name}"
         | _ ->
         match Map.tryFind name ctx.UnionCases with
         | Some info ->
@@ -728,6 +794,81 @@ let rec generateExpr (ctx: CodegenContext) (expr: TypedExpr) : unit =
 
     | TApply (target, args, kwArgs) ->
         generateApply ctx expr target args kwArgs
+
+    // --- Foreign .NET interop ---
+    //
+    // Every one of these names a member the type checker already resolved
+    // against .NET metadata. Nothing here chooses an overload, and nothing is
+    // left for the C# compiler to work out.
+
+    | TDotMethodCall (target, methodName, args, _) ->
+        let emitters = prepareOperands ctx (target :: args)
+        emitReceiver ctx target emitters.Head
+        append ctx $".%s{methodName}("
+        for i, emit in List.indexed emitters.Tail do
+            if i > 0 then append ctx ", "
+            emit ctx
+        append ctx ")"
+
+    | TDotPropertyGet (target, propName, _) ->
+        let emitters = prepareOperands ctx [ target ]
+        emitReceiver ctx target emitters.Head
+        append ctx $".%s{propName}"
+
+    | TForeignStaticGet (clrType, memberName, _) ->
+        append ctx $"%s{clrType}.%s{memberName}"
+
+    | TNewObject (clrName, args, meta) ->
+        let exceptions =
+            meta |> Option.map (fun m -> m.Exceptions) |> Option.defaultValue []
+
+        if exceptions.IsEmpty then
+            append ctx $"new %s{clrName}("
+            for i, emit in List.indexed (prepareOperands ctx args) do
+                if i > 0 then append ctx ", "
+                emit ctx
+            append ctx ")"
+        else
+            // A constructor always produces a value, so the guarded form never
+            // has a void inner call.
+            generateGuarded ctx expr false exceptions args (fun c names ->
+                let argList = String.concat ", " names
+                append c $"new %s{clrName}(%s{argList})")
+
+    | TForeignStaticCall (clrType, methodName, args, meta) ->
+        let exceptions =
+            meta |> Option.map (fun m -> m.Exceptions) |> Option.defaultValue []
+
+        if exceptions.IsEmpty then
+            append ctx $"%s{clrType}.%s{methodName}("
+            for i, emit in List.indexed (prepareOperands ctx args) do
+                if i > 0 then append ctx ", "
+                emit ctx
+            append ctx ")"
+        else
+            let innerIsVoid =
+                match meta with
+                | Some m -> isVoidType m.ReturnType
+                | None -> false
+
+            generateGuarded ctx expr innerIsVoid exceptions args (fun c names ->
+                let argList = String.concat ", " names
+                append c $"%s{clrType}.%s{methodName}(%s{argList})")
+
+    // `(try body #:catch (...))`. Like a guarded foreign call, but around an
+    // arbitrary expression — which is what lets one guard cover a whole region
+    // rather than a single call.
+    | TTryCatch (body, exceptions) ->
+        emitGuard ctx expr exceptions ignore (fun c okOf ->
+            if isVoidType body.Type then
+                generateBlock c Effect body
+                indent c
+                appendLine c (okOf "default(ValueTuple)")
+            else
+                let tmp = freshName "__ok"
+                generateBindingValue c (DeclareAndAssign(typeToString body.Type, tmp)) body
+                indent c
+                appendLine c (okOf tmp))
 
     | TInterfaceCall (iType, mName, dict, args) ->
         let emitters = prepareOperands ctx (dict :: args)
@@ -909,6 +1050,113 @@ let rec generateExpr (ctx: CodegenContext) (expr: TypedExpr) : unit =
         // Statement-shaped: `needsHoist` has already routed these away.
         codegenError expr.Range.Start.Line "internal error: statement-shaped node reached expression emission"
 
+/// Emits the receiver of a `.Member` access, parenthesized when C# needs it.
+///
+/// `new Foo().Bar` does not parse, and neither does a conditional or a cast in
+/// receiver position. Only the shapes that are already primary expressions are
+/// left bare; anything else gets parentheses, which are never wrong.
+and private emitReceiver (ctx: CodegenContext) (target: TypedExpr) (emit: CodegenContext -> unit) : unit =
+    match target.Node with
+    | TIdent _
+    | TString _
+    | TApply _
+    | TDotMethodCall _
+    | TDotPropertyGet _
+    | TForeignStaticCall _
+    | TForeignStaticGet _
+    | TGetField _ -> emit ctx
+    | _ ->
+        append ctx "("
+        emit ctx
+        append ctx ")"
+
+/// Emits a foreign call whose declared exceptions turn it into a `Result`.
+///
+/// The shape is an immediately invoked `Func<>` so that the whole thing stays a
+/// C# *expression* and can appear anywhere a call could.
+///
+/// Two details are load-bearing:
+///
+///   * The arguments are evaluated into locals *before* the `try`. An exception
+///     raised while working out an argument is not one the call raised, and
+///     catching it would blame the wrong thing.
+///   * The `catch` carries an exception *filter* naming exactly the types that
+///     were declared. Anything not listed keeps unwinding — a `#:exceptions`
+///     clause says which failures are values, and everything else stays a bug.
+and private emitGuard
+    (ctx: CodegenContext)
+    (expr: TypedExpr)
+    (exceptions: string list)
+    (emitPrologue: CodegenContext -> unit)
+    (emitTryBody: CodegenContext -> (string -> string) -> unit)
+    : unit =
+
+    let resultType = typeToString expr.Type
+    let exVar = freshName "__ex"
+    let filter = exceptions |> List.map (fun e -> $"%s{exVar} is %s{e}") |> String.concat " || "
+    let okOf (value: string) = $"return %s{resultType}.Ok(%s{value});"
+
+    append ctx $"new Func<%s{resultType}>(() => {{\n"
+
+    // A lambda is its own function scope: no enclosing loop to jump to, and no
+    // iterator to yield from.
+    let inner = { ctx with Prelude = None; Loop = None; InSeq = false }
+
+    withIndent inner (fun c ->
+        // Whatever has to happen before the guarded region — evaluating a
+        // call's arguments, which is not part of what the call may fail at.
+        emitPrologue c
+
+        indent c
+        appendLine c "try {"
+        withIndent c (fun c2 -> emitTryBody c2 okOf)
+
+        indent c
+        appendLine c $"}} catch (Exception %s{exVar}) when (%s{filter}) {{"
+
+        withIndent c (fun c2 ->
+            indent c2
+            appendLine c2 $"return %s{resultType}.Err(%s{exVar});")
+
+        indent c
+        appendLine c "}")
+
+    indent ctx
+    append ctx "})()"
+
+and private generateGuarded
+    (ctx: CodegenContext)
+    (expr: TypedExpr)
+    (innerIsVoid: bool)
+    (exceptions: string list)
+    (args: TypedExpr list)
+    (emitCall: CodegenContext -> string list -> unit)
+    : unit =
+
+    let temps = args |> List.map (fun a -> freshName "__farg", a)
+
+    let prologue (c: CodegenContext) =
+        for tmp, arg in temps do
+            generateBindingValue c (DeclareAndAssign(typeToString arg.Type, tmp)) arg
+
+    emitGuard ctx expr exceptions prologue (fun c okOf ->
+        indent c
+
+        if innerIsVoid then
+            // `Ok` of a void call carries the unit value, because
+            // `Result<E, void>` is not a type C# has.
+            emitCall c (List.map fst temps)
+            appendLine c ";"
+            indent c
+            appendLine c (okOf "default(ValueTuple)")
+        else
+            let tmp = freshName "__ok"
+            append c $"var %s{tmp} = "
+            emitCall c (List.map fst temps)
+            appendLine c ";"
+            indent c
+            appendLine c (okOf tmp))
+
 /// Fully qualifies a module-level binding.
 and private qualifiedName (ctx: CodegenContext) (name: string) =
     match Map.tryFind name ctx.GlobalBindings with
@@ -992,6 +1240,16 @@ and private generateApply
         emitters[0] ctx
         append ctx $" {name} "
         emitters[1] ctx
+        append ctx ")"
+
+    // A built-in `Result` constructor, applied. The struct has static factories
+    // rather than nested case classes, so the closed generic type is named and
+    // the case is a method on it.
+    | TIdent (("Ok" | "Err") as name, _) when
+        not (Map.containsKey name ctx.UnionCases) && args.Length = 1 && kwArgs.IsEmpty
+        ->
+        append ctx $"%s{typeToString expr.Type}.%s{name}("
+        (prepareOperands ctx args).Head ctx
         append ctx ")"
 
     | TIdent ("=", _) when args.Length = 2 && kwArgs.IsEmpty ->
@@ -2482,6 +2740,17 @@ let generateProgram (exportMetadata: string) (inlineMetadata: string) (metadataD
                 | _ -> []
             )
         collect decls |> Map.ofList
+
+    // Anything the program declares a type of its own for stops being the
+    // built-in of that name, everywhere.
+    shadowedBuiltins <-
+        let rec collect decls =
+            decls |> List.collect (function
+                | TType (defs, _) | TTypeRec (defs, _) -> defs |> List.map (fun td -> td.Name)
+                | TModule (_, innerDecls, _) -> collect innerDecls
+                | _ -> []
+            )
+        collect decls |> Set.ofList
 
     let globalBindings =
         let rec collect decls =

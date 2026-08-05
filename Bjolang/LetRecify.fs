@@ -16,6 +16,7 @@ let rec patternBoundNames (pat: Pattern) : string list =
     match pat with
     | PWildcard _ -> []
     | PIdent(name, _) -> [ name ]
+    | PTypeTest(_, binder, _) -> Option.toList binder
     | PInt _
     | PString _
     | PKeyword _
@@ -143,6 +144,7 @@ let rec exprFreeVars (isGuarded: bool) (bound: Set<string>) (expr: Expr) : Map<s
         mergeVarUseMaps tfv vfv
     | ETryFinally(body, cleanup, _) ->
         mergeVarUseMaps (exprFreeVars isGuarded bound body) (exprFreeVars isGuarded bound cleanup)
+    | ETryCatch(body, _, _) -> exprFreeVars isGuarded bound body
     // A `seq` body is deferred exactly as a lambda body is: nothing in it runs
     // until the sequence is consumed, so a reference from inside one is guarded
     // and can point at a binding defined later in the same group.
@@ -264,6 +266,7 @@ let rec letrecifyExpr (expr: Expr) : Expr =
     | ESet(name, value, r) -> ESet(name, letrecifyExpr value, r)
 
     | ETryFinally(body, cleanup, r) -> ETryFinally(letrecifyExpr body, letrecifyExpr cleanup, r)
+    | ETryCatch(body, exceptions, r) -> ETryCatch(letrecifyExpr body, exceptions, r)
 
     | ESeq(body, r) -> ESeq(letrecifyExpr body, r)
     | EYield(value, r) -> EYield(letrecifyExpr value, r)

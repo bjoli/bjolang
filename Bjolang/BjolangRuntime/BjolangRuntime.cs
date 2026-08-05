@@ -369,6 +369,50 @@ public static class BjolangRuntime {
     public static T optionsubgetsubor<T>(Option<T> option, T fallback) =>
         option.IsSome ? option.Value : fallback;
 
+    /// Bjolang's `(Result %e %a)`: either an `Ok` carrying a value or an `Err`
+    /// carrying an error. A struct for the same reason `Option<T>` is one — it
+    /// is what a `#:exceptions` interop call returns on every single
+    /// invocation, so it must not cost an allocation.
+    ///
+    /// The error comes first, matching the Bjolang spelling `(Result %e %a)`
+    /// and the way `Monad` is implemented for it: the type argument free to
+    /// move is the trailing one.
+    public struct Result<TErr, TOk> : IEquatable<Result<TErr, TOk>> {
+        public readonly bool IsOk;
+        public readonly TOk OkValue;
+        public readonly TErr ErrValue;
+
+        private Result(bool isOk, TOk okValue, TErr errValue) {
+            IsOk = isOk;
+            OkValue = okValue;
+            ErrValue = errValue;
+        }
+
+        /// What `Ok` and `Err` patterns test, and an `int` for the same reason
+        /// `Option.Tag` is: two arms covering a `bool` between them make C#
+        /// rule the generated match-failure arm unreachable.
+        public int Tag => IsOk ? 1 : 0;
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public static Result<TErr, TOk> Ok(TOk value) => new Result<TErr, TOk>(true, value, default!);
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public static Result<TErr, TOk> Err(TErr error) => new Result<TErr, TOk>(false, default!, error);
+
+        public bool Equals(Result<TErr, TOk> other) =>
+            IsOk == other.IsOk
+            && (IsOk
+                ? EqualityComparer<TOk>.Default.Equals(OkValue, other.OkValue)
+                : EqualityComparer<TErr>.Default.Equals(ErrValue, other.ErrValue));
+
+        public override bool Equals(object? obj) => obj is Result<TErr, TOk> other && Equals(other);
+
+        public override int GetHashCode() =>
+            IsOk ? HashCode.Combine(true, OkValue) : HashCode.Combine(false, ErrValue);
+
+        public override string ToString() => IsOk ? $"(Ok {OkValue})" : $"(Err {ErrValue})";
+    }
+
     // --- Seq (IEnumerable) ---
     //
     // Every one of these that returns a sequence is itself an iterator, so it

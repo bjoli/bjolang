@@ -15,13 +15,14 @@ let makeMapCursorType k v = TCon("MapCursor", [k; v])
 let makeListType a = TCon("List", [a])
 let makeSeqType a = TCon("Seq", [a])
 let makeOptionType a = TCon("Option", [a])
+let makeResultType e a = TCon("Result", [e; a])
 let makeMapType k v = TCon("Map", [k; v])
 let makeArrayType a = TCon("Array", [a])
 
 
 let emptyRegistry : TraitRegistry =
     { LocalTraits = Set.empty
-      LocalTypes = Set.ofList ["List"; "Vec"; "VecBuilder"; "ListBuilder"; "MapBuilder"; "VecCursor"; "MapCursor"; "Seq"; "Option"; "Map"; "Keyword"; "Symbol"; "Array"]
+      LocalTypes = Set.ofList ["List"; "Vec"; "VecBuilder"; "ListBuilder"; "MapBuilder"; "VecCursor"; "MapCursor"; "Seq"; "Option"; "Result"; "Map"; "Keyword"; "Symbol"; "Array"]
       Traits = Map.empty
       TraitMethods = Map.empty
       Implementations = Map.empty
@@ -29,7 +30,9 @@ let emptyRegistry : TraitRegistry =
       InlineMethods = Map.empty
       Aliases = Map.empty
       Records = Map.empty
-      RecordFields = Map.empty }
+      RecordFields = Map.empty
+      ClrClasses = Map.empty
+      ClrExterns = Map.empty }
 
 let prelude : Env =
     { Bindings = Map.ofList [
@@ -169,6 +172,18 @@ let prelude : Env =
         "none?", {Scheme = Scheme(["a"], [], makeFunType [makeOptionType (TVar "a")] boolType); IsMutable = false }
         "option-get", {Scheme = Scheme(["a"], [], makeFunType [makeOptionType (TVar "a")] (TVar "a")); IsMutable = false }
         "option-get-or", {Scheme = Scheme(["a"], [], makeFunType [makeOptionType (TVar "a"); TVar "a"] (TVar "a")); IsMutable = false }
+
+        // Result. Built in for the same reason Option is: a `#:exceptions`
+        // interop call returns one on every invocation, so it cannot be
+        // something each file has to declare for itself.
+        //
+        // Every one of these is shadowed by a `Result` a module declares of its
+        // own — the type definition rebinds `Ok` and `Err`, and both inference
+        // and code generation look at what the module declared before they look
+        // here. Modules that predate this and carry their own Result keep
+        // compiling to their own union, unchanged.
+        "Ok", {Scheme = Scheme(["e"; "a"], [], makeFunType [TVar "a"] (makeResultType (TVar "e") (TVar "a"))); IsMutable = false }
+        "Err", {Scheme = Scheme(["e"; "a"], [], makeFunType [TVar "e"] (makeResultType (TVar "e") (TVar "a"))); IsMutable = false }
 
         // Seq operations. A Seq is lazy: nothing below that returns one does any
         // work until the result is consumed.
