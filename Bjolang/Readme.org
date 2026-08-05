@@ -279,6 +279,29 @@ It also supports subloops. Anything that isn't a for clause followed by a :for c
   (seq-for-each #(println &) all-fibs))
  #+end_src
 
+*** Dotnet interop
+If you want to call c# it is possible:
+
+#+begin_src scheme
+(import/extern
+  (write-line (: System.Console.WriteLine (-> string void)))
+  (concat2 (: System.String.Concat (-> string string string))))
+
+(write-line (concat2 "hej" " hej"))
+
+;; and for classes
+
+
+(import/class
+  (StreamWriter (: System.IO.StreamWriter (-> string StreamWriter))))
+
+(def my-stream (StreamWriter. "a-file"))
+(.Write my-stream "banana")
+(.Flush my-stream)
+(.Dispose my-stream)
+#+end_src
+
+
 * TODO
 
 These are things I found while spelunking:
