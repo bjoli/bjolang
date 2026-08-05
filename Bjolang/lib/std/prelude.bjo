@@ -14,12 +14,6 @@
   ;; Range
   range range-by
 
-  ;; maths
-  abs
-  sqrt
-  ;; min
-  ;; max
-
   print println ->str)
 
 
@@ -311,49 +305,18 @@
 ;; Maths
 ;; ---------------------------------------------------------------------------
 
-;; `System.Math.Abs` is an overload set — one method per numeric type — and an
-;; `import/extern` binds the whole set, resolving it from the argument types at
-;; each call. That is why it cannot be exported directly: a name leaves this
-;; module as a signature, and there is no signature for "whichever overload the
-;; call site turns out to want".
+;; The rest of `System.Math` — the trigonometric, hyperbolic, logarithmic and
+;; rounding functions — stays in `std/maths.bjo` and is had by importing it.
+;; What is re-exported here is the `Num` trait, which is the part general enough
+;; that a program should not have to ask for it.
 ;;
-;; A trait is the shape that does fit. The default body is written once and
-;; checked once per impl, so `(clr-abs x)` resolves to `Abs(int)` under
-;; `(Num int)` and `Abs(double)` under `(Num double)` — the same body, at an
-;; argument type that does not exist until the implementor is known. Each impl
-;; is a direct call to the .NET method with nothing in between; a call at a
-;; known type is devirtualized and inlined back to exactly that.
-;;
-;; `clr-abs` is deliberately not exported: it is the unexported overload set,
-;; and `abs` is the exported name.
-(import/extern
-  (clr-abs    (: System.Math.Abs))
-  (clr-sqrt   (: System.Math.Sqrt)))
+;; A trait travels with its methods, so re-exporting any one of them publishes
+;; `Num` whole: `sign` and `clamp` arrive with `abs`, `min`, `max` and `sqrt`
+;; whether or not they are named here. They are named anyway, since a reader of
+;; this list should see what importing the prelude actually gives them.
+(import (std maths))
 
-;; Only the types `Math.Abs` actually has an overload for. There is no
-;; `Abs(byte)` — an unsigned type has nothing to negate — so `byte` is not a
-;; `Num`, and asking for `(abs some-byte)` says so rather than widening behind
-;; your back.
-(def/trait (Num %a)
-  (: abs (-> %a %a))
-  (defun (abs x) (clr-abs x)))
-
-(def/impl (Num int))
-(def/impl (Num long))
-(def/impl (Num double))
-
-;; Todo: add a min/max that takes rest args. Binary ones would join `Num`
-;; exactly as `abs` did — `(: min (-> %a %a %a))` with `(defun (min a b)
-;; (clr-min a b))` as the default — but a rest-argument version is a plain
-;; function over a `Num`-constrained element type instead, so the choice is
-;; worth making before either is written.
-
-;; `Math.Sqrt` is one method rather than an overload set: there is no integer
-;; square root to pick. So it needs no trait — an ordinary signature says all
-;; there is to say, and an int argument widens to double at the call as it
-;; would in C#.
-(: sqrt (-> double double))
-(defun (sqrt x) (clr-sqrt x))
+(re-export abs sign min max clamp sqrt)
 
 ;; ;; String operations
 ;; (import/extern 

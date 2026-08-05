@@ -115,7 +115,7 @@ this one.
 
 An alias is *also* published when an exported body names one — an inline
 template, or a trait default. Those are published under a mangled name
-(~clr_import__prelude__clr-abs~) and the body is rewritten to match, because a
+(~clr_import__maths__clr-abs~) and the body is rewritten to match, because a
 body is re-inferred where it is spliced: under its own name, a definition of it
 in the importing module would silently take over the meaning of the library's
 method. An alias exported deliberately keeps its own name, since that name is

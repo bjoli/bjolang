@@ -1,10 +1,11 @@
 ;; A foreign import named by an exported body is published so the body can be
 ;; spliced here — but never under the name it was written with.
 ;;
-;; The prelude's `Num` default is `(defun (abs x) (clr-abs x))`, and a spliced
+;; `std/maths`'s `Num` default is `(defun (abs x) (clr-abs x))`, and a spliced
 ;; template is re-inferred in *this* module's scope. Published as `clr-abs`, the
-;; definition below would silently become the meaning of the prelude's `abs`.
-;; It is published under a mangled name instead, so the two cannot meet.
+;; definition below would silently become the meaning of that `abs`. It is
+;; published under a mangled name instead, so the two cannot meet.
+(import (std maths))
 (import (std prelude))
 
 (: expect (-> string string string void))
@@ -15,7 +16,7 @@
                 (string-append " gave " (string-append actual
                 (string-append " but wanted " wanted))))))))
 
-;; The same name the prelude's default body uses internally.
+;; The same name that default body uses internally.
 (: clr-abs (-> int int))
 (defun (clr-abs x) 99)
 
