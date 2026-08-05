@@ -292,9 +292,37 @@ error in generated code. There is no late binding, and no ~dynamic~.
 
 The name before the colon is what Bjolang calls it; the fully qualified target
 follows. The signature is optional — it is *checked* against the overload
-reflection selects rather than used in place of it — but it is required to use
-the import as a value, since a .NET method group is not one and a first-class
+selected by reflection rather than used in place of it — but it is required to
+use the import as a value, since a .NET method group is not one and a first-class
 use has to be eta-expanded into a lambda.
+
+**** Which overload a call means
+Candidates are ranked by how well each argument fits, and the best-fitting one
+wins: an exact match beats a numeric widening, which beats a reference upcast,
+which beats a box. So ~(.Write w 42)~ is ~Write(int)~ rather than ~Write(long)~
+or ~Write(object)~, all three of which would take an int.
+
+An argument that fits only by conversion is *converted*, and the conversion is
+emitted — ~(sin 1)~ compiles to ~Math.Sin((double)(1))~. It is written out
+rather than left to the C# that reads the generated code, because that code
+names the method and its arguments and so resolves the overload a second time:
+the cast is what keeps the second answer equal to the first, which is the one
+the call was typed against.
+
+An argument whose type is *not yet known* is treated the other way round. It
+does not disqualify a candidate, but it ranks below every real fit, so anything
+that genuinely matches wins; and the parameter type of whatever was selected is
+then unified into it. This is what makes reflection able to *settle* a type
+rather than only check one:
+
+#+BEGIN_SRC scheme
+;; `n` is an int, because `Max(int, int)` is what `0` selected.
+(def at-least-zero (fun (n) (clr-max n 0)))
+#+END_SRC
+
+An argument that fits no candidate at all is an error naming the candidates,
+and an argument fitting two of them equally well is an ambiguity — both at the
+Bjolang source position of the call.
 
 *** ~import/class~ — classes and constructors
 #+BEGIN_SRC scheme

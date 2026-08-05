@@ -832,8 +832,65 @@ let private receiverClrType (where: string) (form: string) (targetType: HMType) 
 /// This is what makes reflection *drive* inference rather than merely check it:
 /// an argument whose type was still open is pinned to the parameter type of the
 /// overload that was selected.
+///
+/// Only sound where every argument is expected to match a parameter *exactly*,
+/// which is true of the one caller left: a declared `import/extern` signature,
+/// checked against the overload reflection chose for it. A call site goes
+/// through `reconcileForeignArgs` instead, an argument there being allowed to
+/// fit by conversion.
 let private unifyForeignArgs (registry: TraitRegistry) (argTypes: HMType list) (paramTypes: HMType list) =
     List.iter2 (unify registry) argTypes paramTypes
+
+/// Reconciles the arguments of a foreign call with the parameters of the
+/// overload that was selected for it, one argument at a time.
+///
+/// `DotNetInterop.scoreArgument` accepts an argument that fits by an implicit
+/// conversion — a numeric widening, a reference upcast, a box — and ranks it
+/// below an exact match so that an exact one always wins. Unifying every
+/// argument against its parameter afterwards threw that away: unification is
+/// nominal equality, Bjolang having no subtyping, so an `int` argument reaching
+/// a `double` parameter failed with a diagnostic naming a type the caller never
+/// wrote. Widenings were selectable and then unusable, and `(sin 1)` was an
+/// error while `(sin 1.0)` was not.
+///
+/// So the two cases are now told apart:
+///
+///   * An argument whose type is still **open** is unified, exactly as before.
+///     That is the case the docstring above describes and the one that lets
+///     reflection settle a type inference has not.
+///
+///   * An argument whose type is **known** is left alone, and converted where
+///     it differs. Nothing is being weakened: the overload was chosen because
+///     the argument fits by C#'s own conversion rules, and one that fits no
+///     way at all was rejected as a candidate before ever getting here.
+///
+/// The conversion is *written into the tree* rather than left to the C# that
+/// eventually reads it. It has to be. The code generator emits a foreign call
+/// as its receiver, its name and its arguments, so C# resolves the overload a
+/// second time from what it is given — and a call this pass typed by one
+/// overload's return type must not be free to land on another's. `((double)(x))`
+/// pins it to the method that was actually chosen.
+let private reconcileForeignArgs
+    (registry: TraitRegistry)
+    (typedArgs: TypedExpr list)
+    (paramTypes: HMType list)
+    : TypedExpr list =
+    List.map2
+        (fun (arg: TypedExpr) paramType ->
+            let argType = prune registry arg.Type
+            let paramType = prune registry paramType
+
+            if not (List.isEmpty (freeVars registry argType)) then
+                unify registry argType paramType
+                arg
+            elif argType = paramType then
+                arg
+            else
+                { arg with
+                    Type = paramType
+                    Node = TCast(arg, paramType) })
+        typedArgs
+        paramTypes
 
 let private metadataOf (resolved: DotNetInterop.ResolvedCall) (exceptions: string list) : DotNetMethodMetadata =
     { DeclaringType = resolved.DeclaringType
@@ -1106,7 +1163,9 @@ let rec infer (env: Env) (expr: Expr) : HMType * TypedExpr =
             let argTypes = typedArgs |> List.map fst
 
             let resolved = DotNetInterop.resolveInstanceMethod where clrTarget methodName argTypes
-            unifyForeignArgs env.Registry argTypes resolved.ParameterTypes
+
+            let coercedArgs =
+                reconcileForeignArgs env.Registry (typedArgs |> List.map snd) resolved.ParameterTypes
 
             // Never exception-wrapped: `import/class` declares one signature —
             // the constructor's — so there is nowhere to say what a method may
@@ -1117,7 +1176,7 @@ let rec infer (env: Env) (expr: Expr) : HMType * TypedExpr =
             retType,
             { Type = retType
               Range = r
-              Node = TDotMethodCall(typedTarget, methodName, typedArgs |> List.map snd, Some(metadataOf resolved [])) }
+              Node = TDotMethodCall(typedTarget, methodName, coercedArgs, Some(metadataOf resolved [])) }
 
     // `(ClassName. args...)` — construction.
     | EApp(EIdent(name, _), args, r) when
@@ -1134,7 +1193,9 @@ let rec infer (env: Env) (expr: Expr) : HMType * TypedExpr =
         let argTypes = typedArgs |> List.map fst
 
         let resolved = DotNetInterop.resolveConstructor where clrType argTypes
-        unifyForeignArgs env.Registry argTypes resolved.ParameterTypes
+
+        let coercedArgs =
+            reconcileForeignArgs env.Registry (typedArgs |> List.map snd) resolved.ParameterTypes
 
         // The declared signature is enforced against the overload reflection
         // chose, rather than used in place of it. Writing one down is how a
@@ -1155,7 +1216,7 @@ let rec infer (env: Env) (expr: Expr) : HMType * TypedExpr =
         retType,
         { Type = retType
           Range = r
-          Node = TNewObject(resolved.DeclaringType, typedArgs |> List.map snd, Some meta) }
+          Node = TNewObject(resolved.DeclaringType, coercedArgs, Some meta) }
 
     // A static method named by `import/extern`, applied. As above, a binding of
     // the same name shadows the alias rather than the other way round.
@@ -1170,7 +1231,9 @@ let rec infer (env: Env) (expr: Expr) : HMType * TypedExpr =
         let argTypes = typedArgs |> List.map fst
 
         let resolved = DotNetInterop.resolveStaticMethod where clrType info.MethodName argTypes
-        unifyForeignArgs env.Registry argTypes resolved.ParameterTypes
+
+        let coercedArgs =
+            reconcileForeignArgs env.Registry (typedArgs |> List.map snd) resolved.ParameterTypes
 
         match info.DeclaredType with
         | Some declared -> unify env.Registry declared (TFun(resolved.ParameterTypes, resolved.ReturnType))
@@ -1185,7 +1248,7 @@ let rec infer (env: Env) (expr: Expr) : HMType * TypedExpr =
             TForeignStaticCall(
                 resolved.DeclaringType,
                 info.MethodName,
-                typedArgs |> List.map snd,
+                coercedArgs,
                 Some(metadataOf resolved info.Exceptions)
             ) }
 

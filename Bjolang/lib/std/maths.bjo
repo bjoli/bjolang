@@ -64,11 +64,9 @@
   (defun (min a b) (clr-min a b))
   (defun (max a b) (clr-max a b))
   (defun (clamp x lo hi) (clr-clamp x lo hi))
-  ;; `Sqrt` is the one overload there is, so the integer implementors convert.
-  ;; The cast is written rather than left implicit: overload resolution accepts
-  ;; a widening argument, but the parameter type is then unified into the
-  ;; argument, so an int reaching a double parameter has to say so.
-  (defun (sqrt x) (clr-sqrt (cast double x))))
+  ;; `Sqrt` is the one overload there is, so the integer implementors widen to
+  ;; it — the same conversion C# would perform, and emitted as one.
+  (defun (sqrt x) (clr-sqrt x)))
 
 ;; The signed types, and only those: `Math.Abs` and `Math.Sign` have no unsigned
 ;; overload, an unsigned type having neither a sign to report nor anything to
