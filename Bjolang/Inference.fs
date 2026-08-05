@@ -1219,20 +1219,39 @@ let rec infer (env: Env) (expr: Expr) : HMType * TypedExpr =
             let restArgs = positionalArgs |> List.skip (min positionalArgs.Length meta.MandatoryCount)
 
             // Build the flat arg types for unification (mandatory + keyword in decl order + rest array)
+            //
+            // Each keyword and rest slot gets a *fresh* metavariable rather than
+            // the type recorded in `FunMeta`. The recorded type came from the
+            // declaration and still carries that declaration's rigid `TVar`s, so
+            // unifying an argument against it directly is what used to make
+            // `(: f (-> #:rest %a %a))` unusable: the first call tried to unify
+            // `int` with `'a` itself instead of with a fresh instance of it.
+            //
+            // The flat unification against `targetType` below is what gives
+            // these slots their real types. `targetType` came from `infer`, which
+            // instantiates the scheme, so its parameters are already fresh per
+            // call site. `FunMeta` is then consulted only for the call's *shape*
+            // — how many mandatory parameters there are, which keywords exist,
+            // and whether there is a rest parameter at all.
             let kwArgTypes =
-                meta.KeywordParams |> List.map (fun (kwName, kwType) ->
+                meta.KeywordParams |> List.map (fun (kwName, _) ->
+                    let slot = freshMeta ()
+
                     match keywordArgs |> List.tryFind (fun (n, _) -> n = kwName) with
-                    | Some (_, (valType, _)) ->
-                        unify env.Registry valType kwType
-                        kwType
-                    | None -> kwType)  // keyword not provided, will use default
+                    | Some (_, (valType, _)) -> unify env.Registry valType slot
+                    | None -> ()  // keyword not provided, will use default
+
+                    slot)
 
             let restArgTypes =
                 match meta.RestParam with
-                | Some elemType ->
+                | Some _ ->
+                    let elemSlot = freshMeta ()
+
                     for (rt, _) in restArgs do
-                        unify env.Registry rt elemType
-                    [TCon("Array", [elemType])]
+                        unify env.Registry rt elemSlot
+
+                    [TCon("Array", [elemSlot])]
                 | None ->
                     if not restArgs.IsEmpty then
                         failwithf $"Too many arguments at line %d{r.Start.Line}"
