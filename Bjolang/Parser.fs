@@ -56,6 +56,8 @@ type Pattern =
     | PIdent of string * Range
     | PInt of string * Range
     | PString of string * Range
+    /// A Unicode scalar value. See `Lexer.CharLit`.
+    | PChar of int * Range
     | PKeyword of string * Range
     | PQuotedSymbol of string * Range
     | PList of Pattern list * Pattern option * Range // (items, optional tail, range)
@@ -74,6 +76,8 @@ type Pattern =
 and Expr =
     | EInt of string * Range
     | EString of string * Range
+    /// A Unicode scalar value. See `Lexer.CharLit`.
+    | EChar of int * Range
     | EQuotedSymbol of string * Range
     | EKeyword of string * Range
     | EIdent of string * Range
@@ -234,6 +238,7 @@ let rec parsePattern (s: SExpr) : Pattern =
     | SAtom { Token = NumberLit n } -> PInt(n, r)
     | SAtom { Token = StringLit str } -> PString(str, r)
     | SAtom { Token = Keyword kw } -> PKeyword(kw, r)
+    | SAtom { Token = CharLit c } -> PChar(c, r)
     | SAtom { Token = QuotedSymbol sym } -> PQuotedSymbol(sym, r)
 
     // `(:is Some.Clr.Type)` and `(:is Some.Clr.Type binder)`.
@@ -453,6 +458,7 @@ let exprRange (e: Expr) : Range =
     match e with
     | EInt(_, r)
     | EString(_, r)
+    | EChar(_, r)
     | EQuotedSymbol(_, r)
     | EKeyword(_, r)
     | EIdent(_, r)
@@ -488,6 +494,7 @@ let exprChildren (e: Expr) : Expr list =
     match e with
     | EInt _
     | EString _
+    | EChar _
     | EQuotedSymbol _
     | EKeyword _
     | EIdent _ -> []
@@ -704,6 +711,7 @@ let rec parseExpr (s: SExpr) : Expr =
     match s with
     | SAtom { Token = NumberLit n } -> EInt(n, r)
     | SAtom { Token = StringLit str } -> EString(str, r)
+    | SAtom { Token = CharLit c } -> EChar(c, r)
     | SAtom { Token = QuotedSymbol sym } -> EQuotedSymbol(sym, r)
     | SAtom { Token = Keyword sym } -> EKeyword(sym, r)
     | Ident sym -> EIdent(sym, r)

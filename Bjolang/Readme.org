@@ -301,6 +301,22 @@ If you want to call c# it is possible:
 (.Dispose my-stream)
 #+end_src
 
+*** Constructorless DSLs
+
+Lists, quasiquoted lists and vectors do not need constructors in some circumstances, giving us nice small DSLs, like the (run ...) function DSL:
+
+#+begin_src scheme
+
+(:stream-rot13 (-> InputPort OutputPort Void))
+;; implementation left as an exercise for the reader
+
+(run/strings '(pipe (cat "encrypted-file.txt") ,stream-rot13 (grep "bomb")))
+;; Without the constructor insertions it would be:
+(run/strings (ProcList (ProcSym 'pipe)
+               (ProcList (ProcSym 'cat) (ProcString "encrypted-file.txt"))
+               (ProcProc stream-rot13)
+               (ProcList (ProcSym 'grep) (ProcString "bomb")))))
+#+end_src
 
 * TODO
 
@@ -323,7 +339,14 @@ These are things I found while spelunking:
   #+end_src
 
 ** Things I need in the standard library
-Integrate the BjoChar character in the compiler, making string-ref and all other string operations work on this type. This is probably a larger problem than it seems, since it is _NOT_ the same as a c# char. It is not 16 bit (WHY IN THE NAME OF ALL THINGS HOLY, C#!).
+DONE Integrate the BjoChar character in the compiler. Literals =#\a=, named
+characters, =#\xNN= hex escapes and astral codepoints all lex to a 32-bit
+scalar value; =char= is a type, patterns match on it, and =char->int=,
+=int->char= and =char->string= convert. Covered by =67_char.bjo=.
+
+Deliberately *not* done: =string-ref= and other index-based string operations.
+Indexing a UTF-16 string by codepoint is O(n), so a loop that looks linear is
+quadratic — string traversal belongs to a cursor.
 
 typed string interpolation
 
@@ -368,3 +391,14 @@ comprehensions based on loop. This is simple. I should do it now (early august 2
 Extend do notation to be more usable. :match :traverse :and<- (seems _very hard_ atm).
 
 (with-return ...) that allows for (return ...). Disallowed in loops and seq. 
+
+
+** Things to fix:
+
+Naming a local variable list, will produce local shadowing and a c# exception. I need to hook in the alpharenamer.
+
+'(1 2 3) and (list 1 2 3) produces different code.
+
+[1 2 3 4] should codegen an array that is put directly into the tail, or split and inserted in chunks of 32. 
+
+

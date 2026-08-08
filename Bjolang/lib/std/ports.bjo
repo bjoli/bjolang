@@ -1,0 +1,161 @@
+;; std/ports.bjo
+;;
+;; Textual ports, in the R7RS shape, adapted to a statically typed language.
+;;
+;; **A port is the .NET object.** `System.IO.TextReader` is already the
+;; abstraction over "file, string, or console input", so it is imported here
+;; *as* `TextInputPort` and no wrapper is invented. Two things fall out of that:
+;; `with-open` works on a port unchanged, because every one of these is
+;; `IDisposable`; and `peek` needs no pushback buffer, because `TextReader`
+;; already has one.
+;;
+;; **Concrete readers are upcast at the door.** Hindley–Milner has no
+;; subtyping, so a `StreamReader` does not unify with a `TextInputPort` — and
+;; declaring an extern's return type as the base class is *rejected*, not
+;; silently widened. `cast` is what bridges it, and it happens inside the
+;; `open-*` functions so that a file port and a string port really are the same
+;; type to every caller.
+;;
+;; **Input and output are separate types**, and so are text and binary. R7RS
+;; has one `port?` and finds out at runtime that you read a byte from a textual
+;; port; here that is a type error, which is most of why `input-port?` and
+;; friends do not exist.
+;;
+;; **Opening returns `Result`; operating throws.** A missing file is expected
+;; and the caller has something to do about it. A mid-stream device error is
+;; not, and threading a `Result` through every read would poison the whole API
+;; for a case nobody handles.
+;;
+;; **EOF is `Option`, for lines.** A per-line allocation is free next to the
+;; line's own; a per-*character* one would not be, so character-level reading
+;; (still to come) will use the `port-eof?` check instead. Note that .NET's
+;; `ReadLine` returns null at end of input, which is why `read-line` asks
+;; `port-eof?` first rather than trying to detect it afterwards — Bjolang has
+;; no null to test against.
+
+(export
+  ;; Opening
+  open-input-file open-input-string open-output-file
+  ;; Closing
+  close-input-port close-output-port flush-port
+  ;; Input
+  port-eof? read-line read-all
+  ;; Output
+  write-string write-line)
+
+(import (std prelude))
+
+(import/class
+  ;; The port types themselves: abstract, so no constructor.
+  (TextReader (: System.IO.TextReader))
+  (TextWriter (: System.IO.TextWriter))
+
+  ;; The concrete readers and writers, upcast into the above by `open-*`.
+  ;;
+  ;; `StreamReader` and `StreamWriter` name the failures that are worth having
+  ;; as values. Anything not listed keeps unwinding, which is the point: an
+  ;; exception nobody named is a bug rather than a result.
+  (StreamReader (: System.IO.StreamReader (-> string StreamReader)
+                   #:exceptions (System.IO.FileNotFoundException
+                                 System.IO.DirectoryNotFoundException
+                                 System.UnauthorizedAccessException)))
+  (StringReader (: System.IO.StringReader (-> string StringReader)))
+  (StreamWriter (: System.IO.StreamWriter (-> string StreamWriter)
+                   #:exceptions (System.IO.DirectoryNotFoundException
+                                 System.UnauthorizedAccessException)))
+  (Exception (: System.Exception)))
+
+;; The port types, under their own names.
+;;
+;; An `import/class` alias is module-local — there is no mechanism to publish
+;; one — so importing `System.IO.TextReader` as `TextInputPort` would leave
+;; every caller unable to write the type. A type alias *is* exported, so the
+;; name travels and callers never have to know which .NET class is underneath.
+;; Written as the fully qualified .NET name rather than as the `import/class`
+;; alias above: an exported alias is serialized as whatever it points *at*, so
+;; pointing it at another module-local alias exports a name the caller cannot
+;; resolve either.
+(type
+  (: TextInputPort System.IO.TextReader)
+  (: TextOutputPort System.IO.TextWriter))
+
+;; ---------------------------------------------------------------------------
+;; Opening
+;; ---------------------------------------------------------------------------
+
+;; Open a file for text input. `Err` carries the .NET exception, so an arm may
+;; tell one failure from another with `(:is System.IO.FileNotFoundException e)`.
+(: open-input-file (-> string (Result Exception TextInputPort)))
+(defun (open-input-file path)
+  (match (StreamReader. path)
+    ((Ok r) (Ok (cast TextInputPort r)))
+    ((Err e) (Err e))))
+
+;; A string as an input port. Cannot fail, so no `Result` — the asymmetry with
+;; `open-input-file` is the honest one.
+(: open-input-string (-> string TextInputPort))
+(defun (open-input-string contents)
+  (cast TextInputPort (StringReader. contents)))
+
+;; Open a file for text output, truncating it if it exists.
+(: open-output-file (-> string (Result Exception TextOutputPort)))
+(defun (open-output-file path)
+  (match (StreamWriter. path)
+    ((Ok w) (Ok (cast TextOutputPort w)))
+    ((Err e) (Err e))))
+
+;; ---------------------------------------------------------------------------
+;; Closing
+;; ---------------------------------------------------------------------------
+
+;; Explicit closing is rarely needed: `with-open` disposes a port however the
+;; body ends, and that is the form to reach for.
+;;
+;; Two functions rather than one generic `close-port`, because `.Dispose` needs
+;; a concrete .NET receiver and Hindley–Milner has no bound to say "any port".
+;; The alternative — one function typed `System.IDisposable` — only moves the
+;; problem to a cast at every call site.
+(: close-input-port (-> TextInputPort void))
+(defun (close-input-port p) (.Dispose p))
+
+(: close-output-port (-> TextOutputPort void))
+(defun (close-output-port p) (.Dispose p))
+
+(: flush-port (-> TextOutputPort void))
+(defun (flush-port p) (.Flush p))
+
+;; ---------------------------------------------------------------------------
+;; Input
+;; ---------------------------------------------------------------------------
+
+;; Whether the port has no more input. `Peek` reports -1 at end of input
+;; without consuming anything.
+(: port-eof? (-> TextInputPort bool))
+(defun (port-eof? p) (= (.Peek p) -1))
+
+;; The next line, or `None` at end of input. The newline is not included.
+;;
+;; Guarded by `port-eof?` rather than checking the result: .NET returns null
+;; here at end of input, and Bjolang has no null to compare against, so an
+;; unguarded call would hand a null string to the rest of the program.
+(: read-line (-> TextInputPort (Option string)))
+(defun (read-line p)
+  (if (port-eof? p)
+      None
+      (Some (.ReadLine p))))
+
+;; Everything remaining, as one string. Empty at end of input, which needs no
+;; `Option`: there is no difference between "no more input" and "the empty
+;; remainder" once the whole rest is what you asked for.
+(: read-all (-> TextInputPort string))
+(defun (read-all p) (.ReadToEnd p))
+
+;; ---------------------------------------------------------------------------
+;; Output
+;; ---------------------------------------------------------------------------
+
+(: write-string (-> TextOutputPort string void))
+(defun (write-string p s) (.Write p s))
+
+(: write-line (-> TextOutputPort string void))
+(defun (write-line p s) (.WriteLine p s))

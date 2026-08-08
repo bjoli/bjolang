@@ -105,6 +105,21 @@ public static class BjolangRuntime {
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static int div(int a, int b) => a / b;
     
+    // --- Characters ---
+    //
+    // A BjoChar is a Unicode scalar value, not a UTF-16 code unit, so these
+    // convert against the codepoint. There is deliberately no string indexing
+    // operation here: indexing a UTF-16 string by codepoint is O(n) and invites
+    // exactly the O(n^2) loop it looks like it avoids. Cursors are the answer.
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static int charsubgtint(Bjolang.Runtime.BjoChar c) => (int)c.Value;
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static Bjolang.Runtime.BjoChar intsubgtchar(int i) => new Bjolang.Runtime.BjoChar((uint)i);
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static string charsubgtstring(Bjolang.Runtime.BjoChar c) => c.ToString();
+
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static string bytesubgtstring(byte b) => b.ToString();
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -528,6 +543,16 @@ public static class BjolangRuntime {
     }
 
     // --- List (SchemeList) Wrappers ---
+
+    // The variadic list constructor. A direct `(list 1 2 3)` never reaches this
+    // — inference rewrites a saturated direct call into the same TListMake node
+    // a quoted literal produces, so both spellings emit one nested Cons chain.
+    // This exists for the value-position use, `(def f list)`, where there is no
+    // call site to rewrite and `list` is the ordinary unary Array -> List
+    // function its signature says it is.
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static SchemeList.SchemeList<T> list<T>(params T[] items) => SchemeList.SchemeList.Create<T>(items);
+
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static SchemeList.SchemeList<T> listsubempty<T>() => SchemeList.SchemeList.Empty<T>();
 

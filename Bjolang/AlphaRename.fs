@@ -49,6 +49,7 @@ let rec patternBinders (pat: Pattern) : string list =
     | PWildcard _
     | PInt _
     | PString _
+    | PChar _
     | PKeyword _
     | PQuotedSymbol _ -> []
     | PIdent(n, _) -> [ n ]
@@ -104,6 +105,7 @@ let private renameWith
         match e with
         | EInt _
         | EString _
+        | EChar _
         | EQuotedSymbol _
         | EKeyword _ -> e
         | EIdent(n, r) -> EIdent(reference n, r)
@@ -219,6 +221,7 @@ let freeNames (bound: Set<string>) (expr: Expr) : Set<string> =
         match e with
         | EInt _
         | EString _
+        | EChar _
         | EQuotedSymbol _
         | EKeyword _ -> ()
         | EIdent(n, _) -> reference n
@@ -299,6 +302,7 @@ let rec private typedPatternBinders (pat: TypedPattern) : string list =
     | TPWildcard
     | TPInt _
     | TPString _
+    | TPChar _
     | TPKeyword _
     | TPSymbol _ -> []
     | TPIdent n -> [ n ]

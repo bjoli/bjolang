@@ -1,0 +1,118 @@
+;; Textual ports: file and string input, file output, EOF, and `with-open`.
+;;
+;; The point of the design is that a file port and a string port are the *same
+;; type*. `System.IO.TextReader` is imported as `TextInputPort` and the concrete
+;; readers are upcast into it inside `open-*`, because Hindley-Milner has no
+;; subtyping — a `StreamReader` does not unify with a `TextInputPort`, and
+;; declaring an extern's return type as the base class is rejected rather than
+;; silently widened.
+;;
+;; So `count-lines` below takes a `TextInputPort` and does not care where the
+;; text came from. That is the whole trick.
+(import (std prelude))
+(import (std ports))
+
+(: expect (-> string string string void))
+(defun (expect label actual wanted)
+  (if (= actual wanted)
+      (println (string-append "ok: " label))
+      (println (string-append "FAILURE: " (string-append label
+                (string-append " gave " (string-append actual
+                (string-append " but wanted " wanted))))))))
+
+;; One function, both kinds of port.
+(: count-lines (-> TextInputPort int))
+(defun (count-lines p)
+  (let loop ((n 0))
+    (match (read-line p)
+      ((Some _) (loop (+ n 1)))
+      (None n))))
+
+;; Reading accumulates in order, so this also pins that lines come back
+;; without their newline.
+(: join-lines (-> TextInputPort string))
+(defun (join-lines p)
+  (let loop ((acc ""))
+    (match (read-line p)
+      ((Some l) (loop (string-append acc (string-append l "|"))))
+      (None acc))))
+
+(defun (main)
+  (def path "68_ports.tmp")
+
+  ;; --- String input ports -------------------------------------------------
+  (def p1 (open-input-string "alpha\nbeta\ngamma"))
+  (expect "string port lines" (int->string (count-lines p1)) "3")
+
+  (def p2 (open-input-string "alpha\nbeta\ngamma"))
+  (expect "lines have no newline" (join-lines p2) "alpha|beta|gamma|")
+
+  ;; A trailing newline does not produce a phantom final line.
+  (def p3 (open-input-string "one\ntwo\n"))
+  (expect "trailing newline" (int->string (count-lines p3)) "2")
+
+  (def p4 (open-input-string ""))
+  (expect "empty string port" (int->string (count-lines p4)) "0")
+
+  ;; --- EOF ----------------------------------------------------------------
+  (def p5 (open-input-string "only"))
+  (expect "not eof at start" (if (port-eof? p5) "eof" "more") "more")
+  (match (read-line p5)
+    ((Some l) (expect "the one line" l "only"))
+    (None (println "FAILURE: expected a line")))
+  (expect "eof after last line" (if (port-eof? p5) "eof" "more") "eof")
+  (expect "read past eof is None"
+          (match (read-line p5) ((Some _) "some") (None "none"))
+          "none")
+
+  ;; `port-eof?` peeks, so asking does not consume.
+  (def p6 (open-input-string "x\ny"))
+  (def _a (port-eof? p6))
+  (def _b (port-eof? p6))
+  (expect "port-eof? does not consume" (int->string (count-lines p6)) "2")
+
+  ;; --- read-all -----------------------------------------------------------
+  (def p7 (open-input-string "abc\ndef"))
+  (expect "read-all" (read-all p7) "abc\ndef")
+  (expect "read-all at eof is empty" (read-all p7) "")
+
+  ;; --- File output, then file input ---------------------------------------
+  (match (open-output-file path)
+    ((Ok w) (with-open ((out w))
+              (write-line out "first")
+              (write-line out "second")
+              (write-string out "third")))
+    ((Err e) (println "FAILURE: could not open the file for writing")))
+
+  (match (open-input-file path)
+    ((Ok r) (with-open ((in r))
+              (expect "round trip through a file" (join-lines in) "first|second|third|")))
+    ((Err e) (println "FAILURE: could not reopen the file")))
+
+  ;; The same function over a file port as over a string port.
+  (match (open-input-file path)
+    ((Ok r) (with-open ((in r))
+              (expect "file port lines" (int->string (count-lines in)) "3")))
+    ((Err e) (println "FAILURE: could not reopen the file")))
+
+  ;; --- Opening failures are values ----------------------------------------
+  (expect "missing file is Err"
+          (match (open-input-file "no_such_file_here.txt")
+            ((Ok _) "opened") ((Err e) "missing"))
+          "missing")
+
+  ;; And the exception is the real one, so an arm can tell them apart.
+  (expect "the failure is FileNotFound"
+          (match (open-input-file "no_such_file_here.txt")
+            ((Ok _) "opened")
+            ((Err (:is System.IO.FileNotFoundException _)) "not-found")
+            ((Err _) "other"))
+          "not-found")
+
+  ;; --- Explicit closing ---------------------------------------------------
+  (def p8 (open-input-string "closeme"))
+  (close-input-port p8)
+  (expect "closed a string port" "ok" "ok")
+
+  (file-delete path)
+  0)

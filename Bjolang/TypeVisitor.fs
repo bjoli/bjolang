@@ -21,6 +21,7 @@ let mapPatternChildrenWith (f: TypedExpr -> TypedExpr) (fp: TypedPattern -> Type
         | TPWildcard
         | TPInt _
         | TPString _
+        | TPChar _
         | TPKeyword _
         | TPSymbol _
         | TPIdent _ as leaf -> leaf
@@ -52,6 +53,7 @@ let mapChildren (f: TypedExpr -> TypedExpr) (expr: TypedExpr) : TypedExpr =
         // Leaves
         | TInt _
         | TString _
+        | TChar _
         | TIdent _
         | TKeyword _
         | TSymbol _ as leaf -> leaf

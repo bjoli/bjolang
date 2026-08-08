@@ -31,6 +31,7 @@ let emptyRegistry : TraitRegistry =
       Aliases = Map.empty
       Records = Map.empty
       RecordFields = Map.empty
+      Unions = Map.empty
       ClrClasses = Map.empty
       ClrExterns = Map.empty }
 
@@ -116,10 +117,26 @@ let prelude : Env =
         "string->keyword", {Scheme = Scheme([], [], makeFunType [stringType] keywordType); IsMutable = false }
         "symbol->string", {Scheme = Scheme([], [], makeFunType [symbolType] stringType); IsMutable = false }
         "string->symbol", {Scheme = Scheme([], [], makeFunType [stringType] symbolType); IsMutable = false }
+        // Characters. A `char` is a Unicode scalar value, so `char->int` is a
+        // codepoint rather than a UTF-16 code unit.
+        //
+        // No `string-ref`, and no other index-based accessor: indexing a
+        // UTF-16 string by codepoint is O(n), so an innocent-looking loop over
+        // indices is quadratic. String traversal belongs to a cursor.
+        "char->int", {Scheme = Scheme([], [], makeFunType [charType] intType); IsMutable = false }
+        "int->char", {Scheme = Scheme([], [], makeFunType [intType] charType); IsMutable = false }
+        "char->string", {Scheme = Scheme([], [], makeFunType [charType] stringType); IsMutable = false }
+
         "keyword?", {Scheme = Scheme(["a"], [], makeFunType [TVar "a"] boolType); IsMutable = false }
         "symbol?", {Scheme = Scheme(["a"], [], makeFunType [TVar "a"] boolType); IsMutable = false }
 
         // List constructors (builtins backed by SchemeList)
+        //
+        // `list` is variadic through its `FunMeta` below, so `(list 1 2 3)`
+        // spreads like any other `#:rest` function. Its *type* is the unary
+        // `(-> (Array %a) (List %a))` that `#:rest` always resolves to, which is
+        // what it means as a value: `(def f list)` binds the array form.
+        "list", {Scheme = Scheme(["a"], [], makeFunType [makeArrayType (TVar "a")] (makeListType (TVar "a"))); IsMutable = false }
         "Cons", {Scheme = Scheme(["a"], [], makeFunType [TVar "a"; makeListType (TVar "a")] (makeListType (TVar "a"))); IsMutable = false }
         "Nil", {Scheme = Scheme(["a"], [], makeListType (TVar "a")); IsMutable = false }
         "cons", {Scheme = Scheme(["a"], [], makeFunType [TVar "a"; makeListType (TVar "a")] (makeListType (TVar "a"))); IsMutable = false }
@@ -303,5 +320,11 @@ let prelude : Env =
       Registry = emptyRegistry
       FunMetas = Map.ofList [
           ("path-combine", { MandatoryCount = 0; KeywordParams = []; RestParam = Some stringType })
+          // The recorded element type is the declaration's own rigid variable.
+          // That is fine: the call site unifies each rest slot against a *fresh*
+          // meta and lets the flat unification against the instantiated function
+          // type supply the real one, so `FunMeta` is consulted only for the
+          // call's shape. See the comment in `infer`'s structured-call branch.
+          ("list", { MandatoryCount = 0; KeywordParams = []; RestParam = Some (TVar "a") })
       ]
       CurrentModule = "" }

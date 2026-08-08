@@ -9,5 +9,7 @@ echo "Building standard library..."
 # second time into `prelude` itself.
 dotnet run --lib lib/std/maths.bjo
 dotnet run --lib lib/std/prelude.bjo
+# `ports` imports `prelude`, so it comes last for the same reason.
+dotnet run --lib lib/std/ports.bjo
 
 echo "Standard library built successfully!"

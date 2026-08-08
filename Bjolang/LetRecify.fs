@@ -19,6 +19,7 @@ let rec patternBoundNames (pat: Pattern) : string list =
     | PTypeTest(_, binder, _) -> Option.toList binder
     | PInt _
     | PString _
+    | PChar _
     | PKeyword _
     | PQuotedSymbol _ -> []
     | PList(items, tail, _)
@@ -38,6 +39,7 @@ let rec exprFreeVars (isGuarded: bool) (bound: Set<string>) (expr: Expr) : Map<s
     match expr with
     | EInt _
     | EString _
+    | EChar _
     | EQuotedSymbol _
     | EKeyword _ -> Map.empty
     | EIdent(name, _) ->
@@ -227,6 +229,7 @@ let rec letrecifyExpr (expr: Expr) : Expr =
     match expr with
     | EInt _
     | EString _
+    | EChar _
     | EQuotedSymbol _
     | EKeyword _
     | EIdent _ -> expr

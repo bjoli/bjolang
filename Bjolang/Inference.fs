@@ -150,6 +150,13 @@ let rec checkPattern (env: Env) (expectedType: HMType) (pat: Pattern) : TypedPat
           Range = r
           Node = TPString value },
         Map.empty
+    | PChar(value, r) ->
+        unify env.Registry expectedType TypeConstants.charType
+
+        { Type = TypeConstants.charType
+          Range = r
+          Node = TPChar value },
+        Map.empty
     | PKeyword(value, r) ->
         unify env.Registry expectedType TypeConstants.keywordType
 
@@ -313,6 +320,9 @@ let private typeNameMap =
         "string", TypeConstants.stringType
         "bool", TypeConstants.boolType
         "void", TypeConstants.voidType
+        // Lowercase, like the other primitives. `Char` is the canonical name
+        // the type carries internally, but a signature spells it `char`.
+        "char", TypeConstants.charType
     ]
 
 let rec resolveTypeAnnotation (registry: TraitRegistry) (ptype: FType) : HMType =
@@ -1314,7 +1324,24 @@ let rec infer (env: Env) (expr: Expr) : HMType * TypedExpr =
 
                     slot)
 
-            let restArgTypes =
+            // The rest arguments become *one* argument: an array. That is what
+            // the flat type says — `#:rest` resolves to a single `(Array %a)`
+            // parameter — and the typed tree has to agree with it.
+            //
+            // It used to hand `TApply` the rest arguments spread flat, N of
+            // them against a type with one parameter, and rely on C# `params`
+            // to put them back together at the call site. That works only when
+            // the callee is emitted as a real `params` method. Alias the
+            // function to a value — `(def f list)` — and the callee is a
+            // `Func<int[], SchemeList<int>>` field, delegates have no `params`
+            // semantics, and `f(1, 2, 3)` fails to compile in C# after passing
+            // the type checker. Materializing the array here makes the two
+            // spellings the same call. C# still accepts an explicit array for a
+            // `params` parameter, so the direct case is unaffected.
+            //
+            // `LoopLowering` already builds the same node for a tail call into
+            // a rest parameter.
+            let restArgTypes, restTypedArgs =
                 match meta.RestParam with
                 | Some _ ->
                     let elemSlot = freshMeta ()
@@ -1322,11 +1349,16 @@ let rec infer (env: Env) (expr: Expr) : HMType * TypedExpr =
                     for (rt, _) in restArgs do
                         unify env.Registry rt elemSlot
 
-                    [TCon("Array", [elemSlot])]
+                    let arrayType = TCon("Array", [elemSlot])
+
+                    [ arrayType ],
+                    [ ({ Type = arrayType
+                         Range = r
+                         Node = TArrayMake(restArgs |> List.map snd) }: TypedExpr) ]
                 | None ->
                     if not restArgs.IsEmpty then
                         failwithf $"Too many arguments at line %d{r.Start.Line}"
-                    []
+                    [], []
 
             let allFlatTypes = (mandatoryArgs |> List.map fst) @ kwArgTypes @ restArgTypes
             unify env.Registry targetType (TFun(allFlatTypes, retType))
@@ -1334,9 +1366,10 @@ let rec infer (env: Env) (expr: Expr) : HMType * TypedExpr =
             let typedKwArgs =
                 keywordArgs |> List.map (fun (n, (_, te)) -> (n, te))
 
-            // Positional args in TApply = mandatory + rest (keyword args are separate)
+            // Positional args in TApply = mandatory + the rest array (keyword
+            // args are separate)
             let positionalTypedArgs =
-                (mandatoryArgs |> List.map snd) @ (restArgs |> List.map snd)
+                (mandatoryArgs |> List.map snd) @ restTypedArgs
 
             retType,
             { Type = retType
@@ -1590,6 +1623,14 @@ let rec infer (env: Env) (expr: Expr) : HMType * TypedExpr =
         { Type = t
           Range = r
           Node = TSymbol sym }
+
+    | EChar(c, r) ->
+        let t = TypeConstants.charType
+
+        t,
+        { Type = t
+          Range = r
+          Node = TChar c }
 
     | EKeyword(kw, r) ->
         let t = TypeConstants.keywordType
@@ -1855,11 +1896,25 @@ let registerTypeDefs (isRec: bool) (typeDefs: TypeDef list) (env: Env) : Env =
                     { finalRegistry with
                         RecordFields = Map.add fName (owners @ [ td.Name ]) finalRegistry.RecordFields }
         | Union cases ->
+            // Collected alongside the constructor bindings so that literal
+            // elaboration can ask the inverse question the bindings cannot
+            // answer: not "what is this constructor's type?" but "which case of
+            // this union could carry this payload?".
+            let mutable caseTable = []
+
             for case in cases do
-                let caseName, resolvedArgs =
+                // `isLiteral` is always false for now. `#:literal` is not
+                // parseable yet — `parseType` has no `Keyword` case, so
+                // `(ProcStr String #:literal)` is a parse error — and it is
+                // only consulted when two cases of one union match the same
+                // payload. It lands with the ambiguity handling, together with
+                // the decision about how the marker survives module export
+                // (`Program.fs:422` serializes union cases and would have to
+                // carry it).
+                let caseName, resolvedArgs, isLiteral =
                     match case with
-                    | SimpleCase(n, _) -> n, []
-                    | DataCase(n, types, _) -> n, types |> List.map (resolveTypeAnnotation finalRegistry)
+                    | SimpleCase(n, _) -> n, [], false
+                    | DataCase(n, types, _) -> n, types |> List.map (resolveTypeAnnotation finalRegistry), false
                 let schemeArgs = tArgs
                 let consScheme =
                     if resolvedArgs.IsEmpty then
@@ -1867,6 +1922,10 @@ let registerTypeDefs (isRec: bool) (typeDefs: TypeDef list) (env: Env) : Env =
                     else
                         Scheme(schemeArgs, [], TFun(resolvedArgs, parentType))
                 finalBindings <- Map.add caseName { Scheme = consScheme; IsMutable = false } finalBindings
+                caseTable <- caseTable @ [ (caseName, resolvedArgs, isLiteral) ]
+
+            finalRegistry <- { finalRegistry with Unions = Map.add td.Name (tArgs, caseTable) finalRegistry.Unions }
+
 
     { env with Registry = finalRegistry; Bindings = finalBindings }
 
@@ -1901,6 +1960,30 @@ let rec checkDecl (env: Env) (sigs: Map<string, HMType * FType option * (string 
                         Scheme([], [], exprType)
                   IsMutable = false }
                 env
+
+        // Keyword and rest metadata travels with a `def`'s signature too, for
+        // the same reason it travels with `extern`'s: `FunMeta` is what carries
+        // the *shape* of a call, and the flat function type alone cannot spread
+        // arguments. Without this, aliasing a variadic function bound its
+        // array form and nothing else — `(def f list)` typechecked, and then
+        // `(f 1 2 3)` failed on arity because `f` had no metadata to spread by.
+        //
+        // Only `defun`, `extern` and imported signatures used to register it,
+        // so `def` was the one declaration form where a `#:rest` signature was
+        // accepted and then silently meant something narrower.
+        let newEnv =
+            match Map.tryFind name sigs with
+            | Some(_, Some(TArrow(mandatory, keywords, restOpt, _, _)), _) when
+                restOpt.IsSome || not keywords.IsEmpty
+                ->
+                let funMeta =
+                    { MandatoryCount = mandatory.Length
+                      KeywordParams =
+                        keywords |> List.map (fun (n, ft) -> n, resolveTypeAnnotation env.Registry ft)
+                      RestParam = restOpt |> Option.map (resolveTypeAnnotation env.Registry) }
+
+                { newEnv with FunMetas = Map.add name funMeta newEnv.FunMetas }
+            | _ -> newEnv
 
         newEnv, Map.remove name sigs, [ TDef(name, typedExpr, exprType, r) ]
 

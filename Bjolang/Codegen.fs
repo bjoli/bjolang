@@ -104,6 +104,10 @@ let mapPrimitiveType (name: string) =
     | "Map" -> "Map.Map"
     | "Keyword" | "Bjolang.Keyword" -> "BjolangRuntime.Keyword"
     | "Symbol" | "Bjolang.Symbol" -> "BjolangRuntime.Symbol"
+    // Fully qualified: `BjoChar` lives in the `Bjolang.Runtime` namespace,
+    // while `Keyword` and `Symbol` are nested in the global `BjolangRuntime`
+    // static class that the generated file has a `using static` for.
+    | "Char" | "Bjolang.Char" -> "Bjolang.Runtime.BjoChar"
     | _ -> name
 
 // Promoted to `Bjolang.Naming`, which the passes that run before code
@@ -344,6 +348,9 @@ let rec serializePattern (p: Parser.Pattern) : string =
     | Parser.PIdent(n, _) -> n
     | Parser.PInt(v, _) -> v
     | Parser.PString(v, _) -> "\"" + escapeSexpr v + "\""
+    // Always the hex spelling: it round-trips through the lexer for every
+    // codepoint, including ones with no name and ones that are not printable.
+    | Parser.PChar(c, _) -> $"#\\x%X{c}"
     | Parser.PKeyword(k, _) -> "#:" + k
     | Parser.PQuotedSymbol(s, _) -> "'" + s
     // Always parenthesized, even with no arguments. A bare name reads back as a
@@ -377,6 +384,7 @@ let rec serializeExpr (e: Parser.Expr) : string =
     match e with
     | Parser.EInt(v, _) -> v
     | Parser.EString(v, _) -> "\"" + escapeSexpr v + "\""
+    | Parser.EChar(c, _) -> $"#\\x%X{c}"
     | Parser.EQuotedSymbol(s, _) -> "'" + s
     | Parser.EKeyword(k, _) -> "#:" + k
     | Parser.EIdent(n, _) -> n
@@ -597,6 +605,9 @@ let rec generatePattern (ctx: CodegenContext) (pat: TypedPattern) : unit =
     | TPIdent name -> append ctx $"var {sanitizeIdent name}"
     | TPInt value -> append ctx value
     | TPString value -> append ctx $"\"%s{escapeStringLiteral value}\""
+    // A property pattern rather than a constant: `BjoChar` is a record struct,
+    // and C# has no literal syntax for one.
+    | TPChar c -> append ctx $"Bjolang.Runtime.BjoChar {{ Value: %d{c} }}"
     | TPKeyword k -> append ctx $"BjolangRuntime.Keyword {{ Name: \"{escapeStringLiteral k}\" }}"
     | TPSymbol s -> append ctx $"BjolangRuntime.Symbol {{ Name: \"{escapeStringLiteral s}\" }}"
     // `Option` is the runtime's `Option<T>` struct — a flag and a value rather
@@ -723,6 +734,7 @@ let rec generateExpr (ctx: CodegenContext) (expr: TypedExpr) : unit =
     match expr.Node with
     | TInt i -> append ctx i
     | TString s -> append ctx $"\"%s{escapeStringLiteral s}\""
+    | TChar c -> append ctx $"new Bjolang.Runtime.BjoChar(%d{c})"
     | TKeyword k -> append ctx $"BjolangRuntime.Keyword.Intern(\"{escapeStringLiteral k}\")"
     | TSymbol s -> append ctx $"BjolangRuntime.Symbol.Intern(\"{escapeStringLiteral s}\")"
     // A dictionary singleton: "Foldable_Vec::Instance" with the impl class's own

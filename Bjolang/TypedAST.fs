@@ -74,6 +74,12 @@ module TypeConstants =
     let KeywordName = "Keyword"
     [<Literal>]
     let SymbolName = "Symbol"
+    /// A Unicode scalar value, backed by `Bjolang.Runtime.BjoChar`.
+    ///
+    /// Deliberately not `System.Char`: a C# char is a 16-bit UTF-16 code unit,
+    /// which cannot hold an astral codepoint on its own.
+    [<Literal>]
+    let CharName = "Char"
 
     let intType = TCon(Int32Name, [])
     let stringType = TCon(StringName, [])
@@ -82,6 +88,7 @@ module TypeConstants =
     let objType = TCon(ObjectName, [])
     let keywordType = TCon(KeywordName, [])
     let symbolType = TCon(SymbolName, [])
+    let charType = TCon(CharName, [])
     
     let byteType = TCon(ByteName, [])
     let shortType = TCon(Int16Name, [])
@@ -166,6 +173,7 @@ and TPatternNode =
     | TPWildcard
     | TPInt of string
     | TPString of string
+    | TPChar of int
     | TPKeyword of string
     | TPSymbol of string
     | TPIdent of string
@@ -186,6 +194,8 @@ and TExprNode =
     | TIdent of string * HMType list
     | TKeyword of string
     | TSymbol of string
+    /// A Unicode scalar value, as a codepoint.
+    | TChar of int
     | TLet of string * bool * string list * TypedExpr * TypedExpr
     | TLetRec of (string * bool * string list * TypedExpr) list * TypedExpr
     | TLetTuple of string list * TypedExpr * TypedExpr
@@ -454,6 +464,18 @@ type TraitRegistry =
       /// the last owner made a shared field name silently resolve to whichever
       /// type happened to be declared last.
       RecordFields: Map<string, string list>
+      /// Union type name -> (type parameters, cases as (caseName, payload
+      /// types, isLiteral)).
+      ///
+      /// `registerTypeDefs` otherwise registers each case as an ordinary
+      /// constructor binding and throws the union structure away. Literal
+      /// elaboration needs it back: given an expected type and a payload, it
+      /// has to ask which case of that union could carry the payload.
+      ///
+      /// `isLiteral` records a `#:literal` marker on the case, which
+      /// designates it as the injection target when two cases of the same
+      /// union carry the same payload type.
+      Unions: Map<string, string list * (string * HMType list * bool) list>
       /// Classes brought in by `import/class`, keyed by alias.
       ///
       /// Each one is *also* registered in `Aliases`, so that a signature may
@@ -466,6 +488,94 @@ type TraitRegistry =
 
     member this.IsTraitDefinedLocally(name) = Set.contains name this.LocalTraits
     member this.IsTypeDefinedLocally(name) = Set.contains name this.LocalTypes
+
+    /// Cases of `unionName` carrying exactly one payload field that could hold
+    /// `payload`, with the union's type arguments already substituted in.
+    ///
+    /// This runs *speculatively*, while looking for a constructor to inject
+    /// around a literal, so it must never bind a `MetaVar`: the answer is
+    /// structural yes/no rather than a unification. `unify` would corrupt the
+    /// inference state for the candidates it rejected on the way.
+    ///
+    /// An unbound metavariable on either side matches anything. That wildcard
+    /// is what makes a nested list literal work at all — at expected
+    /// `ProcItem` a nested `'(…)` arrives as `TCon("List",[?m])` with `?m`
+    /// still unbound, and it has to match a declared payload of
+    /// `(List ProcItem)`. The cost is over-reporting: a union carrying both
+    /// `ProcSub of (List ProcItem)` and `ProcNums of (List Int)` calls every
+    /// nested literal ambiguous, because `(List ?m)` matches both. That is a
+    /// deliberate trade — an ambiguity error is honest, and `#:literal` or an
+    /// explicit constructor resolves it.
+    ///
+    /// `#:literal` is applied here rather than by the caller: when more than
+    /// one case matches and exactly one is marked, that one wins. The caller's
+    /// rule is then simply zero / one / many.
+    member this.CandidateCases (unionName: string) (typeArgs: HMType list) (payload: HMType) : (string * HMType list) list =
+        // A local dereference, because `prune` lives in `Unification`, which is
+        // compiled after this file.
+        let rec deref t =
+            match t with
+            | TMeta { Value = Some inner } -> deref inner
+            | _ -> t
+
+        let rec matches pat conc =
+            match deref pat, deref conc with
+            // An unbound meta is a hole nothing has decided yet, and a leftover
+            // rigid variable is a slot that takes anything. Neither is written
+            // to here.
+            | TMeta _, _
+            | _, TMeta _
+            | TVar _, _
+            | _, TVar _ -> true
+            | TCon(n1, a1), TCon(n2, a2) ->
+                n1 = n2 && a1.Length = a2.Length && List.forall2 matches a1 a2
+            | TFun(a1, r1), TFun(a2, r2) ->
+                a1.Length = a2.Length && List.forall2 matches a1 a2 && matches r1 r2
+            | TTuple a1, TTuple a2 ->
+                a1.Length = a2.Length && List.forall2 matches a1 a2
+            | p, c -> p = c
+
+        match Map.tryFind unionName this.Unions with
+        | None -> []
+        | Some (typeParams, cases) ->
+            let subst =
+                if typeParams.Length = typeArgs.Length then
+                    List.zip typeParams typeArgs |> Map.ofList
+                else
+                    Map.empty
+
+            let rec applySubst t =
+                match t with
+                | TVar n ->
+                    match Map.tryFind n subst with
+                    | Some concrete -> concrete
+                    | None -> t
+                | TCon(n, args) -> TCon(n, List.map applySubst args)
+                | TFun(args, ret) -> TFun(List.map applySubst args, applySubst ret)
+                | TTuple args -> TTuple(List.map applySubst args)
+                | _ -> t
+
+            let matching =
+                cases
+                |> List.choose (fun (caseName, payloadTypes, isLiteral) ->
+                    match payloadTypes with
+                    | [ single ] ->
+                        let substituted = applySubst single
+
+                        if matches substituted payload then
+                            Some(caseName, [ substituted ], isLiteral)
+                        else
+                            None
+                    // A nullary case carries nothing, and a multi-field case
+                    // cannot be built from one payload. Neither is a candidate.
+                    | _ -> None)
+
+            match matching with
+            | [ (name, payloads, _) ] -> [ (name, payloads) ]
+            | many ->
+                match many |> List.filter (fun (_, _, isLiteral) -> isLiteral) with
+                | [ (name, payloads, _) ] -> [ (name, payloads) ]
+                | _ -> many |> List.map (fun (name, payloads, _) -> (name, payloads))
 
     member this.ResolveAssociatedType (traitName: string) (assocName: string) (implType: HMType) : HMType option =
         // Pattern-match a stored generic type against a concrete type to build

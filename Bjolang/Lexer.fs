@@ -31,7 +31,12 @@ module Lexer =
         | Dot
         | Spread
         | StringLit of string
-        | CharLit of char
+        /// A Unicode scalar value, not a UTF-16 code unit.
+        ///
+        /// `BjoChar` is a 32-bit codepoint, so this cannot be a C# `char`: an
+        /// astral character written literally in source arrives as a surrogate
+        /// pair and has to be recombined into the one codepoint it stands for.
+        | CharLit of int
         | NumberLit of string
         | Keyword of string
         | Symbol of string
@@ -234,27 +239,67 @@ module Lexer =
                         let len = nextPos - pos
                         emit (Keyword(input.Substring(pos + 2, len - 2))) len
 
-                    | '\\' -> // Scheme Character Literals (#\c, #\space)
+                    | '\\' -> // Scheme character literals (#\c, #\space, #\x41)
                         let rec readCharLiteral p =
                             if p < length && isSymbolChar input[p] then
                                 readCharLiteral (p + 1)
                             else
                                 p
 
-                        let nextPos = readCharLiteral (pos + 2)
-                        let len = nextPos - pos
-                        let charStr = input.Substring(pos + 2, len - 2)
+                        let nameEnd = readCharLiteral (pos + 2)
 
-                        let charVal =
-                            match charStr.ToLowerInvariant() with
-                            | "space" -> ' '
-                            | "newline" -> '\n'
-                            | "tab" -> '\t'
-                            | "return" -> '\r'
-                            | _ when charStr.Length = 1 -> charStr[0]
-                            | _ -> failwithf $"Invalid character literal #\\%s{charStr} at line %d{line}, col %d{col}"
+                        // A surrogate pair is *one* character spelled with two
+                        // UTF-16 units, and it has to be recognised before the
+                        // name rule below: both halves pass `isSymbolChar`, so
+                        // an emoji would otherwise be read as a two-character
+                        // name and rejected.
+                        let isAstral =
+                            pos + 3 < length
+                            && Char.IsHighSurrogate input[pos + 2]
+                            && Char.IsLowSurrogate input[pos + 3]
 
-                        emit (CharLit charVal) len
+                        // A name is only a name if it is longer than one
+                        // character. Otherwise the literal is whatever single
+                        // character follows the backslash — including one that
+                        // is not a symbol character at all, so `#\(`, `#\;` and
+                        // `#\ ` all lex, as R7RS requires. Reading the name run
+                        // first and falling back is what lets both spellings
+                        // share one rule.
+                        if isAstral then
+                            emit (CharLit(Char.ConvertToUtf32(input[pos + 2], input[pos + 3]))) 4
+                        elif nameEnd - (pos + 2) > 1 then
+                            let name = input.Substring(pos + 2, nameEnd - (pos + 2))
+                            let len = nameEnd - pos
+
+                            let codepoint =
+                                match name.ToLowerInvariant() with
+                                | "space" -> 0x20
+                                | "newline" | "linefeed" -> 0x0A
+                                | "tab" -> 0x09
+                                | "return" -> 0x0D
+                                | "null" | "nul" -> 0x00
+                                | "alarm" -> 0x07
+                                | "backspace" -> 0x08
+                                | "delete" | "rubout" -> 0x7F
+                                | "escape" | "esc" -> 0x1B
+                                | hex when hex.StartsWith "x" && hex.Length > 1 ->
+                                    match System.Int32.TryParse(
+                                              hex.Substring 1,
+                                              Globalization.NumberStyles.HexNumber,
+                                              Globalization.CultureInfo.InvariantCulture) with
+                                    | true, value when value >= 0 && value <= 0x10FFFF -> value
+                                    | _ ->
+                                        failwithf
+                                            $"Invalid character literal #\\%s{name} at line %d{line}, col %d{col}: not a Unicode scalar value."
+                                | _ ->
+                                    failwithf
+                                        $"Unknown character name #\\%s{name} at line %d{line}, col %d{col}."
+
+                            emit (CharLit codepoint) len
+                        elif pos + 2 < length then
+                            emit (CharLit(int input[pos + 2])) 3
+                        else
+                            failwithf $"Unterminated character literal at line %d{line}, col %d{col}."
 
                     | _ -> // Fallback for booleans (#t, #f) or symbols starting with #
                         let nextPos = readSymbol pos

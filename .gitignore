@@ -26,7 +26,7 @@ Bjolang/obj/
 Bjolang/Playground/**/*
 !Bjolang/Playground/**/*.bjo
 !Bjolang/Playground/**/*.py
-
+!Bjolang/TestFiles/**/*.bj
 # Written by the frontend on every --debug compile.
 Bjolang/out.cs
 
@@ -55,5 +55,11 @@ Bjolang/cs-snapshots/**/*
 
 # But make sure standard library source files are not ignored
 !Bjolang/lib/std/**/*.bjo
+# Directories have to be re-included explicitly. Git does not descend into an
+# excluded directory, so a negation for files inside one never gets the chance
+# to match: without this line every .bjo under TestFiles/errors/ and
+# TestFiles/inc/ was silently untracked, which is how ten error tests came to
+# sit outside version control.
+!Bjolang/TestFiles/**/
 !Bjolang/TestFiles/**/*.bjo
 *.diff

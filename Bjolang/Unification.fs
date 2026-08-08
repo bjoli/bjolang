@@ -14,9 +14,23 @@ let lookup (env: Env) (name: string) : Binding =
     | Some scheme -> scheme
     | None -> failwithf $"Unbound variable: %s{name}"
 
+/// Introduce `name`, shadowing whatever it named before.
+///
+/// The `FunMetas` removal is the shadowing half. `FunMeta` records the *shape*
+/// of a call — how many mandatory parameters, which keywords, whether there is
+/// a rest parameter — and `infer` looks it up by name alone, so an entry left
+/// behind belongs to a function the name no longer refers to. Binding `list`
+/// or a parameter named `path-combine` locally then made the call site try to
+/// spread arguments into an array the local binding has no parameter for, and
+/// fail with `Cannot unify Int32 with Array<Int32>` — an error naming a type
+/// the program never mentions.
+///
+/// Callers that introduce a binding which *is* variadic add its `FunMeta` back
+/// immediately after calling this; `DDefun` and `DDef` both do.
 let addBinding (name: string) (binding: Binding) (env: Env) : Env =
     { env with
-        Bindings = Map.add name binding env.Bindings }
+        Bindings = Map.add name binding env.Bindings
+        FunMetas = Map.remove name env.FunMetas }
 
 let rec prune (registry: TraitRegistry) (t: HMType) : HMType =
     match t with
